@@ -252,7 +252,7 @@
 
 ### Managed Responses state
 
-- [ ] Implement response-chain reconstruction
+- [x] Implement response-chain reconstruction
   - Add `internal/sessions/service.go` and `internal/sessions/reconstruct.go`.
   - Resolve `previous_response_id`, traverse newest-to-oldest with cycle detection, reverse the chain, and combine prior canonical request inputs and terminal outputs before appending current input.
   - Retain message, function call/output, reasoning summary, and encrypted reasoning content required for continuity; remove upstream `previous_response_id`.
@@ -265,14 +265,14 @@
   - Expire stored nodes at 30 days and run hourly cleanup.
   - Definition of done: incomplete/failed responses are not persisted, successful chains survive restart, and expired/store-false IDs are unusable.
 
-- [ ] Implement response account affinity with safe failover
+- [x] Implement response account affinity with safe failover
   - Record the successful account on each stored response node.
   - Prefer that account for the next turn when healthy and model-capable; otherwise supply the reconstructed transcript to the normal scheduler.
   - Definition of done: healthy chains remain sticky, disabled/cooling/deleted accounts fail over without losing prior messages, and no upstream HTTP request contains the downstream `previous_response_id`.
 
 ### Routing, cooldowns, and execution
 
-- [ ] Implement model-aware round-robin scheduling
+- [x] Implement model-aware round-robin scheduling
   - Add `internal/routing/scheduler.go`.
   - Maintain a cursor per resolved upstream model, filter disabled/invalid/cooling/incompatible accounts, and attempt each candidate at most once per request.
   - Treat unknown model capability as fallback eligibility only when no known-compatible account is available.

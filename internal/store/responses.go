@@ -58,6 +58,12 @@ func (r *ResponseRepository) Get(ctx context.Context, id string, now time.Time) 
 	}
 	return v, nil
 }
+
+func (r *ResponseRepository) GetLink(ctx context.Context, id string, now time.Time) (previousID, preferredAccountID string, err error) {
+	var previous, account sql.NullString
+	err = r.db.QueryRowContext(ctx, `SELECT previous_response_id,preferred_account_id FROM response_sessions WHERE response_id=? AND expires_at>?`, id, now.Unix()).Scan(&previous, &account)
+	return previous.String, account.String, err
+}
 func (r *ResponseRepository) Cleanup(ctx context.Context, before time.Time) (int64, error) {
 	result, err := r.db.ExecContext(ctx, `DELETE FROM response_sessions WHERE expires_at<?`, before.Unix())
 	if err != nil {
