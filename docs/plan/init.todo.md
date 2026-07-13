@@ -67,30 +67,30 @@
   - Encrypt sensitive values with AES-256-GCM using a fresh random nonce per value and a versioned binary/text envelope.
   - Definition of done: round-trip, tamper, wrong-key, nonce-uniqueness, empty-value, and malformed-envelope tests pass; decryption failures never return partial plaintext.
 
-- [ ] Implement account persistence
+- [x] Implement account persistence
   - Add `internal/store/accounts.go` and account storage types.
   - Encrypt access, refresh, ID tokens, email, subject, token endpoint metadata, and any raw identity claims.
   - Generate the account uniqueness fingerprint as `HMAC(identity_key, issuer + "\x00" + subject)`; relogin updates the existing account while preserving its stable ID and label unless explicitly changed.
   - Persist enabled/status/expiry/last-refresh/last-error timestamps without storing raw tokens in searchable columns.
   - Definition of done: account CRUD and relogin tests pass, duplicate subject records cannot be created, and a raw database byte scan cannot find fixture credentials.
 
-- [ ] Implement model capability and cooldown persistence
+- [x] Implement model capability and cooldown persistence
   - Add `internal/store/model_capabilities.go` and `internal/store/cooldowns.go`.
   - Persist per-account model support, backend-search capability, context/max-output metadata, discovery freshness, cooldown deadline, backoff level, and last classified error.
   - Definition of done: model/cooldown state survives database close/reopen and expired cooldowns are promoted back to ready state deterministically.
 
-- [ ] Implement encrypted OAuth-session persistence
+- [x] Implement encrypted OAuth-session persistence
   - Add `internal/store/oauth_sessions.go`.
   - Store state hash, encrypted device code, user code, verification URLs, token endpoint, poll interval, expiry, status, and sanitized error.
   - Ensure expired, completed, cancelled, and failed sessions cannot be resumed as pending.
   - Definition of done: a pending device flow survives simulated service restart and resumes polling; terminal sessions are immutable and cleaned after retention.
 
-- [ ] Implement encrypted usage snapshot persistence
+- [x] Implement encrypted usage snapshot persistence
   - Add `internal/store/usage.go`.
   - Store normalized monthly/weekly fields, local counters, fetched time, stale/error state, and encrypted raw payloads.
   - Definition of done: latest snapshot lookup, stale fallback, encrypted raw-data retrieval for internal diagnostics, and retention cleanup pass tests.
 
-- [ ] Implement encrypted Responses-session persistence
+- [x] Implement encrypted Responses-session persistence
   - Add `internal/store/responses.go`.
   - Store response ID, previous ID, model, preferred account, encrypted canonical input/output, store flag, creation time, and expiry.
   - Add indexed lookups for response ID, previous chain traversal, and expiry cleanup.
