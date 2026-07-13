@@ -278,13 +278,13 @@
   - Treat unknown model capability as fallback eligibility only when no known-compatible account is available.
   - Definition of done: deterministic cycle, concurrent access, account mutation, model-specific candidate, and affinity-preference tests pass without races.
 
-- [ ] Implement upstream error classification
+- [x] Implement upstream error classification
   - Add `internal/routing/errors.go`.
   - Classify validation/model errors, unauthorized/invalid-grant, payment/permission failures, exact free-usage exhaustion, generic 429, transient 408/5xx, connection setup failure, and client cancellation.
   - Parse `Retry-After` and the known `subscription:free-usage-exhausted` payload; use billing reset when available, otherwise 24 hours for exact free-usage exhaustion.
   - Definition of done: each class maps to the locked retry/cooldown/status behavior and sanitized public error.
 
-- [ ] Implement persisted cooldown transitions
+- [x] Implement persisted cooldown transitions
   - Add `internal/routing/cooldown.go`.
   - Use explicit Retry-After when present, exponential one-to-thirty-minute cooldown for generic 429, and 60 seconds for transient 408/500/502/503/504.
   - Disable accounts on invalid grant; apply quota/transient state at model scope unless the error is account-wide.

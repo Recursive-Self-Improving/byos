@@ -30,6 +30,11 @@ func TestSchedulerRoundRobinCapabilitiesAndAffinity(t *testing.T) {
 	if len(fallback) != 1 || fallback[0].ID != "unknown" {
 		t.Fatalf("unknown fallback=%v", fallback)
 	}
+	globalCooling := []Candidate{{ID: "global", Enabled: true, Valid: true, CooldownUntil: map[string]time.Time{"*": now.Add(time.Hour)}}, {ID: "ready", Enabled: true, Valid: true}}
+	globalOrder, err := scheduler.Order("other-model", globalCooling, "", now)
+	if err != nil || len(globalOrder) != 1 || globalOrder[0].ID != "ready" {
+		t.Fatalf("global cooldown order = %v, %v", globalOrder, err)
+	}
 }
 func TestSchedulerConcurrentAccess(t *testing.T) {
 	scheduler := NewScheduler()

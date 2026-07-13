@@ -31,6 +31,9 @@ func (s *Scheduler) Order(model string, accounts []Candidate, preferred string, 
 		if until := account.CooldownUntil[model]; until.After(now) {
 			continue
 		}
+		if until := account.CooldownUntil["*"]; until.After(now) {
+			continue
+		}
 		if account.CapabilitiesKnown {
 			if account.Capabilities[model] {
 				known = append(known, account)
