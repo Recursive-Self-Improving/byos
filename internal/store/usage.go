@@ -70,7 +70,7 @@ func (r *UsageRepository) StaleFallback(ctx context.Context, accountID, refreshE
 	return snapshot, nil
 }
 func (r *UsageRepository) Cleanup(ctx context.Context, before time.Time) (int64, error) {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM usage_snapshots WHERE fetched_at<?`, before.Unix())
+	result, err := r.db.ExecContext(ctx, `DELETE FROM usage_snapshots WHERE rowid IN (SELECT rowid FROM usage_snapshots WHERE fetched_at<? LIMIT ?)`, before.Unix(), cleanupBatchSize)
 	if err != nil {
 		return 0, err
 	}

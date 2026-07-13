@@ -1,3 +1,6 @@
+// Portions adapted from CLIProxyAPI/v7 internal/auth/xai/xai.go (MIT): device-token polling and slow-down handling.
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/auth/xai/xai.go
+
 package xai
 
 import (
@@ -10,23 +13,21 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"supergrok-api/internal/store"
 )
 
 type TokenResponse struct {
 	AccessToken, RefreshToken, IDToken, TokenType, TokenEndpoint string
 	ExpiresIn                                                    int
+	ExpiresAt                                                    time.Time
 }
 type OAuthError struct{ Code, Description string }
 
-func (e *OAuthError) Error() string {
-	if e.Description != "" {
-		return "xAI OAuth " + e.Code + ": " + e.Description
-	}
-	return "xAI OAuth " + e.Code
-}
+func (e *OAuthError) Error() string { return "xAI OAuth " + e.Code }
 func (s *Service) Poll(ctx context.Context, state string) (TokenResponse, error) {
 	result := s.polls.DoChan(state, func() (any, error) {
-		pollCtx, cancel := context.WithCancel(context.Background())
+		pollCtx, cancel := context.WithCancel(ctx)
 		s.pollMu.Lock()
 		s.pollCancels[state] = cancel
 		s.pollMu.Unlock()
@@ -49,9 +50,12 @@ func (s *Service) Poll(ctx context.Context, state string) (TokenResponse, error)
 	}
 }
 func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error) {
-	session, err := s.sessions.GetPending(ctx, state, s.now())
+	session, err := s.sessions.GetResumable(ctx, state, s.now())
 	if err != nil {
 		return TokenResponse{}, err
+	}
+	if session.Status == "authorized" {
+		return s.authorizedToken(ctx, state, session)
 	}
 	interval := session.PollInterval
 	if interval < MinimumPollInterval {
@@ -61,7 +65,7 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 	for {
 		now := s.now()
 		if !now.Before(session.ExpiresAt) {
-			_ = s.sessions.Transition(context.Background(), state, "expired", "device code expired")
+			_ = s.sessions.Transition(context.Background(), state, "expired", oauthStatusMessage("expired_token"))
 			return TokenResponse{}, &OAuthError{Code: "expired_token"}
 		}
 		if !first {
@@ -74,7 +78,7 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 			}
 			now = s.now()
 			if !now.Before(session.ExpiresAt) {
-				_ = s.sessions.Transition(context.Background(), state, "expired", "device code expired")
+				_ = s.sessions.Transition(context.Background(), state, "expired", oauthStatusMessage("expired_token"))
 				return TokenResponse{}, &OAuthError{Code: "expired_token"}
 			}
 			if _, err := s.sessions.GetPending(ctx, state, now); err != nil {
@@ -91,10 +95,14 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 			if strings.TrimSpace(token.AccessToken) == "" {
 				return TokenResponse{}, errors.New("xAI token response missing access_token")
 			}
-			if err := s.sessions.Transition(ctx, state, "completed", ""); err != nil {
+			token.TokenEndpoint = session.TokenEndpoint
+			if token.ExpiresIn > 0 {
+				token.ExpiresAt = s.now().Add(time.Duration(token.ExpiresIn) * time.Second)
+			}
+			authorization := store.OAuthAuthorization{AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken, TokenType: token.TokenType, ExpiresIn: token.ExpiresIn, AuthorizedAt: s.now(), ExpiresAt: token.ExpiresAt}
+			if err := s.sessions.Authorize(ctx, state, authorization, s.now()); err != nil {
 				return TokenResponse{}, err
 			}
-			token.TokenEndpoint = session.TokenEndpoint
 			return token, nil
 		case "authorization_pending":
 			continue
@@ -102,12 +110,41 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 			interval += 5 * time.Second
 			continue
 		case "access_denied", "expired_token":
-			_ = s.sessions.Transition(context.Background(), state, map[string]string{"access_denied": "failed", "expired_token": "expired"}[code], description)
+			_ = s.sessions.Transition(context.Background(), state, map[string]string{"access_denied": "failed", "expired_token": "expired"}[code], oauthStatusMessage(code))
 			return TokenResponse{}, &OAuthError{Code: code, Description: description}
 		default:
-			_ = s.sessions.Transition(context.Background(), state, "failed", description)
+			_ = s.sessions.Transition(context.Background(), state, "failed", oauthStatusMessage(code))
 			return TokenResponse{}, &OAuthError{Code: code, Description: description}
 		}
+	}
+}
+
+func (s *Service) authorizedToken(ctx context.Context, state string, session store.OAuthSession) (TokenResponse, error) {
+	if session.Authorization == nil || strings.TrimSpace(session.Authorization.AccessToken) == "" {
+		_ = s.sessions.Transition(context.Background(), state, "failed", oauthStatusMessage("invalid_authorization"))
+		return TokenResponse{}, errors.New("persisted xAI authorization is incomplete")
+	}
+	value := session.Authorization
+	if !value.ExpiresAt.IsZero() && !s.now().Before(value.ExpiresAt) {
+		_ = s.sessions.Transition(context.Background(), state, "expired", oauthStatusMessage("expired_token"))
+		return TokenResponse{}, &OAuthError{Code: "expired_token"}
+	}
+	select {
+	case <-ctx.Done():
+		return TokenResponse{}, ctx.Err()
+	default:
+	}
+	return TokenResponse{AccessToken: value.AccessToken, RefreshToken: value.RefreshToken, IDToken: value.IDToken, TokenType: value.TokenType, TokenEndpoint: session.TokenEndpoint, ExpiresIn: value.ExpiresIn, ExpiresAt: value.ExpiresAt}, nil
+}
+
+func oauthStatusMessage(code string) string {
+	switch code {
+	case "access_denied":
+		return "Device authorization was denied."
+	case "expired_token":
+		return "Device authorization expired."
+	default:
+		return "Device authorization failed."
 	}
 }
 func (s *Service) exchange(ctx context.Context, endpoint, deviceCode string) (TokenResponse, string, string, error) {
@@ -148,14 +185,20 @@ func (s *Service) exchange(ctx context.Context, endpoint, deviceCode string) (To
 	return TokenResponse{AccessToken: payload.AccessToken, RefreshToken: payload.RefreshToken, IDToken: payload.IDToken, TokenType: payload.TokenType, ExpiresIn: payload.ExpiresIn}, payload.Error, payload.ErrorDescription, nil
 }
 func (s *Service) Cancel(ctx context.Context, state string) error {
-	if err := s.sessions.Transition(ctx, state, "cancelled", ""); err != nil {
+	if err := s.sessions.Transition(ctx, state, "cancelled", "Device authorization was cancelled."); err != nil {
 		return err
 	}
+	s.Stop(state)
+	return nil
+}
+
+// Stop cancels an in-memory poll without changing persisted flow state. It is
+// used during process shutdown so a pending flow can resume after restart.
+func (s *Service) Stop(state string) {
 	s.pollMu.Lock()
 	cancel := s.pollCancels[state]
 	s.pollMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	return nil
 }

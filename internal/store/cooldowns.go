@@ -58,3 +58,11 @@ func (r *CooldownRepository) AdvanceRateLimit(ctx context.Context, accountID, mo
 	value.LastErrorAt = timePtr(last)
 	return value, nil
 }
+
+func (r *CooldownRepository) PromoteExpired(ctx context.Context, now time.Time) (int64, error) {
+	result, err := r.db.ExecContext(ctx, `UPDATE account_model_states SET cooldown_until=NULL,backoff_level=0 WHERE rowid IN (SELECT rowid FROM account_model_states WHERE cooldown_until IS NOT NULL AND cooldown_until<=? LIMIT ?)`, now.Unix(), cleanupBatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}

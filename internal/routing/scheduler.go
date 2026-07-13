@@ -1,3 +1,6 @@
+// Routing semantics adapted from CLIProxyAPI/v7 sdk/cliproxy/auth/selector.go and scheduler.go (MIT).
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/tree/main/sdk/cliproxy/auth
+
 package routing
 
 import (
@@ -7,6 +10,7 @@ import (
 )
 
 var ErrNoAvailableAccounts = errors.New("no available accounts")
+var ErrModelUnavailable = errors.New("requested model is unavailable")
 
 type Candidate struct {
 	ID                string

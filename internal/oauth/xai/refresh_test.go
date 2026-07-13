@@ -67,7 +67,7 @@ func TestRefreshSingleflightRotationAndInvalidGrant(t *testing.T) {
 		t.Fatal("invalid grant succeeded")
 	}
 	disabled, err := accounts.Get(ctx, account.ID)
-	if err != nil || disabled.Enabled {
+	if err != nil || disabled.Enabled || disabled.Status != "relogin_required" || disabled.LastError == "" {
 		t.Fatalf("disabled=%+v err=%v", disabled, err)
 	}
 }
@@ -77,6 +77,21 @@ func TestNeedsRefresh(t *testing.T) {
 	later := now.Add(RefreshLead + time.Second)
 	if !NeedsRefresh(store.Account{ExpiresAt: &soon}, now) || NeedsRefresh(store.Account{ExpiresAt: &later}, now) {
 		t.Fatal("refresh lead mismatch")
+	}
+}
+func TestCredentialsUsable(t *testing.T) {
+	now := time.Now()
+	expired := now.Add(-time.Hour)
+	later := now.Add(time.Hour)
+	tests := []struct {
+		name    string
+		account store.Account
+		want    bool
+	}{{"fresh", store.Account{ExpiresAt: &later, Credentials: store.AccountCredentials{AccessToken: "token"}}, true}, {"expired refreshable", store.Account{ExpiresAt: &expired, Credentials: store.AccountCredentials{AccessToken: "token", RefreshToken: "refresh", TokenEndpoint: "https://auth.x.ai/token"}}, true}, {"expired no refresh", store.Account{ExpiresAt: &expired, Credentials: store.AccountCredentials{AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}}, false}, {"missing access", store.Account{Credentials: store.AccountCredentials{RefreshToken: "refresh", TokenEndpoint: "https://auth.x.ai/token"}}, false}}
+	for _, test := range tests {
+		if got := CredentialsUsable(test.account, now); got != test.want {
+			t.Fatalf("%s=%v", test.name, got)
+		}
 	}
 }
 

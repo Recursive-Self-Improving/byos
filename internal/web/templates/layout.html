@@ -1,0 +1,41 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SuperGrok administration</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="/admin/" aria-label="SuperGrok administration home">
+        <span class="brand-mark" aria-hidden="true">SG</span>
+        <span><strong>SuperGrok</strong><small>Administration</small></span>
+      </a>
+      {{if .Authenticated}}
+      <nav class="primary-nav" aria-label="Administration">
+        <a href="/admin/" {{if eq .Active "dashboard"}}aria-current="page"{{end}}>Dashboard</a>
+        <a href="/admin/accounts" {{if eq .Active "accounts"}}aria-current="page"{{end}}>Accounts</a>
+        <a href="/admin/usage" {{if eq .Active "usage"}}aria-current="page"{{end}}>Usage</a>
+        <a href="/admin/models" {{if eq .Active "models"}}aria-current="page"{{end}}>Models</a>
+        <a href="/admin/api-keys" {{if eq .Active "api-keys"}}aria-current="page"{{end}}>API keys</a>
+      </nav>
+      <form class="logout-form" method="post" action="/admin/logout">
+        {{.CSRFField}}
+        <button class="button button-quiet" type="submit">Sign out</button>
+      </form>
+      {{end}}
+    </div>
+  </header>
+  <main id="main-content" class="page-shell" tabindex="-1">
+    {{if .Notice}}<div class="notice notice-success" role="status">{{.Notice}}</div>{{end}}
+    {{if .LoadError}}<div class="notice notice-error" role="alert">{{.LoadError}}</div>{{end}}
+    {{template "content" .}}
+  </main>
+  <script src="/admin/static/admin.js" defer></script>
+</body>
+</html>
+{{end}}

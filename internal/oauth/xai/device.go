@@ -1,3 +1,6 @@
+// Portions adapted from CLIProxyAPI/v7 internal/auth/xai/xai.go (MIT): RFC 8628 device authorization setup.
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/auth/xai/xai.go
+
 package xai
 
 import (
@@ -47,6 +50,22 @@ type devicePayload struct {
 func NewService(discovery *DiscoveryClient, client *http.Client, sessions *store.OAuthSessionRepository, options Options) *Service {
 	client = secureOAuthClient(client)
 	return &Service{discovery: discovery, http: client, sessions: sessions, options: options.withDefaults(), now: func() time.Time { return time.Now().UTC() }, wait: waitContext, pollCancels: make(map[string]context.CancelFunc)}
+}
+
+func (s *Service) Session(ctx context.Context, state string) (store.OAuthSession, error) {
+	return s.sessions.Get(ctx, state)
+}
+
+func (s *Service) Resumable(ctx context.Context) ([]store.OAuthSession, error) {
+	return s.sessions.ListResumable(ctx, s.now())
+}
+
+func (s *Service) Complete(ctx context.Context, state, accountID string) error {
+	return s.sessions.Complete(ctx, state, accountID, s.now())
+}
+
+func (s *Service) Fail(ctx context.Context, state, sanitized string) error {
+	return s.sessions.Transition(ctx, state, "failed", sanitized)
 }
 func (s *Service) StartDevice(ctx context.Context) (DeviceAuthorization, error) {
 	discovery, err := s.discovery.Discover(ctx)

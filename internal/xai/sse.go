@@ -1,3 +1,6 @@
+// Portions adapted from CLIProxyAPI/v7 internal/runtime/executor/xai_executor.go (MIT): xAI SSE framing behavior.
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/runtime/executor/xai_executor.go
+
 package xai
 
 import (

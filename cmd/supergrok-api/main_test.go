@@ -1,22 +1,95 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
+
+	"supergrok-api/internal/app"
+	"supergrok-api/internal/config"
+	oauthxai "supergrok-api/internal/oauth/xai"
 )
 
-func TestRunPlaceholders(t *testing.T) {
-	for _, command := range []string{"serve", "login", "version"} {
-		err := run([]string{command})
-		if !errors.Is(err, errNotInitialized) {
-			t.Fatalf("run(%q) error = %v, want not initialized", command, err)
+func TestVersionCommand(t *testing.T) {
+	var output bytes.Buffer
+	deps := defaults()
+	deps.stdout = &output
+	if err := runWith(context.Background(), []string{"version"}, deps); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), version) || !strings.Contains(output.String(), commit) {
+		t.Fatalf("output=%q", output.String())
+	}
+}
+func TestServeLoadsConfigurationSecretsAndRuntime(t *testing.T) {
+	var gotPath string
+	served := false
+	deps := dependencies{loadConfig: func(path string) (config.Config, error) { gotPath = path; return config.Default(), nil }, loadSecrets: func() (config.Secrets, error) { return config.Secrets{}, nil }, newRuntime: func(context.Context, config.Config, config.Secrets, *slog.Logger) (*app.Runtime, error) {
+		return &app.Runtime{}, nil
+	}, serveRuntime: func(context.Context, *app.Runtime) error { served = true; return nil }, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+	if err := runWith(context.Background(), []string{"serve", "--config", "service.yaml"}, deps); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "service.yaml" || !served {
+		t.Fatalf("path=%q served=%v", gotPath, served)
+	}
+}
+func TestCommandsPropagateConfigurationFailure(t *testing.T) {
+	sentinel := errors.New("bad config")
+	for _, command := range []string{"serve", "login"} {
+		deps := defaults()
+		deps.loadConfig = func(string) (config.Config, error) { return config.Config{}, sentinel }
+		if err := runWith(context.Background(), []string{command}, deps); !errors.Is(err, sentinel) {
+			t.Fatalf("%s error=%v", command, err)
+		}
+	}
+}
+func TestRunRejectsUnknownOrMissingCommand(t *testing.T) {
+	for _, args := range [][]string{nil, {"unknown"}} {
+		if err := runWith(context.Background(), args, defaults()); err == nil {
+			t.Fatalf("args=%v", args)
 		}
 	}
 }
 
-func TestRunRejectsUnknownCommand(t *testing.T) {
-	if err := run([]string{"unknown"}); err == nil || !strings.Contains(err.Error(), "unknown command") {
-		t.Fatalf("run unknown error = %v", err)
+func TestVerificationURLFallback(t *testing.T) {
+	if got := verificationURL(oauthxai.DeviceAuthorization{VerificationURI: "https://auth.x.ai/device"}); got != "https://auth.x.ai/device" {
+		t.Fatalf("fallback=%q", got)
+	}
+	if got := verificationURL(oauthxai.DeviceAuthorization{VerificationURI: "https://auth.x.ai/device", VerificationURIComplete: "https://auth.x.ai/device?code=1"}); got != "https://auth.x.ai/device?code=1" {
+		t.Fatalf("complete=%q", got)
+	}
+}
+
+func TestLoginCancellationClosesRuntime(t *testing.T) {
+	t.Setenv("SUPERGROK_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32)))
+	t.Setenv("SUPERGROK_ADMIN_PASSWORD", "password")
+	t.Setenv("SUPERGROK_ADMIN_API_KEY", "admin-key")
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	var runtime *app.Runtime
+	deps := defaults()
+	deps.loadConfig = func(string) (config.Config, error) { return cfg, nil }
+	deps.newRuntime = func(ctx context.Context, cfg config.Config, secrets config.Secrets, logger *slog.Logger) (*app.Runtime, error) {
+		created, err := app.New(ctx, cfg, secrets, logger)
+		runtime = created
+		return created, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deps.loginRuntime = func(ctx context.Context, _ *app.Runtime, _ io.Writer) error { cancel(); <-ctx.Done(); return ctx.Err() }
+	err := runWith(ctx, []string{"login"}, deps)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	if runtime == nil {
+		t.Fatal("runtime not created")
+	}
+	if err := runtime.Store.DB.PingContext(context.Background()); err == nil {
+		t.Fatal("runtime database remained open")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestAccountPersistenceReloginAndPlaintextAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if relogged.ID != created.ID || relogged.Label != "primary" || !relogged.Enabled || relogged.Credentials.AccessToken != "rotated-access-token" {
+	if relogged.ID != created.ID || relogged.Label != "primary" || relogged.Enabled || relogged.Credentials.AccessToken != "rotated-access-token" {
 		t.Fatalf("relogin result = %+v", relogged)
 	}
 	list, err := repo.List(ctx)
@@ -54,13 +55,18 @@ func TestAccountPersistenceReloginAndPlaintextAbsence(t *testing.T) {
 	if err := store.Checkpoint(ctx); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(store.Path())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, secret := range []string{"subject-fixture", "secret@example.com", "access-token-fixture", "rotated-access-token", "refresh-token-fixture", "id-token-fixture"} {
-		if bytes.Contains(data, []byte(secret)) {
-			t.Fatalf("database contains %q", secret)
+	for _, path := range []string{store.Path(), store.Path() + "-wal", store.Path() + "-shm"} {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{"subject-fixture", "secret@example.com", "access-token-fixture", "rotated-access-token", "refresh-token-fixture", "id-token-fixture"} {
+			if bytes.Contains(data, []byte(secret)) {
+				t.Fatalf("%s contains %q", path, secret)
+			}
 		}
 	}
 	if err := repo.Update(ctx, created.ID, "renamed", false); err != nil {

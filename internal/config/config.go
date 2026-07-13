@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	oauthxai "supergrok-api/internal/oauth/xai"
 )
 
 const (
@@ -46,6 +49,7 @@ type Config struct {
 	Server    ServerConfig    `yaml:"server" json:"server"`
 	DataDir   string          `yaml:"data_dir" json:"data_dir"`
 	Upstream  UpstreamConfig  `yaml:"upstream" json:"upstream"`
+	OAuth     OAuthConfig     `yaml:"oauth" json:"oauth"`
 	Models    ModelsConfig    `yaml:"models" json:"models"`
 	Limits    LimitsConfig    `yaml:"limits" json:"limits"`
 	Usage     UsageConfig     `yaml:"usage" json:"usage"`
@@ -53,13 +57,18 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen string `yaml:"listen" json:"listen"`
+	Listen         string   `yaml:"listen" json:"listen"`
+	TrustedProxies []string `yaml:"trusted_proxies" json:"trusted_proxies"`
 }
 type UpstreamConfig struct {
 	CLIProxyBaseURL   string   `yaml:"cli_proxy_base_url" json:"cli_proxy_base_url"`
 	GrokClientVersion string   `yaml:"grok_client_version" json:"grok_client_version"`
 	RequestTimeout    Duration `yaml:"request_timeout" json:"request_timeout"`
 	SSEIdleTimeout    Duration `yaml:"sse_idle_timeout" json:"sse_idle_timeout"`
+}
+type OAuthConfig struct {
+	ClientID string `yaml:"client_id" json:"client_id"`
+	Scopes   string `yaml:"scopes" json:"scopes"`
 }
 type ModelsConfig struct {
 	Default   string            `yaml:"default" json:"default"`
@@ -80,6 +89,7 @@ func Default() Config {
 	return Config{
 		Server: ServerConfig{Listen: DefaultListen}, DataDir: DefaultDataDir,
 		Upstream: UpstreamConfig{CLIProxyBaseURL: DefaultCLIProxyBaseURL, GrokClientVersion: DefaultGrokClientVersion, RequestTimeout: Duration(2 * time.Minute), SSEIdleTimeout: Duration(45 * time.Second)},
+		OAuth:    OAuthConfig{ClientID: oauthxai.DefaultClientID, Scopes: oauthxai.DefaultScopes},
 		Models:   ModelsConfig{Default: DefaultModel, Aliases: map[string]string{"grok": DefaultModel}, Allowlist: []string{DefaultModel}},
 		Limits:   LimitsConfig{MaxBodyBytes: DefaultMaxBodyBytes}, Usage: UsageConfig{RefreshInterval: Duration(5 * time.Minute)},
 		Responses: ResponsesConfig{Retention: Duration(DefaultResponsesRetention)},
@@ -109,6 +119,18 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return errors.New("server.listen is required")
 	}
+	for _, value := range c.Server.TrustedProxies {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return errors.New("server.trusted_proxies cannot contain blank entries")
+		}
+		if _, err := netip.ParseAddr(value); err == nil {
+			continue
+		}
+		if _, err := netip.ParsePrefix(value); err != nil {
+			return fmt.Errorf("invalid server.trusted_proxies entry %q", value)
+		}
+	}
 	if strings.TrimSpace(c.DataDir) == "" {
 		return errors.New("data_dir is required")
 	}
@@ -118,6 +140,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Upstream.GrokClientVersion) == "" {
 		return errors.New("upstream.grok_client_version is required")
+	}
+	if strings.TrimSpace(c.OAuth.ClientID) == "" || strings.TrimSpace(c.OAuth.Scopes) == "" {
+		return errors.New("oauth.client_id and oauth.scopes are required")
 	}
 	if c.Upstream.RequestTimeout.Duration() <= 0 || c.Upstream.SSEIdleTimeout.Duration() <= 0 || c.Usage.RefreshInterval.Duration() <= 0 {
 		return errors.New("timeouts and refresh intervals must be positive")

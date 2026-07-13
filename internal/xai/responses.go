@@ -1,3 +1,6 @@
+// Portions adapted from CLIProxyAPI/v7 internal/runtime/executor/xai_executor.go (MIT): Responses execution and terminal SSE handling.
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/runtime/executor/xai_executor.go
+
 package xai
 
 import (
@@ -15,8 +18,9 @@ import (
 )
 
 type UpstreamError struct {
-	Status int
-	Body   string
+	Status  int
+	Body    string
+	Headers http.Header
 }
 
 func (e *UpstreamError) Error() string { return fmt.Sprintf("xAI upstream returned HTTP %d", e.Status) }
@@ -72,12 +76,11 @@ func (c *Client) open(ctx context.Context, token, model string, body []byte) (*h
 	if c.config.RequestTimeout > 0 {
 		requestCtx, cancel = context.WithTimeout(ctx, c.config.RequestTimeout)
 	}
-	request, err := c.newRequest(http.MethodPost, "responses", token, model, bytes.NewReader(prepared))
+	request, err := c.newRequest(requestCtx, http.MethodPost, "responses", token, model, bytes.NewReader(prepared))
 	if err != nil {
 		cancel()
 		return nil, nil, nil, err
 	}
-	request = request.WithContext(requestCtx)
 	response, err := c.http.Do(request)
 	if err != nil {
 		cancel()
@@ -87,7 +90,7 @@ func (c *Client) open(ctx context.Context, token, model string, body []byte) (*h
 		defer response.Body.Close()
 		defer cancel()
 		payload, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-		return nil, nil, nil, &UpstreamError{Status: response.StatusCode, Body: string(payload)}
+		return nil, nil, nil, &UpstreamError{Status: response.StatusCode, Body: string(payload), Headers: response.Header.Clone()}
 	}
 	return response, NewSSEParser(response.Body, c.config.SSEIdleTimeout), cancel, nil
 }
@@ -105,7 +108,8 @@ func (c *Client) Execute(ctx context.Context, token, model string, body []byte) 
 			return nil, err
 		}
 		events = append(events, event)
-		if gjson.GetBytes(event.Data, "type").String() == "response.completed" {
+		eventType := gjson.GetBytes(event.Data, "type").String()
+		if eventType == "response.completed" || eventType == "response.incomplete" {
 			return events, nil
 		}
 	}

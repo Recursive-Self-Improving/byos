@@ -104,13 +104,14 @@ func TestExecutorLargeEventAndUpstreamError(t *testing.T) {
 	})
 	t.Run("upstream error", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "120")
 			http.Error(w, "private-upstream-detail", http.StatusTooManyRequests)
 		}))
 		defer server.Close()
 		client := NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second})
 		_, err := client.Execute(context.Background(), "token", "grok-4.5", []byte(`{"tools":[{"type":"x_search"}]}`))
 		var upstream *UpstreamError
-		if !errors.As(err, &upstream) || upstream.Status != http.StatusTooManyRequests || !strings.Contains(upstream.Body, "private-upstream-detail") {
+		if !errors.As(err, &upstream) || upstream.Status != http.StatusTooManyRequests || upstream.Headers.Get("Retry-After") != "120" || !strings.Contains(upstream.Body, "private-upstream-detail") {
 			t.Fatalf("error=%#v", err)
 		}
 		if strings.Contains(err.Error(), "private-upstream-detail") {

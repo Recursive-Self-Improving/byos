@@ -1,3 +1,6 @@
+// Cooldown transitions adapted from CLIProxyAPI/v7 sdk/cliproxy/auth/conductor.go (MIT).
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/sdk/cliproxy/auth/conductor.go
+
 package routing
 
 import (

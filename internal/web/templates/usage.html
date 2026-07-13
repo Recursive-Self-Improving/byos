@@ -1,0 +1,27 @@
+{{define "content"}}
+<header class="page-heading">
+  <div>
+    <div class="eyebrow">Billing and local counters</div>
+    <h1>Usage</h1>
+    <p class="lede">Monthly and weekly provider limits are informational OAuth CLI-proxy subscription snapshots shown per account. They are not official API-key billing and never influence routing.</p>
+  </div>
+</header>
+{{if .Usage}}
+<div class="usage-list">
+{{range .Usage}}
+<section class="usage-account" aria-labelledby="usage-{{.AccountID}}">
+  <header><div><h2 id="usage-{{.AccountID}}">{{displayLabel .AccountLabel}}</h2><code>{{.AccountID}}</code></div>{{if .Stale}}<span class="badge badge-warning">Stale</span>{{end}}</header>
+  {{if .SanitizedStatus}}<div class="notice notice-warning" role="status">{{.SanitizedStatus}}</div>{{end}}
+  <div class="usage-columns">
+    <div><h3>Monthly</h3><p class="usage-number">{{formatFloat .Monthly.Used}} {{.Monthly.Unit}}</p>{{if .Monthly.Limit}}<p class="quiet">Limit {{formatFloat .Monthly.Limit}} {{.Monthly.Unit}}</p>{{end}}{{if .Monthly.Percent}}<meter min="0" max="100" value="{{percentValue .Monthly.Percent}}">{{formatFloat .Monthly.Percent}}%</meter><span class="meter-label">{{formatFloat .Monthly.Percent}}%</span>{{end}}</div>
+    <div><h3>Weekly</h3><p class="usage-number">{{formatFloat .Weekly.Used}} {{.Weekly.Unit}}</p>{{if .Weekly.Limit}}<p class="quiet">Limit {{formatFloat .Weekly.Limit}} {{.Weekly.Unit}}</p>{{end}}{{if .Weekly.Percent}}<meter min="0" max="100" value="{{percentValue .Weekly.Percent}}">{{formatFloat .Weekly.Percent}}%</meter><span class="meter-label">{{formatFloat .Weekly.Percent}}%</span>{{end}}</div>
+    <div><h3>Local proxy</h3><dl class="mini-list"><div><dt>Requests</dt><dd>{{formatCount .Local.Requests}}</dd></div><div><dt>Input tokens</dt><dd>{{formatCount .Local.InputTokens}}</dd></div><div><dt>Output tokens</dt><dd>{{formatCount .Local.OutputTokens}}</dd></div></dl></div>
+  </div>
+  <footer><span class="quiet">Fetched {{formatTime .FetchedAt}}</span><form method="post" action="{{usageRefreshURL .AccountID}}">{{$.CSRFField}}<button class="button button-secondary" type="submit">Refresh usage</button></form></footer>
+</section>
+{{end}}
+</div>
+{{else}}
+<section class="empty-state"><h2>No usage snapshots</h2><p>Connect an account, then refresh it to collect the first provider usage snapshot.</p><a class="button button-primary" href="/admin/accounts">Review accounts</a></section>
+{{end}}
+{{end}}

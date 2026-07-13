@@ -65,7 +65,7 @@ func (r *ResponseRepository) GetLink(ctx context.Context, id string, now time.Ti
 	return previous.String, account.String, err
 }
 func (r *ResponseRepository) Cleanup(ctx context.Context, before time.Time) (int64, error) {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM response_sessions WHERE expires_at<?`, before.Unix())
+	result, err := r.db.ExecContext(ctx, `DELETE FROM response_sessions WHERE rowid IN (SELECT rowid FROM response_sessions WHERE expires_at<? LIMIT ?)`, before.Unix(), cleanupBatchSize)
 	if err != nil {
 		return 0, err
 	}

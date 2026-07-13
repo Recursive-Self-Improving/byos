@@ -42,6 +42,10 @@ func (r *ModelCapabilityRepository) Replace(ctx context.Context, accountID strin
 	}
 	return tx.Commit()
 }
+func (r *ModelCapabilityRepository) MarkStale(ctx context.Context, accountID string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE account_model_capabilities SET stale=1 WHERE account_id=?`, accountID)
+	return err
+}
 func (r *ModelCapabilityRepository) List(ctx context.Context, accountID string) ([]ModelCapability, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT account_id,model,COALESCE(display_name,''),supported,supports_backend_search,COALESCE(context_window,0),COALESCE(max_output_tokens,0),COALESCE(reasoning_efforts,'[]'),discovered_at,stale FROM account_model_capabilities WHERE account_id=? ORDER BY model`, accountID)
 	if err != nil {

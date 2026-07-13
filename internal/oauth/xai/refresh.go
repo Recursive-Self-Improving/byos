@@ -1,3 +1,6 @@
+// Portions adapted from CLIProxyAPI/v7 internal/auth/xai/xai.go (MIT): refresh-token exchange and invalid-grant handling.
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/auth/xai/xai.go
+
 package xai
 
 import (
@@ -28,6 +31,16 @@ func NewRefreshService(client *http.Client, accounts *store.AccountRepository, o
 	client = secureOAuthClient(client)
 	return &RefreshService{http: client, accounts: accounts, options: options.withDefaults(), now: func() time.Time { return time.Now().UTC() }}
 }
+func CredentialsUsable(account store.Account, now time.Time) bool {
+	if strings.TrimSpace(account.Credentials.AccessToken) == "" {
+		return false
+	}
+	if !NeedsRefresh(account, now) {
+		return true
+	}
+	return strings.TrimSpace(account.Credentials.RefreshToken) != "" && strings.TrimSpace(account.Credentials.TokenEndpoint) != ""
+}
+
 func (s *RefreshService) Refresh(ctx context.Context, accountID string) (store.Account, error) {
 	value, err, _ := s.group.Do(accountID, func() (any, error) { return s.refresh(ctx, accountID) })
 	if err != nil {
@@ -72,8 +85,8 @@ func (s *RefreshService) refresh(ctx context.Context, accountID string) (store.A
 		return store.Account{}, errors.New("invalid xAI refresh response")
 	}
 	if payload.Error == "invalid_grant" {
-		_ = s.accounts.Update(ctx, account.ID, account.Label, false)
-		return store.Account{}, &OAuthError{Code: "invalid_grant", Description: payload.Description}
+		oauthErr := &OAuthError{Code: "invalid_grant", Description: payload.Description}
+		return store.Account{}, errors.Join(oauthErr, s.accounts.MarkReloginRequired(ctx, account.ID))
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || payload.AccessToken == "" {
 		return store.Account{}, fmt.Errorf("xAI refresh returned HTTP %d", response.StatusCode)

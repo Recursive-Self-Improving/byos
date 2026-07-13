@@ -1,0 +1,40 @@
+{{define "content"}}
+<header class="page-heading">
+  <div>
+    <div class="eyebrow">Downstream authentication</div>
+    <h1>API keys</h1>
+    <p class="lede">Create named client credentials and revoke access immediately when it is no longer needed.</p>
+  </div>
+</header>
+{{if .CreatedPlaintext}}
+<section class="secret-reveal" aria-labelledby="new-key-heading">
+  <div class="eyebrow">Shown once</div>
+  <h2 id="new-key-heading">Copy the new API key now</h2>
+  <p>This plaintext value will not be available after you leave or reload this response.</p>
+  <div class="secret-line"><code id="new-api-key">{{.CreatedPlaintext}}</code><button class="button button-secondary" type="button" data-copy-target="new-api-key">Copy key</button></div>
+  <p class="copy-status" data-copy-status role="status" aria-live="polite"></p>
+</section>
+{{end}}
+<section class="section-block" aria-labelledby="create-key-heading">
+  <h2 id="create-key-heading">Create an API key</h2>
+  {{if .FormError}}<div class="notice notice-error" role="alert">{{.FormError}}</div>{{end}}
+  <form class="inline-form" method="post" action="/admin/api-keys">
+    {{.CSRFField}}
+    <div><label for="key-label">Key label</label><input id="key-label" name="label" type="text" maxlength="100" placeholder="Production client" required></div>
+    <button class="button button-primary" type="submit">Create key</button>
+  </form>
+</section>
+<section class="section-block" aria-labelledby="existing-keys-heading">
+  <h2 id="existing-keys-heading">Existing keys</h2>
+  {{if .Keys}}
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">Label</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">State</th><th scope="col">Action</th></tr></thead>
+    <tbody>{{range .Keys}}<tr>
+      <th scope="row">{{.Label}}</th><td><code>{{.Prefix}}…</code></td><td>{{formatTime .CreatedAt}}</td><td>{{formatTime .LastUsedAt}}</td>
+      <td>{{if .RevokedAt}}<span class="badge badge-neutral">Revoked</span><small class="table-subtext">{{formatTime .RevokedAt}}</small>{{else}}<span class="badge badge-positive">Active</span>{{end}}</td>
+      <td>{{if not .RevokedAt}}<details class="revoke-control"><summary>Revoke</summary><form class="stack" method="post" action="{{keyRevokeURL .ID}}">{{$.CSRFField}}<label class="check-row"><input type="checkbox" name="confirm" value="revoke" required> Confirm immediate revocation</label><button class="button button-danger" type="submit">Revoke key</button></form></details>{{else}}—{{end}}</td>
+    </tr>{{end}}</tbody>
+  </table></div>
+  {{else}}<div class="empty-inline">No API keys have been created. Add a named key for the first downstream client.</div>{{end}}
+</section>
+{{end}}

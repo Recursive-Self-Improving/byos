@@ -8,15 +8,20 @@ import (
 	"supergrok-api/internal/store"
 )
 
+type RefreshHook interface {
+	Refresh(context.Context, string) error
+}
+
 type RefreshWorker struct {
 	accounts *store.AccountRepository
 	refresh  *oauthxai.RefreshService
 	interval time.Duration
 	now      func() time.Time
+	hooks    []RefreshHook
 }
 
-func NewRefreshWorker(accounts *store.AccountRepository, refresh *oauthxai.RefreshService) *RefreshWorker {
-	return &RefreshWorker{accounts: accounts, refresh: refresh, interval: time.Minute, now: func() time.Time { return time.Now().UTC() }}
+func NewRefreshWorker(accounts *store.AccountRepository, refresh *oauthxai.RefreshService, hooks ...RefreshHook) *RefreshWorker {
+	return &RefreshWorker{accounts: accounts, refresh: refresh, hooks: append([]RefreshHook(nil), hooks...), interval: time.Minute, now: func() time.Time { return time.Now().UTC() }}
 }
 func (w *RefreshWorker) Run(ctx context.Context) error {
 	ticker := time.NewTicker(w.interval)
@@ -39,7 +44,11 @@ func (w *RefreshWorker) refreshDue(ctx context.Context) error {
 	}
 	for _, account := range accounts {
 		if account.Enabled && oauthxai.NeedsRefresh(account, w.now()) {
-			_, _ = w.refresh.Refresh(ctx, account.ID)
+			if _, err := w.refresh.Refresh(ctx, account.ID); err == nil {
+				for _, hook := range w.hooks {
+					_ = hook.Refresh(ctx, account.ID)
+				}
+			}
 		}
 	}
 	return nil

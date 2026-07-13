@@ -1,0 +1,27 @@
+services:
+  supergrok-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${SUPERGROK_VERSION:?SUPERGROK_VERSION is required}
+        COMMIT: ${SUPERGROK_COMMIT:?SUPERGROK_COMMIT is required}
+        BUILD_DATE: ${SUPERGROK_BUILD_DATE:?SUPERGROK_BUILD_DATE is required}
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      SUPERGROK_MASTER_KEY: ${SUPERGROK_MASTER_KEY}
+      SUPERGROK_ADMIN_PASSWORD: ${SUPERGROK_ADMIN_PASSWORD}
+      SUPERGROK_ADMIN_API_KEY: ${SUPERGROK_ADMIN_API_KEY}
+    volumes:
+      - supergrok-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  supergrok-data:

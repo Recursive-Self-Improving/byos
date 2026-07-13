@@ -1,0 +1,15 @@
+{{define "content"}}
+<section class="auth-panel" aria-labelledby="login-heading">
+  <div class="eyebrow">Restricted administration</div>
+  <h1 id="login-heading">Sign in</h1>
+  <p class="lede">Use the administrator password configured for this instance.</p>
+  {{if .ExpiredNotice}}<div class="notice notice-info" role="status">{{.ExpiredNotice}}</div>{{end}}
+  {{if .Error}}<div class="notice notice-error" role="alert">{{.Error}}</div>{{end}}
+  <form class="stack" method="post" action="/admin/login">
+    {{.CSRFField}}
+    <label for="password">Administrator password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button class="button button-primary" type="submit">Sign in securely</button>
+  </form>
+</section>
+{{end}}

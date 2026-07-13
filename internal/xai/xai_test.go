@@ -68,6 +68,19 @@ func TestResponsesExecutorAndHeaders(t *testing.T) {
 	}
 }
 
+func TestResponsesExecutorAcceptsIncompleteTerminal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n")
+	}))
+	defer server.Close()
+	client := NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
+	events, err := client.Execute(context.Background(), "token", "grok-4.5", []byte(`{"tools":[{"type":"x_search"}]}`))
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%v err=%v", events, err)
+	}
+}
+
 func TestResponsesExecutorErrors(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -1,0 +1,11 @@
+{{define "content"}}
+<section class="error-panel" aria-labelledby="error-heading">
+  <div class="error-code">{{.Status}}</div>
+  <div>
+    <div class="eyebrow">Request not completed</div>
+    <h1 id="error-heading">{{.Message}}</h1>
+    <p class="quiet">No sensitive service details were included in this response.</p>
+    {{if .Authenticated}}<a class="button button-secondary" href="/admin/">Return to dashboard</a>{{else}}<a class="button button-secondary" href="/admin/login">Return to sign in</a>{{end}}
+  </div>
+</section>
+{{end}}

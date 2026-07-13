@@ -166,6 +166,28 @@ func TestCancelStopsActivePoll(t *testing.T) {
 	}
 }
 
+func TestPollLeaderContextCancellationStopsWorkerAndPreservesPending(t *testing.T) {
+	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
+	defer database.Close()
+	flow, err := service.StartDevice(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting := make(chan struct{})
+	service.wait = func(ctx context.Context, _ time.Duration) error { close(waiting); <-ctx.Done(); return ctx.Err() }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := service.Poll(ctx, flow.State); done <- err }()
+	<-waiting
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("poll error=%v", err)
+	}
+	if _, err := service.sessions.GetPending(context.Background(), flow.State, service.now()); err != nil {
+		t.Fatalf("pending lost=%v", err)
+	}
+}
+
 func TestPollDoesNotExchangeAfterLocalExpiry(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()

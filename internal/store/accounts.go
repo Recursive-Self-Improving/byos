@@ -74,7 +74,7 @@ func (r *AccountRepository) UpsertLogin(ctx context.Context, account Account) (A
 	}
 	_, err = r.db.ExecContext(ctx, `INSERT INTO accounts(id, identity_fingerprint, label, enabled, status, credentials_encrypted, expires_at, last_refresh_at, last_error, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(identity_fingerprint) DO UPDATE SET enabled=excluded.enabled, credentials_encrypted=excluded.credentials_encrypted, status=excluded.status, expires_at=excluded.expires_at, last_refresh_at=excluded.last_refresh_at, last_error=excluded.last_error, updated_at=excluded.updated_at`,
+		ON CONFLICT(identity_fingerprint) DO UPDATE SET credentials_encrypted=excluded.credentials_encrypted, status=excluded.status, expires_at=excluded.expires_at, last_refresh_at=excluded.last_refresh_at, last_error=excluded.last_error, updated_at=excluded.updated_at`,
 		id, fingerprint[:], account.Label, boolInt(defaultTrue(account.Enabled, account.ID == "")), status, encrypted, expires, nullableUnix(account.LastRefreshAt), nullString(account.LastError), now.Unix(), now.Unix())
 	if err != nil {
 		return Account{}, fmt.Errorf("upsert account: %w", err)
@@ -106,6 +106,13 @@ func (r *AccountRepository) List(ctx context.Context) ([]Account, error) {
 }
 func (r *AccountRepository) Update(ctx context.Context, id, label string, enabled bool) error {
 	result, err := r.db.ExecContext(ctx, `UPDATE accounts SET label=?, enabled=?, updated_at=unixepoch() WHERE id=?`, label, boolInt(enabled), id)
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
+}
+func (r *AccountRepository) MarkReloginRequired(ctx context.Context, id string) error {
+	result, err := r.db.ExecContext(ctx, `UPDATE accounts SET enabled=0,status='relogin_required',last_error='authentication expired; reconnect required',updated_at=unixepoch() WHERE id=?`, id)
 	if err != nil {
 		return err
 	}

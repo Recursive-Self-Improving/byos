@@ -1,0 +1,26 @@
+{{define "content"}}
+<header class="page-heading">
+  <div>
+    <div class="eyebrow">Discovered capability matrix</div>
+    <h1>Models</h1>
+    <p class="lede">Provider support and downstream allowlist exposure are shown independently.</p>
+  </div>
+</header>
+{{if .Models}}
+<div class="table-wrap"><table>
+  <thead><tr><th scope="col">Model</th><th scope="col">Account</th><th scope="col">Provider support</th><th scope="col">Downstream exposure</th><th scope="col">Search</th><th scope="col">Limits</th><th scope="col">Discovered</th><th scope="col">Refresh</th></tr></thead>
+  <tbody>{{range .Models}}<tr>
+    <th scope="row">{{if .DisplayName}}{{.DisplayName}}<small class="table-subtext"><code>{{.Name}}</code></small>{{else}}<code>{{.Name}}</code>{{end}}</th>
+    <td><a href="{{accountURL .AccountID}}">{{displayLabel .AccountLabel}}</a></td>
+    <td>{{if .Supported}}<span class="badge badge-positive">Supported</span>{{else}}<span class="badge badge-neutral">Unavailable</span>{{end}}{{if .Stale}} <span class="badge badge-warning">Stale</span>{{end}}</td>
+    <td>{{if .Allowlisted}}<span class="badge badge-positive">Allowlisted</span>{{else}}<span class="badge badge-neutral">Hidden</span>{{end}}</td>
+    <td>{{searchSupport .SupportsBackendSearch}}</td>
+    <td><span>{{formatInt .ContextWindow}} context</span><small class="table-subtext">{{formatInt .MaxOutputTokens}} max output</small></td>
+    <td>{{formatTime .DiscoveredAt}}</td>
+    <td><form method="post" action="{{modelRefreshURL .AccountID}}">{{$.CSRFField}}<button class="button button-quiet" type="submit">Refresh account</button></form></td>
+  </tr>{{end}}</tbody>
+</table></div>
+{{else}}
+<section class="empty-state"><h2>No model capabilities discovered</h2><p>Refresh a connected account to inspect its supported model set.</p><a class="button button-primary" href="/admin/accounts">Review accounts</a></section>
+{{end}}
+{{end}}

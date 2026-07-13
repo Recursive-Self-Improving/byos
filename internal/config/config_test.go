@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	oauthxai "supergrok-api/internal/oauth/xai"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -16,14 +18,14 @@ func TestDefaultConfig(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server.Listen != DefaultListen || cfg.Models.Aliases["grok"] != DefaultModel || cfg.Limits.MaxBodyBytes != 16<<20 {
+	if cfg.Server.Listen != DefaultListen || cfg.Models.Aliases["grok"] != DefaultModel || cfg.Limits.MaxBodyBytes != 16<<20 || cfg.OAuth.ClientID != oauthxai.DefaultClientID || cfg.OAuth.Scopes != oauthxai.DefaultScopes {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 }
 
 func TestYAMLOverrideRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("server:\n  listen: 127.0.0.1:9090\ndata_dir: /tmp/supergrok\nupstream:\n  request_timeout: 3m\n")
+	data := []byte("server:\n  listen: 127.0.0.1:9090\n  trusted_proxies: [127.0.0.1, '10.0.0.0/8']\ndata_dir: /tmp/supergrok\nupstream:\n  request_timeout: 3m\noauth:\n  client_id: deployment-client\n  scopes: openid offline_access\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +33,7 @@ func TestYAMLOverrideRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server.Listen != "127.0.0.1:9090" || cfg.Upstream.RequestTimeout.Duration() != 3*time.Minute {
+	if cfg.Server.Listen != "127.0.0.1:9090" || len(cfg.Server.TrustedProxies) != 2 || cfg.Upstream.RequestTimeout.Duration() != 3*time.Minute || cfg.OAuth.ClientID != "deployment-client" {
 		t.Fatalf("override failed: %+v", cfg)
 	}
 	encoded, err := yaml.Marshal(cfg)
@@ -50,6 +52,8 @@ func TestYAMLOverrideRoundTrip(t *testing.T) {
 func TestInvalidConfig(t *testing.T) {
 	tests := []string{
 		"upstream:\n  request_timeout: nope\n",
+		"server:\n  trusted_proxies: [not-a-network]\n",
+		"oauth:\n  client_id: ''\n",
 		"limits:\n  max_body_bytes: 0\n",
 		"models:\n  aliases:\n    grok: missing\n",
 		"models:\n  default: ''\n  allowlist: ['', grok-4.5]\n",

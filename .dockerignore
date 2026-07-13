@@ -1,0 +1,35 @@
+# Source-control and local tooling
+.git
+.gitignore
+.github
+.vscode
+.idea
+.codex
+.agents
+.worktrees
+
+# Planning and local documentation
+docs
+README*
+
+# Runtime state and local secrets
+data
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+.env
+.env.*
+!.env.example
+
+# Compose and Docker metadata (the build uses Dockerfile directly)
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Go build/test output
+bin
+coverage.out

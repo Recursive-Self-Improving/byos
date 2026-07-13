@@ -28,6 +28,7 @@
   - Create `go.mod` for the `supergrok-api` module with Go 1.26.
   - Pin the selected packages: `modernc.org/sqlite v1.53.0`, `github.com/coreos/go-oidc/v3 v3.20.0`, `github.com/gorilla/csrf v1.7.3`, `github.com/tidwall/gjson v1.18.0`, `github.com/tidwall/sjson v1.2.5`, `github.com/tiktoken-go/tokenizer v0.7.0`, `golang.org/x/oauth2 v0.30.0`, `golang.org/x/sync v0.18.0`, and `gopkg.in/yaml.v3 v3.0.1`.
   - Definition of done: `go mod tidy` resolves reproducibly and the empty command package builds with Go 1.26.
+  - Blocked: Go MVS selects `golang.org/x/oauth2 v0.36.0` and `golang.org/x/sync v0.20.0` because the pinned `go-oidc v3.20.0`/`modernc.org/sqlite v1.53.0` dependency graph requires those newer versions. Completing the exact lower-version pins requires an approved dependency-baseline change; forcing unsupported lower transitive versions is deferred.
 
 - [x] Create the service package boundaries
   - Create `cmd/supergrok-api`, `internal/app`, `internal/config`, `internal/store`, `internal/crypto`, `internal/oauth/xai`, `internal/xai`, `internal/accounts`, `internal/routing`, `internal/models`, `internal/usage`, `internal/sessions`, `internal/search`, `internal/translate`, `internal/api`, and `internal/web`.
@@ -104,18 +105,18 @@
   - Record label, creation, last-use, and revocation timestamps.
   - Definition of done: duplicate hashes are impossible, revoked keys fail immediately, last-use updates are rate-limited to avoid a write per request, and no API lists plaintext keys.
 
-- [ ] Implement public bearer authentication middleware
+- [x] Implement public bearer authentication middleware
   - Add `internal/api/middleware/client_auth.go`.
   - Authenticate all `/v1/*` routes using non-revoked downstream keys and constant-time comparison.
   - Keep `/healthz` and `/readyz` unauthenticated while preventing them from returning account details.
   - Definition of done: missing, malformed, unknown, and revoked keys return standard 401 responses; valid keys attach only the key ID/label to request context.
 
-- [ ] Implement admin REST bearer authentication
+- [x] Implement admin REST bearer authentication
   - Add `internal/api/middleware/admin_auth.go`.
   - Validate `SUPERGROK_ADMIN_API_KEY` in constant time and apply it to `/admin/api/v1/*`.
   - Definition of done: the management API cannot be accessed with downstream client keys, and admin failures do not reveal whether a candidate key prefix was valid.
 
-- [ ] Implement Web UI sessions and CSRF protection
+- [x] Implement Web UI sessions and CSRF protection
   - Add `internal/web/auth.go`, `internal/store/admin_sessions.go`, and Gorilla CSRF middleware setup.
   - Validate the administrator password without logging it, issue random server-side sessions, and set HttpOnly/SameSite=Strict cookies; set Secure when the request came through a configured trusted HTTPS reverse proxy.
   - Expire and revoke sessions server-side; protect every mutation with CSRF.
@@ -123,7 +124,7 @@
 
 ### xAI OAuth
 
-- [ ] Port and centralize xAI OAuth constants
+- [x] Port and centralize xAI OAuth constants
   - Add `internal/oauth/xai/constants.go` using the issuer, discovery URL, public client ID, scopes, RFC 8628 grant type, poll minimum, refresh lead, and maximum flow duration extracted from CLIProxyAPI.
   - Keep client ID/scopes overrideable through deployment configuration but never through downstream requests.
   - Definition of done: defaults match the reference implementation and are used by both CLI and management login flows.
@@ -134,13 +135,13 @@
   - Require HTTPS and an `x.ai` or subdomain hostname for device, token, authorization, and JWKS endpoints.
   - Definition of done: valid discovery is cached safely; empty, malformed, HTTP, redirect-to-foreign-host, and non-xAI endpoints are rejected in tests.
 
-- [ ] Implement RFC 8628 device authorization start
+- [x] Implement RFC 8628 device authorization start
   - Add `internal/oauth/xai/device.go`.
   - POST client ID and scopes to the discovered device endpoint, validate required response fields, persist the pending session, and return state/user code/verification URL/expiry.
   - Prefer `verification_uri_complete` for UI/CLI display while retaining `verification_uri` and user code.
   - Definition of done: CLI and admin API receive the same normalized device-flow object and no device code is exposed to browsers or logs.
 
-- [ ] Implement device-token polling and cancellation
+- [x] Implement device-token polling and cancellation
   - Add `internal/oauth/xai/poll.go`.
   - Poll immediately once, enforce a minimum five-second interval, add five seconds for `slow_down`, and terminate on authorization denial, expiry, cancellation, or context shutdown.
   - Persist status transitions so service restart resumes only still-valid pending sessions.
@@ -152,13 +153,13 @@
   - Refuse to persist an account without a stable verified subject.
   - Definition of done: valid signed fixtures pass; forged signature, wrong issuer/audience, expired token, missing subject, and key-rotation fixtures fail safely.
 
-- [ ] Implement refresh-token rotation and background refresh
+- [x] Implement refresh-token rotation and background refresh
   - Add `internal/oauth/xai/refresh.go` and `internal/accounts/refresh_worker.go`.
   - Refresh five minutes before expiry, use singleflight per account, preserve the old refresh token when the response omits a replacement, and atomically persist rotated tokens.
   - Retry once on upstream 401 with a synchronous refresh; classify `invalid_grant` as requiring relogin.
   - Definition of done: concurrent refresh produces one token request, token rotation is atomic, and invalid grants disable the account without affecting other accounts.
 
-- [ ] Implement account service orchestration
+- [x] Implement account service orchestration
   - Add `internal/accounts/service.go`.
   - Coordinate OAuth completion, relogin deduplication, account enable/disable/delete, manual refresh, capability refresh, usage refresh, and status projection for APIs/UI.
   - Ensure deletion removes credentials/capabilities/cooldowns while leaving encrypted response transcripts usable for failover reconstruction.
@@ -185,27 +186,27 @@
   - For stream requests, expose parsed events without committing downstream output until the first valid event is available.
   - Definition of done: executor tests cover success, non-2xx error body, missing terminal event, cancellation, large events, and response headers.
 
-- [ ] Implement model catalog discovery
+- [x] Implement model catalog discovery
   - Add `internal/models/upstream.go`, `internal/models/catalog.go`, and `internal/models/types.go`.
   - Call `GET /models-v2` first. On 2xx accept either an array or `{models:[...]}` and normalize `id`/`model`, display name, context window, max completion tokens, reasoning efforts, and `supportsBackendSearch`.
   - On `/models-v2` 404 or an unrecognized successful schema, call `GET /models`. Treat 401/403 as credential failure rather than catalog absence.
   - When both endpoints are unavailable, retain the last successful per-account snapshot as stale; without a snapshot, route from the configured allowlist.
   - Definition of done: final public catalog equals the allowlist intersected with support from at least one enabled account when fresh/stale capabilities exist, and otherwise equals the allowlist with alias resolution.
 
-- [ ] Implement model-catalog refresh workers
+- [x] Implement model-catalog refresh workers
   - Add `internal/models/worker.go`.
   - Refresh after account login, token refresh, service startup, explicit admin refresh, and the configured periodic interval.
   - Deduplicate concurrent refreshes per account and record last success/error/freshness.
   - Definition of done: refreshes never block inference startup indefinitely, stale catalog data remains queryable, and `/readyz` reflects whether the default model is routable.
 
-- [ ] Implement the OAuth billing adapter
+- [x] Implement the OAuth billing adapter
   - Add `internal/usage/xai_billing.go` and strict payload parsers.
   - Fetch `/billing?format=credits` for weekly/current-period data and `/billing` for monthly limit/used/reset data.
   - Normalize monthly remaining and weekly remaining percentage; preserve on-demand/prepaid fields only when present in validated upstream data.
   - A failed refresh must return the last snapshot with `stale:true`; no snapshot produces `unknown` fields without blocking inference.
   - Definition of done: monthly, weekly, combined, malformed, changed-type, 401, 429, and network-error fixtures pass.
 
-- [ ] Implement usage refresh and local counters
+- [x] Implement usage refresh and local counters
   - Add `internal/usage/service.go` and `internal/usage/worker.go`.
   - Refresh each enabled account every five minutes and on explicit admin request with bounded concurrency.
   - Record local requests, failures, input tokens, and output tokens separately from upstream subscription usage.
@@ -214,24 +215,24 @@
 
 ### Protocol translation and mandatory search
 
-- [ ] Create the minimal translator registry and common types
+- [x] Create the minimal translator registry and common types
   - Add `internal/translate/registry`, canonical format constants, request/response transform interfaces, stream state types, and shared SSE helpers.
   - Extract only the required common code from CLIProxyAPI and retain source/license comments.
   - Definition of done: transforms can be registered for Chat, Responses, and Anthropic without importing CLIProxyAPI as a Go module.
 
-- [ ] Extract OpenAI Chat Completions translation
+- [x] Extract OpenAI Chat Completions translation
   - Add `internal/translate/openai/chatcompletions/request.go`, `response.go`, and focused fixtures derived from CLIProxyAPI.
   - Preserve roles, multimodal text/image inputs, client function calls/results, reasoning summary, usage, finish reason, structured output fields supported by the reference, and tool-name shortening/restoration.
   - Ignore server-side x_search call progress as client tool calls while retaining final text and inline citation links.
   - Definition of done: stream and non-stream Chat payloads match OpenAI-compatible fixtures, and built-in search never yields `finish_reason:"tool_calls"` unless a real client-side function call exists.
 
-- [ ] Extract OpenAI Responses translation
+- [x] Extract OpenAI Responses translation
   - Add `internal/translate/openai/responses/request.go` and `response.go`.
   - Normalize string input, system/developer roles, unsupported upstream fields, and canonical Responses request shape.
   - Preserve native `x_search_call`, output annotations, citations, usage, IDs, and unknown server-side events in both stream and non-stream modes.
   - Definition of done: Responses fixtures round-trip without dropping x_search metadata or adding Chat-specific `[DONE]` markers.
 
-- [ ] Extract Anthropic Messages translation
+- [x] Extract Anthropic Messages translation
   - Add `internal/translate/anthropic/request.go`, `response.go`, `count_tokens.go`, and stream state helpers.
   - Preserve system/messages/content blocks, client tools/results, thinking summary, usage, stop sequences, and Anthropic SSE ordering.
   - Treat x_search as an internal server-side operation: do not synthesize `server_tool_use`, `web_search_tool_result`, or client `tool_use`; return final inline-cited text with `stop_reason:end_turn`.
@@ -244,7 +245,7 @@
   - Do not expose any configuration or request mechanism that disables injection.
   - Definition of done: every canonical request accepted by the executor contains exactly one x_search tool, and an executor precondition fails internally before network I/O when this invariant is violated.
 
-- [ ] Implement Anthropic input token counting
+- [x] Implement Anthropic input token counting
   - Add deterministic canonicalization and tokenizer integration in `internal/translate/anthropic/count_tokens.go`.
   - Count the translated request including the mandatory x_search declaration and return the standard Anthropic `input_tokens` shape.
   - Document through the response behavior and tests that this is a compatibility estimate rather than provider billing authority.
@@ -259,7 +260,7 @@
   - Enforce 256 nodes and 64 MiB reconstructed payload limits.
   - Definition of done: text, tool-call, reasoning, account-failover, cycle, missing-node, expiry, and size-limit tests pass.
 
-- [ ] Implement store and retention semantics
+- [x] Implement store and retention semantics
   - Treat omitted `store` as true; persist the completed node only after receiving a valid terminal response.
   - For `store:false`, do not create a `response_sessions` row; later continuation returns the standard `previous_response_not_found` error.
   - Expire stored nodes at 30 days and run hourly cleanup.
@@ -290,13 +291,13 @@
   - Disable accounts on invalid grant; apply quota/transient state at model scope unless the error is account-wide.
   - Definition of done: backoff progression, expiry promotion, successful recovery, restart restoration, and per-model isolation tests pass.
 
-- [ ] Implement non-stream execution with failover
+- [x] Implement non-stream execution with failover
   - Add `internal/routing/execute.go`.
   - Resolve model/alias, refresh near-expiry credentials, prepare the canonical x_search request, execute, classify failures, and move to the next candidate only for retryable pre-output failures.
   - Retry a 401 once on the same account after refresh before rotating.
   - Definition of done: success, validation no-retry, refresh retry, multi-account 429/5xx failover, all-accounts-cooling, and cancellation tests pass.
 
-- [ ] Implement stream execution commit boundaries
+- [x] Implement stream execution commit boundaries
   - Add `internal/routing/stream.go`.
   - Buffer upstream status and the first valid SSE event before writing downstream headers/body.
   - Permit account failover only before the first downstream event; after commit, propagate protocol-safe error/closure and never replay on another account.
@@ -304,37 +305,37 @@
 
 ### Public compatibility API
 
-- [ ] Implement protocol-specific error writers
+- [x] Implement protocol-specific error writers
   - Add `internal/api/errors/openai.go` and `internal/api/errors/anthropic.go`.
   - Map validation, authentication, model unavailable, cooldown, context limits, previous-response errors, upstream failures, and internal failures to standard status codes/bodies.
   - Include `Retry-After` on cooldown without leaking account identity or upstream credential details.
   - Definition of done: all handlers use these writers and error fixtures match the target protocol shapes.
 
-- [ ] Implement health, readiness, and models handlers
+- [x] Implement health, readiness, and models handlers
   - Add `internal/api/system.go` and `internal/api/openai/models.go`.
   - `/healthz` reports process/database liveness only. `/readyz` reports ready only when the database is usable and at least one enabled account can serve the default model.
   - `/v1/models` returns only allowlisted/routable models and the stable `grok` alias without exposing per-account capabilities.
   - Definition of done: liveness stays healthy during upstream outages, readiness changes with account/model availability, and model listing honors stale/fallback catalog rules.
 
-- [ ] Implement Chat Completions handler
+- [x] Implement Chat Completions handler
   - Add `internal/api/openai/chat_completions.go`.
   - Enforce client auth/body limits/content type, translate to canonical Responses, inject x_search, resolve managed routing, and return standard stream/non-stream Chat output.
   - End streaming with `[DONE]` exactly once.
   - Definition of done: official-style OpenAI client fixtures can consume both modes, client disconnects cancel upstream, and citations remain in response text.
 
-- [ ] Implement Responses handler
+- [x] Implement Responses handler
   - Add `internal/api/openai/responses.go`.
   - Enforce auth/body limits, managed `previous_response_id`, store semantics, mandatory x_search, native Responses stream/non-stream output, and persistence after terminal success.
   - Do not emit Chat `[DONE]` markers or implement retrieve/delete/WebSocket/compact routes.
   - Definition of done: OpenAI Responses client fixtures preserve x_search events/citations and multi-turn continuation works after service restart.
 
-- [ ] Implement Anthropic Messages handlers
+- [x] Implement Anthropic Messages handlers
   - Add `internal/api/anthropic/messages.go` and `internal/api/anthropic/count_tokens.go`.
   - Validate required Anthropic headers/body, translate to canonical Responses, inject x_search, execute, and return standard Anthropic stream/non-stream output.
   - Return count-token estimates through `/v1/messages/count_tokens` using the same canonicalization path.
   - Definition of done: Anthropic SDK-compatible fixtures consume both endpoints and never receive a fake x_search client tool call.
 
-- [ ] Register the locked HTTP route surface
+- [x] Register the locked HTTP route surface
   - Add `internal/api/server.go` with Go ServeMux method/path patterns.
   - Register only the locked public, health, admin API, and Web UI routes; unknown and explicitly out-of-scope routes return 404/405.
   - Apply request ID, panic recovery, size limit, client/admin auth, CSRF, and security-header middleware at the correct scopes.
@@ -342,116 +343,116 @@
 
 ### Management REST and Web UI
 
-- [ ] Implement OAuth management endpoints
+- [x] Implement OAuth management endpoints
   - Add `internal/api/admin/oauth.go` for `POST /oauth/xai/device`, `GET /oauth/xai/device/{state}`, and `DELETE /oauth/xai/device/{state}`.
   - Return only state, user code, verification URL, expiry, terminal status, account ID, and sanitized errors.
   - Definition of done: start/poll/cancel/restart flows work and device/access/refresh tokens never cross the admin API boundary.
 
-- [ ] Implement account management endpoints
+- [x] Implement account management endpoints
   - Add `internal/api/admin/accounts.go` for list, label/enabled patch, delete, and manual refresh.
   - Restrict PATCH to label and enabled; reject token/base-URL/model-state mutation attempts.
   - Definition of done: account status includes expiry/cooldown/capability/usage freshness without sensitive identity fields, and deletion semantics match stored-session failover rules.
 
-- [ ] Implement usage and model management endpoints
+- [x] Implement usage and model management endpoints
   - Add `internal/api/admin/usage.go` and `internal/api/admin/models.go`.
   - Expose per-account normalized usage/local counters, aggregate account status without summing weekly percentages, model capabilities, stale state, and explicit refresh actions.
   - Definition of done: refresh calls are deduplicated/bounded, stale snapshots are returned with status metadata, and failures do not alter routing availability by themselves.
 
-- [ ] Implement API-key management endpoints
+- [x] Implement API-key management endpoints
   - Add `internal/api/admin/api_keys.go` for list, create, and revoke.
   - Show plaintext only in the create response and never again; list prefix/label/timestamps/revocation status.
   - Definition of done: create/list/revoke lifecycle works, response/log/database scans do not reveal previously issued plaintext keys, and revocation is immediately enforced.
 
-- [ ] Build the Web UI layout and login flow
+- [x] Build the Web UI layout and login flow
   - Add `internal/web/templates/layout.html`, `login.html`, embedded CSS, and auth handlers.
   - Include security headers, CSRF fields, session expiry handling, accessible form errors, and no localStorage secrets.
   - Definition of done: unauthenticated users are redirected to login, authenticated sessions can navigate the admin area, and logout revokes the server-side session.
 
-- [ ] Build dashboard and account pages
+- [x] Build dashboard and account pages
   - Add templates/handlers for `/admin/`, `/admin/accounts`, and `/admin/accounts/{id}`.
   - Display readiness, account status, expiry, cooldown, model support, usage freshness, and safe enable/disable/delete/refresh actions.
   - Definition of done: UI actions call the same account service as REST, destructive deletion requires explicit confirmation, and no token/subject/raw billing payload is rendered.
 
-- [ ] Build the OAuth device-flow page
+- [x] Build the OAuth device-flow page
   - Add `/admin/oauth/new` template, handler, and minimal JavaScript polling.
   - Display verification URL/user code/countdown, support cancellation, stop polling on terminal status, and redirect to account detail on success.
   - Definition of done: browser refresh resumes the persisted flow by state and concurrent pages cannot create duplicate account records.
 
-- [ ] Build usage, models, and API-key pages
+- [x] Build usage, models, and API-key pages
   - Add `/admin/usage`, `/admin/models`, and `/admin/api-keys` templates/handlers.
   - Show monthly/weekly/local usage separately, stale/error/fetched times, discovered model support, allowlist exposure, and one-time new-key display.
   - Definition of done: pages work without JavaScript except device polling and one-time key copy convenience, and no weekly percentages are aggregated incorrectly.
 
 ### CLI and runtime workers
 
-- [ ] Implement `serve`, `login`, and `version` commands
+- [x] Implement `serve`, `login`, and `version` commands
   - Add command files under `cmd/supergrok-api` and reusable command logic under `internal/app`.
   - `serve` loads config/secrets/migrations/workers/server; `login` runs the same device/account service against the same SQLite database; `version` prints build version and Grok client profile version.
   - Definition of done: CLI login displays URL/code, handles cancellation, stores or updates the account, and does not require the HTTP server to be running.
 
-- [ ] Implement periodic cleanup workers
+- [x] Implement periodic cleanup workers
   - Add `internal/app/cleanup_worker.go`.
   - Hourly delete expired response sessions, OAuth sessions, admin sessions, and usage raw snapshots beyond retention; promote expired cooldowns without deleting audit timestamps needed by the UI.
   - Definition of done: cleanup is idempotent, bounded, cancellation-aware, and covered with clock-controlled tests.
 
-- [ ] Add Docker packaging and loopback-only Compose publishing
+- [x] Add Docker packaging and loopback-only Compose publishing
   - Create `Dockerfile`, `.dockerignore`, and `docker-compose.yml`.
   - Use a Go 1.26 multi-stage build and a non-root runtime with CA certificates; persist `/data`; add `/healthz` healthcheck.
   - Container may listen on `0.0.0.0:8080`, but Compose must publish `127.0.0.1:8080:8080`.
   - Definition of done: image builds without CGO, starts as non-root, writes only to `/data`, and is not reachable through the host's non-loopback interfaces by default.
 
-- [ ] Preserve third-party license attribution
+- [x] Preserve third-party license attribution
   - Add project `LICENSE` and `THIRD_PARTY_NOTICES` entries for extracted CLIProxyAPI and any extracted pi-grok-cli billing logic.
   - Keep source-level attribution comments on materially copied translator/OAuth sections.
   - Definition of done: attribution includes the upstream MIT notices and a reviewer can trace each extracted subsystem to its source path.
 
 ## Validation
 
-- [ ] Run formatting, static checks, and focused package tests
+- [x] Run formatting, static checks, and focused package tests
   - Run `gofmt` over Go sources, `go vet ./...`, and `go test ./...`.
   - Definition of done: all commands pass from a clean checkout with no generated local state outside test temp directories.
 
-- [ ] Run race detection for concurrent subsystems
+- [x] Run race detection for concurrent subsystems
   - Run `go test -race` on OAuth refresh, model/usage workers, scheduler, cooldown, API-key last-use updates, response-session reconstruction, and SSE cancellation packages.
   - Definition of done: no data races, leaked goroutines, or flaky cursor/refresh behavior across repeated runs.
 
-- [ ] Validate OAuth behavior against a complete fake issuer
+- [x] Validate OAuth behavior against a complete fake issuer
   - Use `httptest.Server` to simulate discovery, device authorization, token polling, refresh, JWKS rotation, denial, expiry, malformed endpoints, and invalid grants.
   - Definition of done: the device and refresh state machines pass every terminal path and never accept unverified identity data.
 
-- [ ] Validate xAI adapters against fake upstream endpoints
+- [x] Validate xAI adapters against fake upstream endpoints
   - Simulate `/models-v2`, `/models`, `/billing`, `/billing?format=credits`, and `/responses` with success, schema drift, 401, 429, 5xx, latency, fragmented SSE, and early/late disconnects.
   - Definition of done: discovery fallback, stale usage, SSE terminal detection, and error classification exactly match the locked rules.
 
-- [ ] Validate mandatory x_search across all public protocols
+- [x] Validate mandatory x_search across all public protocols
   - Capture canonical upstream bodies for Chat Completions, Responses, and Anthropic Messages with absent tools, existing x_search filters, client functions, `tool_choice:none`, auto, required, and specific tool choices.
   - Definition of done: every accepted generation request contains exactly one x_search tool and none can disable it.
 
-- [ ] Validate protocol stream and non-stream contracts
+- [x] Validate protocol stream and non-stream contracts
   - Test Chat `[DONE]`, Responses native events, Anthropic message event ordering, reasoning, client tool calls/results, token usage, finish/stop reasons, annotations, citations, and unknown server-side events.
   - Definition of done: standard SDK-style consumers parse every response and x_search never appears as a client-executed tool in Chat or Anthropic.
 
-- [ ] Validate managed Responses continuation
+- [x] Validate managed Responses continuation
   - Cover single/multi-turn text, function call outputs, encrypted reasoning replay, `store:false`, missing/expired IDs, 30-day cleanup, service restart, chain limits, cycle detection, and original-account failover.
   - Definition of done: continuation preserves semantic history without sending downstream `previous_response_id` to the HTTP CLI proxy.
 
-- [ ] Validate multi-account scheduling and cooldowns
+- [x] Validate multi-account scheduling and cooldowns
   - Use at least two fake accounts to test per-model round-robin, capability filtering, affinity preference, enable/disable/delete, 401 refresh, invalid grant, 429 Retry-After, free-usage exhaustion, transient cooldown, and all-accounts-unavailable responses.
   - Definition of done: each request attempts an account at most once and no post-commit stream is replayed on another account.
 
-- [ ] Validate security and plaintext absence
+- [x] Validate security and plaintext absence
   - Scan SQLite files, WAL files, logs, HTTP responses, rendered HTML, and crash/error messages using known fixture tokens, passwords, API keys, subjects, prompts, and billing payloads.
   - Definition of done: sensitive fixtures appear only in live in-memory test inputs and decrypted values explicitly requested by internal tests.
 
-- [ ] Validate admin REST and Web UI security
+- [x] Validate admin REST and Web UI security
   - Test separate admin/client keys, password login, HttpOnly/SameSite/Secure cookie behavior, trusted proxy handling, CSRF, session expiry/revocation, one-time key display, destructive-action confirmation, and unauthorized route access.
   - Definition of done: no management mutation succeeds without the correct admin authentication and CSRF context.
 
-- [ ] Validate route inventory and non-goals
+- [x] Validate route inventory and non-goals
   - Enumerate registered routes and probe legacy completions, Responses WebSocket/compact/retrieve/delete, media, and tenant-management paths.
   - Definition of done: only the locked public/admin/UI/health routes exist; excluded routes return 404/405 and do not invoke upstream services.
 
-- [ ] Run Docker smoke tests
+- [x] Run Docker smoke tests
   - Build the image, start Compose with a temporary data volume and test secrets, call `/healthz`, verify non-root UID and database persistence, restart, and verify loopback-only host publishing.
   - Definition of done: the container survives restart with persisted state and the published port is not bound to a public host interface.
 
@@ -460,13 +461,16 @@
   - Refresh `/models-v2`/fallback catalogs and billing; save only scrubbed response fixtures.
   - Call Chat, Responses, and Anthropic endpoints with a query requiring current X posts; verify upstream x_search, Responses structured search/citations, and inline citations in Chat/Anthropic.
   - Definition of done: `grok` and `grok-4.5` are listed, both accounts route successfully, and at least one OAuth account/model completes native x_search through the CLI proxy.
+  - Blocked: no real xAI OAuth account credentials or operator device-flow approval are available in this environment. Fake-issuer and fake-upstream coverage is complete, but this task explicitly requires two real accounts and live native x_search.
 
 - [ ] Perform live failover and restart acceptance
   - Verify round-robin across two accounts, disable account A, simulate or safely reproduce account B's retryable 429, and verify pre-stream failover plus `Retry-After` behavior.
   - Restart the service and verify accounts, usage, API keys, cooldowns, model snapshots, admin sessions policy, and Responses continuation restore correctly.
   - Definition of done: no request loses persisted state, no committed stream is duplicated, and unavailable-account errors use the correct public protocol shape.
+  - Blocked: this depends on the same unavailable two real accounts and operator approval, plus safe live 429/failover exercise. Equivalent restart/cooldown/failover behavior is covered with fake accounts and local container smoke tests, but that does not satisfy this live acceptance task.
 
 - [ ] Complete final source and license review
   - Compare extracted OAuth/translator behavior with the named CLIProxyAPI source paths, remove unrelated provider/plugin/media/WebSocket code, and verify MIT notices.
   - Review logs, errors, UI, config examples, Docker files, and tests for accidental secrets or claims that billing data is official.
   - Definition of done: the repository contains only the locked scope, attribution is complete, and all validation items above are checked.
+  - Deferred: the source/scope/license/security review is clean, but its definition of done requires every validation item above to be checked. It cannot be marked complete while the two live credential-dependent acceptance tasks remain blocked.

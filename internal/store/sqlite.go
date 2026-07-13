@@ -12,6 +12,8 @@ import (
 	"supergrok-api/migrations"
 )
 
+const cleanupBatchSize = 500
+
 type SQLite struct {
 	DB   *sql.DB
 	path string

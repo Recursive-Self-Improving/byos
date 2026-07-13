@@ -1,0 +1,88 @@
+Third-party notices
+====================
+
+This repository is distributed under the MIT License in LICENSE. The following
+notice applies to the portions of the source that are adapted from third-party
+projects. Source files contain a short attribution comment at the adapted
+subsystem boundary so that the corresponding upstream implementation can be
+reviewed.
+
+CLIProxyAPI
+-----------
+
+Project: CLIProxyAPI (v7)
+Source: https://github.com/router-for-me/CLIProxyAPI
+License: MIT
+Copyright notice from the upstream distribution:
+
+Copyright (c) 2025-2005.9 Luis Pater
+Copyright (c) 2025.9-present Router-For.ME
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Adapted source paths currently represented in this repository:
+
+* `internal/auth/xai/types.go` -> `internal/oauth/xai/constants.go`
+* `internal/auth/xai/xai.go` -> `internal/oauth/xai/discovery.go`,
+  `internal/oauth/xai/device.go`, `internal/oauth/xai/poll.go`, and
+  `internal/oauth/xai/refresh.go`
+* `internal/runtime/executor/xai_executor.go` -> `internal/xai/http.go`,
+  `internal/xai/headers.go`, `internal/xai/responses.go`, and `internal/xai/sse.go`
+* `sdk/cliproxy/auth/selector.go`, `sdk/cliproxy/auth/scheduler.go`, and
+  `sdk/cliproxy/auth/conductor.go` -> routing selection, retry classification,
+  and cooldown behavior in `internal/routing/`
+* `internal/translator/codex/openai/chat-completions/codex_openai_request.go`
+  and `codex_openai_response.go`,
+  `internal/translator/codex/openai/responses/codex_openai-responses_request.go`
+  and `codex_openai-responses_response.go`, and
+  `internal/translator/codex/claude/codex_claude_request.go` and
+  `codex_claude_response.go` -> the corresponding packages under
+  `internal/translate/` (adapted from CLIProxyAPI v7.2.71)
+
+pi-grok-cli
+-----------
+
+Project: pi-grok-cli
+Source: https://github.com/kenryu42/pi-grok-cli
+Billing source: https://github.com/kenryu42/pi-grok-cli/blob/main/src/provider/billing.ts
+License: MIT
+Copyright (c) 2026 kenryu42
+
+The billing endpoint sequence and validated field mapping in
+`internal/usage/xai_billing.go` are derived in part from
+`src/provider/billing.ts`. HTTP transport, headers, strict schema errors, and
+normalized project types are specific to this repository.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

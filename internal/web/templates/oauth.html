@@ -1,0 +1,45 @@
+{{define "content"}}
+<header class="page-heading">
+  <div>
+    <a class="back-link" href="/admin/accounts">← Accounts</a>
+    <div class="eyebrow">xAI device authorization</div>
+    <h1>Connect an account</h1>
+  </div>
+</header>
+{{if not .Flow}}
+<section class="flow-panel">
+  <h2>Start a secure device flow</h2>
+  <p>SuperGrok will display a verification link and user code. OAuth tokens never appear in this page.</p>
+  <form method="post" action="/admin/oauth/new">
+    {{.CSRFField}}
+    <button class="button button-primary" type="submit">Start connection</button>
+  </form>
+</section>
+{{else}}
+<section class="flow-panel" {{if eq .Flow.Status "pending"}}data-oauth-flow data-status-url="{{oauthStatusURL .Flow.State}}" data-expires-at="{{timeAttr .Flow.ExpiresAt}}" data-poll-after="{{durationMS .Flow.PollAfter}}"{{end}}>
+  {{if eq .Flow.Status "pending"}}
+  <div class="eyebrow">Waiting for authorization</div>
+  <h2>Approve the connection with xAI</h2>
+  {{if .Flow.VerificationURL}}<p><a class="verification-link" href="{{.Flow.VerificationURL}}" target="_blank" rel="noopener noreferrer">Open xAI verification</a></p>{{else}}<div class="notice notice-error" role="alert">The verification link was invalid. Cancel this flow and start again.</div>{{end}}
+  <div class="user-code" aria-label="Device user code">{{.Flow.UserCode}}</div>
+  <p class="quiet">Enter this code only on the xAI verification page.</p>
+  <dl class="flow-status">
+    <div><dt>Status</dt><dd data-oauth-status role="status" aria-live="polite">Waiting for approval</dd></div>
+    <div><dt>Time remaining</dt><dd data-oauth-countdown>Calculating…</dd></div>
+  </dl>
+  <form method="post" action="{{oauthCancelURL .Flow.State}}">
+    {{.CSRFField}}
+    <button class="button button-secondary" type="submit">Cancel connection</button>
+  </form>
+  {{else}}
+  <div class="eyebrow">Connection ended</div>
+  <h2>{{if eq .Flow.Status "cancelled"}}Connection cancelled{{else if eq .Flow.Status "denied"}}Authorization denied{{else if eq .Flow.Status "expired"}}Device code expired{{else}}Connection failed{{end}}</h2>
+  {{if .Flow.SanitizedMessage}}<div class="notice notice-warning" role="status">{{.Flow.SanitizedMessage}}</div>{{end}}
+  <form method="post" action="/admin/oauth/new">
+    {{.CSRFField}}
+    <button class="button button-primary" type="submit">Start a new connection</button>
+  </form>
+  {{end}}
+</section>
+{{end}}
+{{end}}

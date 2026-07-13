@@ -2,11 +2,11 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
 	"supergrok-api/internal/accounts"
+	apierrors "supergrok-api/internal/api/errors"
 )
 
 type clientIdentity struct{ ID, Label string }
@@ -25,12 +25,20 @@ func ClientAuth(service *accounts.APIKeyService) func(http.Handler) http.Handler
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
-			scheme, token, ok := strings.Cut(header, " ")
-			if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+			scheme, token, bearer := strings.Cut(header, " ")
+			if !bearer || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+				if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+					token = r.Header.Get("x-api-key")
+				} else {
+					token = ""
+				}
+			}
+			token = strings.TrimSpace(token)
+			if token == "" {
 				writeClientUnauthorized(w, r)
 				return
 			}
-			key, err := service.Authenticate(r.Context(), strings.TrimSpace(token))
+			key, err := service.Authenticate(r.Context(), token)
 			if err != nil {
 				writeClientUnauthorized(w, r)
 				return
@@ -41,12 +49,10 @@ func ClientAuth(service *accounts.APIKeyService) func(http.Handler) http.Handler
 	}
 }
 func writeClientUnauthorized(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", "Bearer")
-	w.WriteHeader(http.StatusUnauthorized)
 	if strings.HasPrefix(r.URL.Path, "/v1/messages") {
-		_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]string{"type": "authentication_error", "message": "invalid authentication credentials"}})
+		apierrors.WriteAnthropic(w, apierrors.Anthropic(apierrors.Authentication, 0))
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "authentication_error", "message": "invalid authentication credentials"}})
+	apierrors.WriteOpenAI(w, apierrors.OpenAI(apierrors.Authentication, 0))
 }
