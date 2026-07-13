@@ -166,19 +166,19 @@
 
 ### xAI upstream adapters
 
-- [ ] Implement the proxy-aware xAI HTTP transport
+- [x] Implement the proxy-aware xAI HTTP transport
   - Add `internal/xai/http.go` and `internal/xai/headers.go`.
   - Honor standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; set connection pooling and the configured request/SSE idle timeouts.
   - Apply `Authorization`, `Content-Type`, `Accept`, `X-XAI-Token-Auth`, `x-grok-client-version`, `x-grok-model-override`, and project User-Agent centrally.
   - Definition of done: inference, model, and billing adapters cannot construct ad hoc authentication headers, and tests assert no credential header is logged.
 
-- [ ] Implement a strict reusable SSE parser
+- [x] Implement a strict reusable SSE parser
   - Add `internal/xai/sse.go`.
   - Support comments, event names, multiple data lines, blank-line event termination, large events, EOF, idle timeout, and cancellation without `bufio.Scanner`'s default token cap.
   - Preserve unknown event payloads for the Responses compatibility path.
   - Definition of done: fragmented network reads and events larger than 64 KiB parse correctly and cancellation closes the upstream body promptly.
 
-- [ ] Implement the xAI Responses executor
+- [x] Implement the xAI Responses executor
   - Add `internal/xai/responses.go`.
   - Always send upstream `stream:true` and `store:false` to `POST /responses`.
   - For non-stream requests, collect events through `response.completed`; fail if the stream ends before a terminal event.
@@ -237,7 +237,7 @@
   - Treat x_search as an internal server-side operation: do not synthesize `server_tool_use`, `web_search_tool_result`, or client `tool_use`; return final inline-cited text with `stop_reason:end_turn`.
   - Definition of done: Messages stream/non-stream fixtures validate message_start/content blocks/message_delta/message_stop ordering and correct stop reason.
 
-- [ ] Implement mandatory x_search injection
+- [x] Implement mandatory x_search injection
   - Add `internal/search/inject.go` and a table-driven invariant suite.
   - Append `{"type":"x_search"}` when absent, preserve an existing x_search tool and all supported filters, reject duplicate reconstruction, and rewrite `tool_choice:"none"` to `"auto"`.
   - Preserve absent/auto/required and explicitly selected non-search function/tool choices while keeping x_search in the tool list.
