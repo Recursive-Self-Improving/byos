@@ -55,13 +55,13 @@
 
 ### SQLite and cryptography
 
-- [ ] Implement SQLite bootstrap and embedded migrations
+- [x] Implement SQLite bootstrap and embedded migrations
   - Add `internal/store/sqlite.go`, `internal/store/migrate.go`, and `migrations/*.sql` embedded into the binary.
   - Enable WAL, foreign keys, busy timeout, and restrictive data-directory/file permissions.
   - Create `schema_migrations`, `accounts`, `account_model_capabilities`, `account_model_states`, `oauth_sessions`, `usage_snapshots`, `api_keys`, `response_sessions`, and `admin_sessions`.
   - Definition of done: a fresh database reaches the latest schema atomically, rerunning migrations is idempotent, and migration failure rolls back without a partial schema.
 
-- [ ] Implement versioned encryption envelopes
+- [x] Implement versioned encryption envelopes
   - Add `internal/crypto/keys.go` and `internal/crypto/envelope.go`.
   - Derive separate OAuth, transcript, billing, identity-fingerprint, and web-session keys with HKDF-SHA256.
   - Encrypt sensitive values with AES-256-GCM using a fresh random nonce per value and a versioned binary/text envelope.
