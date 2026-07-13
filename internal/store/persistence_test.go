@@ -36,12 +36,15 @@ func TestAccountPersistenceReloginAndPlaintextAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.Update(ctx, created.ID, "primary", false); err != nil {
+		t.Fatal(err)
+	}
 	credentials.AccessToken = "rotated-access-token"
 	relogged, err := repo.UpsertLogin(ctx, Account{Label: "ignored", Credentials: credentials, ExpiresAt: &expires})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if relogged.ID != created.ID || relogged.Label != "primary" || relogged.Credentials.AccessToken != "rotated-access-token" {
+	if relogged.ID != created.ID || relogged.Label != "primary" || !relogged.Enabled || relogged.Credentials.AccessToken != "rotated-access-token" {
 		t.Fatalf("relogin result = %+v", relogged)
 	}
 	list, err := repo.List(ctx)

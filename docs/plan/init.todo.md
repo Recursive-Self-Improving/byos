@@ -146,7 +146,7 @@
   - Persist status transitions so service restart resumes only still-valid pending sessions.
   - Definition of done: pending/slow-down/success/denied/expired/cancel/restart tests pass without duplicate poll workers.
 
-- [ ] Verify ID tokens and normalize account identity
+- [x] Verify ID tokens and normalize account identity
   - Add `internal/oauth/xai/identity.go` using `go-oidc` remote key verification.
   - Validate signature, issuer, audience, expiry, and nonce/state linkage where applicable before using email/sub.
   - Refuse to persist an account without a stable verified subject.

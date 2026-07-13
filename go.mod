@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gorilla/csrf v1.7.3
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
@@ -17,7 +18,6 @@ require (
 require (
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

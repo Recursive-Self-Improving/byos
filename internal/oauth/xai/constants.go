@@ -1,7 +1,11 @@
 // Portions adapted from CLIProxyAPI internal/auth/xai/types.go (MIT).
 package xai
 
-import "time"
+import (
+	"errors"
+	"net/http"
+	"time"
+)
 
 const (
 	Issuer              = "https://auth.x.ai"
@@ -27,4 +31,20 @@ func (o Options) withDefaults() Options {
 		o.Scopes = defaults.Scopes
 	}
 	return o
+}
+
+func secureOAuthClient(client *http.Client) *http.Client {
+	if client == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = http.ProxyFromEnvironment
+		client = &http.Client{Transport: transport, Timeout: HTTPTimeout}
+	}
+	copyClient := *client
+	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("OAuth credential endpoint redirects are not allowed")
+	}
+	if copyClient.Timeout == 0 || copyClient.Timeout > HTTPTimeout {
+		copyClient.Timeout = HTTPTimeout
+	}
+	return &copyClient
 }
