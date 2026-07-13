@@ -128,7 +128,7 @@
   - Keep client ID/scopes overrideable through deployment configuration but never through downstream requests.
   - Definition of done: defaults match the reference implementation and are used by both CLI and management login flows.
 
-- [ ] Implement secure OIDC discovery
+- [x] Implement secure OIDC discovery
   - Add `internal/oauth/xai/discovery.go`.
   - Fetch the discovery document with bounded timeout and proxy-aware HTTP transport.
   - Require HTTPS and an `x.ai` or subdomain hostname for device, token, authorization, and JWKS endpoints.
