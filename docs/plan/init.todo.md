@@ -98,7 +98,7 @@
 
 ### Client and administrator authentication
 
-- [ ] Implement downstream API-key generation and storage
+- [x] Implement downstream API-key generation and storage
   - Add `internal/accounts/apikeys.go` and `internal/store/api_keys.go`.
   - Generate at least 32 random bytes, encode a recognizable public prefix, return plaintext only from the create operation, and store prefix plus SHA-256 hash.
   - Record label, creation, last-use, and revocation timestamps.
