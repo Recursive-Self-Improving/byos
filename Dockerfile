@@ -4,23 +4,20 @@ FROM golang:1.26-bookworm AS builder
 
 WORKDIR /src
 ENV CGO_ENABLED=0
-ARG VERSION
-ARG COMMIT
-ARG BUILD_DATE
+ARG VERSION=container
+ARG COMMIT=unavailable
+ARG BUILD_DATE=1970-01-01T00:00:00Z
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN test -n "$VERSION" && test -n "$COMMIT" && test -n "$BUILD_DATE" \
-    && test "$VERSION" != "dev" && test "$VERSION" != "container" \
-    && test "$COMMIT" != "unknown" && test "$COMMIT" != "unavailable"
 RUN GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o /out/supergrok-api ./cmd/supergrok-api
 
 FROM debian:bookworm-slim AS runtime
-ARG VERSION
-ARG COMMIT
-ARG BUILD_DATE
+ARG VERSION=container
+ARG COMMIT=unavailable
+ARG BUILD_DATE=1970-01-01T00:00:00Z
 LABEL org.opencontainers.image.version=$VERSION org.opencontainers.image.revision=$COMMIT org.opencontainers.image.created=$BUILD_DATE
 
 RUN apt-get update \
@@ -29,11 +26,13 @@ RUN apt-get update \
     && groupadd --system --gid 10001 supergrok \
     && useradd --system --uid 10001 --gid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin --no-create-home supergrok \
     && install --directory --mode=0700 --owner=supergrok --group=supergrok /data \
+    && install --directory --mode=0755 /etc/supergrok-api \
     && install --directory --mode=0755 /usr/share/doc/supergrok-api
 
 COPY --from=builder /out/supergrok-api /usr/local/bin/supergrok-api
 COPY --from=builder /src/LICENSE /usr/share/doc/supergrok-api/LICENSE
 COPY --from=builder /src/THIRD_PARTY_NOTICES /usr/share/doc/supergrok-api/THIRD_PARTY_NOTICES
+COPY --from=builder /src/deploy/railway.yaml /etc/supergrok-api/railway.yaml
 
 WORKDIR /data
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

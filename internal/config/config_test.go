@@ -23,6 +23,19 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestRailwayConfig(t *testing.T) {
+	cfg, err := Load("../../deploy/railway.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Server.TrustedProxies, []string{"100.0.0.0/8"}) {
+		t.Fatalf("trusted proxies = %v", cfg.Server.TrustedProxies)
+	}
+	if cfg.Server.Listen != DefaultListen || cfg.DataDir != DefaultDataDir {
+		t.Fatalf("Railway config changed runtime defaults: %+v", cfg)
+	}
+}
+
 func TestYAMLOverrideRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte("server:\n  listen: 127.0.0.1:9090\n  trusted_proxies: [127.0.0.1, '10.0.0.0/8']\ndata_dir: /tmp/supergrok\nupstream:\n  request_timeout: 3m\noauth:\n  client_id: deployment-client\n  scopes: openid offline_access\n")
