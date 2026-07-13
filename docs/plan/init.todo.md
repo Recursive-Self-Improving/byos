@@ -29,25 +29,25 @@
   - Pin the selected packages: `modernc.org/sqlite v1.53.0`, `github.com/coreos/go-oidc/v3 v3.20.0`, `github.com/gorilla/csrf v1.7.3`, `github.com/tidwall/gjson v1.18.0`, `github.com/tidwall/sjson v1.2.5`, `github.com/tiktoken-go/tokenizer v0.7.0`, `golang.org/x/oauth2 v0.30.0`, `golang.org/x/sync v0.18.0`, and `gopkg.in/yaml.v3 v3.0.1`.
   - Definition of done: `go mod tidy` resolves reproducibly and the empty command package builds with Go 1.26.
 
-- [ ] Create the service package boundaries
+- [x] Create the service package boundaries
   - Create `cmd/supergrok-api`, `internal/app`, `internal/config`, `internal/store`, `internal/crypto`, `internal/oauth/xai`, `internal/xai`, `internal/accounts`, `internal/routing`, `internal/models`, `internal/usage`, `internal/sessions`, `internal/search`, `internal/translate`, `internal/api`, and `internal/web`.
   - Add command dispatch placeholders for `serve`, `login`, and `version`; placeholders may only parse commands and return explicit not-initialized errors until their implementation tasks are completed.
   - Definition of done: package imports are acyclic and `go test ./...` compiles the scaffold.
 
-- [ ] Implement YAML configuration and fixed defaults
+- [x] Implement YAML configuration and fixed defaults
   - Add `internal/config/config.go` and focused tests.
   - Define `server.listen`, `data_dir`, upstream base URL, Grok client version, model default/aliases/allowlist, request timeout, SSE idle timeout, maximum body size, usage refresh interval, and Responses retention.
   - Lock defaults to `127.0.0.1:8080`, `https://cli-chat-proxy.grok.com/v1`, Grok client `0.2.99`, model `grok-4.5`, alias `grok`, 16 MiB request bodies, five-minute usage refresh, and 30-day session retention.
   - Reject configuration that attempts to remove mandatory x_search behavior or exceeds the locked single-instance scope.
   - Definition of done: default config and YAML overrides round-trip in tests, invalid durations/sizes/model aliases fail at startup, and secrets never appear in serialized config output.
 
-- [ ] Enforce startup secret validation
+- [x] Enforce startup secret validation
   - Add secret loading to `internal/config/secrets.go`.
   - Require `SUPERGROK_MASTER_KEY` as exactly 32 decoded bytes, `SUPERGROK_ADMIN_PASSWORD`, and `SUPERGROK_ADMIN_API_KEY`.
   - Accept secrets from environment variables or mounted secret files without copying them into logs or config dumps.
   - Definition of done: missing/malformed secrets fail closed with non-secret error messages; valid values are available only through secret-specific accessors.
 
-- [ ] Build application lifecycle and structured logging
+- [x] Build application lifecycle and structured logging
   - Add `internal/app/app.go`, `internal/app/lifecycle.go`, and `internal/app/logging.go`.
   - Use `log/slog`, attach request IDs and opaque account IDs, and disable prompt/response body logging by default.
   - Wire root context cancellation, worker shutdown, HTTP graceful shutdown, finite SSE drain, and SQLite close/checkpoint ordering.
