@@ -60,6 +60,8 @@ The service deliberately runs as one replica. SQLite state, routing cooldowns, a
 
 OpenAI-compatible endpoints accept `Authorization: Bearer <downstream-key>`. Anthropic-compatible endpoints also accept `x-api-key: <downstream-key>`.
 
+Unauthenticated administrator password and administrator API-key failures share persisted per-source throttling. After repeated failures, guarded requests return HTTP `429` with `Retry-After`; blocked unauthenticated requests do not evaluate credentials. Source locks survive process restarts, successful guarded authentication resets only that source, and a conservative global circuit breaker limits distributed guessing without exposing failure counts. An already-authenticated Web session may submit the correct administrator password to rotate its session despite an active block; incorrect re-login attempts still count, while that successful bypass leaves persisted throttle state unchanged.
+
 ## Required secrets
 
 | Variable | Requirement |
@@ -240,6 +242,8 @@ A YAML file can override server, upstream, OAuth, model, limit, usage, and reten
 - Downstream API keys are stored as hashes; account credentials and sensitive state are encrypted before SQLite persistence.
 - A fresh process is healthy before it is ready. Readiness requires at least one enabled, authenticated account that can serve the configured default model.
 - The service has no multi-instance coordination. Run one process against one data directory.
+- Client addresses for administrator authentication are derived from `X-Forwarded-For` only when the immediate peer matches `server.trusted_proxies`; untrusted forwarding headers are ignored and malformed trusted chains fail closed.
+- Authentication throttle logs contain only keyed source identifiers and state transitions, never raw client addresses, passwords, bearer tokens, or authorization headers.
 
 ## License
 

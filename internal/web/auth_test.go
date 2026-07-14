@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"supergrok-api/internal/requestsource"
 )
 
 func TestAdminSessionRepositoryLifecycleAndEncryptedState(t *testing.T) {
@@ -164,11 +166,11 @@ func TestCSRFMiddlewareProtectsLoginAndManagementMutations(t *testing.T) {
 }
 
 func TestCookieSecurityAndTrustedProxyHandling(t *testing.T) {
-	trusted, err := ParseTrustedProxies([]string{"10.0.0.0/8", "2001:db8::/32"})
+	trusted, err := requestsource.ParseTrustedProxies([]string{"10.0.0.0/8", "2001:db8::/32"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseTrustedProxies([]string{"not-a-network"}); err == nil {
+	if _, err := requestsource.ParseTrustedProxies([]string{"not-a-network"}); err == nil {
 		t.Fatal("invalid trusted proxy was accepted")
 	}
 	for _, test := range []struct {
@@ -252,6 +254,58 @@ func TestCookieSecurityAndTrustedProxyHandling(t *testing.T) {
 	}
 	if untrustedRecorder.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatal("untrusted forwarded header enabled HSTS")
+	}
+}
+
+func TestLoginThrottleBlocksThenResetsOnSuccess(t *testing.T) {
+	fixture := newWebFixture(t)
+	browser := newTestBrowser(t, fixture.handler.Routes())
+	response, body := browser.request(t, http.MethodGet, "/admin/login", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("login page status = %d", response.StatusCode)
+	}
+	token := csrfToken(t, body)
+	for failure := range 3 {
+		response, body = browser.request(t, http.MethodPost, "/admin/login", url.Values{"password": {"wrong password"}, "gorilla.csrf.Token": {token}})
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("failure %d status = %d body=%s", failure+1, response.StatusCode, body)
+		}
+		token = csrfToken(t, body)
+	}
+	response, body = browser.request(t, http.MethodPost, "/admin/login", url.Values{"password": {"correct horse battery staple"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "5" || !strings.Contains(body, "Too many authentication attempts") {
+		t.Fatalf("blocked response = %d retry=%q body=%s", response.StatusCode, response.Header.Get("Retry-After"), body)
+	}
+	var sessions int
+	if err := fixture.database.DB.QueryRow(`SELECT count(*) FROM admin_sessions`).Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("blocked login session count = %d, %v", sessions, err)
+	}
+	fixture.clock.value = fixture.clock.value.Add(5 * time.Second)
+	response, body = browser.request(t, http.MethodGet, "/admin/login", nil)
+	token = csrfToken(t, body)
+	response, _ = browser.request(t, http.MethodPost, "/admin/login", url.Values{"password": {"correct horse battery staple"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/" {
+		t.Fatalf("post-throttle login = %d %q", response.StatusCode, response.Header.Get("Location"))
+	}
+}
+
+func TestAuthenticatedReloginCountsFailuresButValidPasswordBypassesBlock(t *testing.T) {
+	fixture := newWebFixture(t)
+	browser, token := loginBrowser(t, fixture)
+	for failure := range 3 {
+		response, body := browser.request(t, http.MethodPost, "/admin/login", url.Values{"password": {"wrong password"}, "gorilla.csrf.Token": {token}})
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("authenticated failure %d status=%d body=%s", failure+1, response.StatusCode, body)
+		}
+		token = csrfToken(t, body)
+	}
+	response, body := browser.request(t, http.MethodPost, "/admin/login", url.Values{"password": {"wrong password"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "5" {
+		t.Fatalf("authenticated block = %d retry=%q body=%s", response.StatusCode, response.Header.Get("Retry-After"), body)
+	}
+	response, _ = browser.request(t, http.MethodPost, "/admin/login", url.Values{"password": {"correct horse battery staple"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/" {
+		t.Fatalf("authenticated relogin bypass = %d %q", response.StatusCode, response.Header.Get("Location"))
 	}
 }
 

@@ -7,15 +7,13 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"fmt"
-	"net"
 	"net/http"
 	"net/netip"
-	"strings"
 	"time"
 
 	"github.com/gorilla/csrf"
 
+	"supergrok-api/internal/auththrottle"
 	"supergrok-api/internal/store"
 )
 
@@ -32,78 +30,9 @@ type SessionStore interface {
 	Revoke(context.Context, string, time.Time) error
 }
 
-// TrustedProxies is an allowlist of network peers permitted to assert that the
-// original request used HTTPS. Forwarded headers from every other peer are
-// ignored.
-type TrustedProxies struct {
-	prefixes []netip.Prefix
-}
-
-func ParseTrustedProxies(values []string) (TrustedProxies, error) {
-	prefixes := make([]netip.Prefix, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return TrustedProxies{}, errors.New("trusted proxy entry cannot be blank")
-		}
-		if address, err := netip.ParseAddr(value); err == nil {
-			address = address.Unmap()
-			prefixes = append(prefixes, netip.PrefixFrom(address, address.BitLen()))
-			continue
-		}
-		prefix, err := netip.ParsePrefix(value)
-		if err != nil {
-			return TrustedProxies{}, fmt.Errorf("invalid trusted proxy %q", value)
-		}
-		address := prefix.Addr().Unmap()
-		bits := prefix.Bits()
-		if address.Is4() && bits > 32 {
-			bits -= 96
-		}
-		if bits < 0 || bits > address.BitLen() {
-			return TrustedProxies{}, fmt.Errorf("invalid trusted proxy %q", value)
-		}
-		prefixes = append(prefixes, netip.PrefixFrom(address, bits).Masked())
-	}
-	return TrustedProxies{prefixes: prefixes}, nil
-}
-
-func (p TrustedProxies) RequestIsHTTPS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	peer, ok := remoteAddress(r.RemoteAddr)
-	if !ok || !p.contains(peer) {
-		return false
-	}
-	values := r.Header.Values("X-Forwarded-Proto")
-	if len(values) == 0 {
-		return false
-	}
-	parts := strings.Split(values[len(values)-1], ",")
-	return strings.EqualFold(strings.TrimSpace(parts[len(parts)-1]), "https")
-}
-
-func (p TrustedProxies) contains(address netip.Addr) bool {
-	address = address.Unmap()
-	for _, prefix := range p.prefixes {
-		if prefix.Contains(address) {
-			return true
-		}
-	}
-	return false
-}
-
-func remoteAddress(value string) (netip.Addr, bool) {
-	host, _, err := net.SplitHostPort(value)
-	if err != nil {
-		host = strings.Trim(value, "[]")
-	}
-	address, err := netip.ParseAddr(host)
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	return address.Unmap(), true
+type LoginAttemptPolicy interface {
+	Evaluate(context.Context, netip.Addr, auththrottle.Surface, func() bool) (auththrottle.Outcome, error)
+	RecordFailure(context.Context, netip.Addr, auththrottle.Surface) (auththrottle.Outcome, error)
 }
 
 type authContextKey struct{}

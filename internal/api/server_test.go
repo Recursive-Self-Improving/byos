@@ -7,16 +7,34 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
 	"supergrok-api/internal/accounts"
+	"supergrok-api/internal/auththrottle"
 	"supergrok-api/internal/store"
 )
 
 func statusHandler(status int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })
 }
+
+type directAdminAttempts struct{}
+
+func (directAdminAttempts) Evaluate(_ context.Context, _ netip.Addr, _ auththrottle.Surface, verify func() bool) (auththrottle.Outcome, error) {
+	if verify() {
+		return auththrottle.Outcome{Disposition: auththrottle.Authenticated}, nil
+	}
+	return auththrottle.Outcome{Disposition: auththrottle.Rejected}, nil
+}
+
+type fixedAdminSource struct{}
+
+func (fixedAdminSource) ClientIP(*http.Request) (netip.Addr, error) {
+	return netip.MustParseAddr("192.0.2.10"), nil
+}
+
 func TestServerRouteInventoryAndAuthScopes(t *testing.T) {
 	database, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
@@ -29,7 +47,7 @@ func TestServerRouteInventoryAndAuthScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	handlers := ServerHandlers{Health: statusHandler(200), Ready: statusHandler(200), Models: statusHandler(204), Chat: statusHandler(204), Responses: statusHandler(204), Messages: statusHandler(204), CountTokens: statusHandler(204), Admin: statusHandler(204), Web: statusHandler(200)}
-	server := NewServer(ServerConfig{Handlers: handlers, ClientKeys: keys, AdminAPIKey: "admin"})
+	server := NewServer(ServerConfig{Handlers: handlers, ClientKeys: keys, AdminAPIKey: "admin", AdminAttempts: directAdminAttempts{}, AdminSources: fixedAdminSource{}})
 	tests := []struct {
 		method, path, auth string
 		want               int

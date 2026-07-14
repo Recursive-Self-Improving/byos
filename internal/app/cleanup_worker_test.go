@@ -39,8 +39,9 @@ func TestCleanupWorkerUsesExpiryAndRetentionCutoffs(t *testing.T) {
 	oauth := &fakeCleaner{}
 	admin := &fakeCleaner{}
 	usage := &fakeCleaner{}
+	attempts := &fakeCleaner{}
 	cooldowns := &fakePromoter{}
-	worker := NewCleanupWorker(responses, oauth, admin, usage, cooldowns, 30*24*time.Hour)
+	worker := NewCleanupWorker(responses, oauth, admin, usage, attempts, cooldowns, 30*24*time.Hour, 24*time.Hour)
 	worker.now = func() time.Time { return now }
 	if err := worker.runOnce(t.Context()); err != nil {
 		t.Fatal(err)
@@ -53,6 +54,9 @@ func TestCleanupWorkerUsesExpiryAndRetentionCutoffs(t *testing.T) {
 	if len(usage.cutoffs) != 1 || !usage.cutoffs[0].Equal(now.Add(-30*24*time.Hour)) {
 		t.Fatalf("usage cutoff=%v", usage.cutoffs)
 	}
+	if len(attempts.cutoffs) != 1 || !attempts.cutoffs[0].Equal(now.Add(-24*time.Hour)) {
+		t.Fatalf("attempt cutoff=%v", attempts.cutoffs)
+	}
 	if len(cooldowns.values) != 1 || !cooldowns.values[0].Equal(now) {
 		t.Fatalf("cooldown=%v", cooldowns.values)
 	}
@@ -62,13 +66,13 @@ func TestCleanupWorkerUsesExpiryAndRetentionCutoffs(t *testing.T) {
 }
 func TestCleanupWorkerCancellationAndErrors(t *testing.T) {
 	sentinel := errors.New("cleanup failed")
-	worker := NewCleanupWorker(&fakeCleaner{err: sentinel}, nil, nil, nil, nil, time.Hour)
+	worker := NewCleanupWorker(&fakeCleaner{err: sentinel}, nil, nil, nil, nil, nil, time.Hour, time.Hour)
 	if err := worker.runOnce(t.Context()); !errors.Is(err, sentinel) {
 		t.Fatalf("error=%v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	worker = NewCleanupWorker(nil, nil, nil, nil, nil, time.Hour)
+	worker = NewCleanupWorker(nil, nil, nil, nil, nil, nil, time.Hour, time.Hour)
 	if err := worker.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v", err)
 	}
@@ -76,7 +80,7 @@ func TestCleanupWorkerCancellationAndErrors(t *testing.T) {
 
 func TestCleanupWorkerCapsBatchesPerRun(t *testing.T) {
 	cleaner := &fakeCleaner{count: 500}
-	worker := NewCleanupWorker(cleaner, nil, nil, nil, nil, time.Hour)
+	worker := NewCleanupWorker(cleaner, nil, nil, nil, nil, nil, time.Hour, time.Hour)
 	worker.maxBatches = 3
 	if err := worker.runOnce(t.Context()); err != nil {
 		t.Fatal(err)
@@ -101,7 +105,7 @@ func (c *cancelingCleaner) Cleanup(context.Context, time.Time) (int64, error) {
 func TestCleanupWorkerStopsBetweenBatchesOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cleaner := &cancelingCleaner{cancel: cancel}
-	worker := NewCleanupWorker(cleaner, nil, nil, nil, nil, time.Hour)
+	worker := NewCleanupWorker(cleaner, nil, nil, nil, nil, nil, time.Hour, time.Hour)
 	err := worker.runOnce(ctx)
 	if !errors.Is(err, context.Canceled) || cleaner.calls != 1 {
 		t.Fatalf("err=%v calls=%d", err, cleaner.calls)

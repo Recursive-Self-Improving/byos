@@ -12,11 +12,13 @@ import (
 
 type ServerHandlers struct{ Health, Ready, Models, Chat, Responses, Messages, CountTokens, Admin, Web http.Handler }
 type ServerConfig struct {
-	Handlers     ServerHandlers
-	ClientKeys   *accounts.APIKeyService
-	AdminAPIKey  string
-	MaxBodyBytes int64
-	Logger       *slog.Logger
+	Handlers      ServerHandlers
+	ClientKeys    *accounts.APIKeyService
+	AdminAPIKey   string
+	AdminAttempts middleware.AdminAttemptPolicy
+	AdminSources  middleware.SourceResolver
+	MaxBodyBytes  int64
+	Logger        *slog.Logger
 }
 
 func NewServer(config ServerConfig) http.Handler {
@@ -31,7 +33,7 @@ func NewServer(config ServerConfig) http.Handler {
 	mux.Handle("POST /v1/messages", clientAuth(limit(config.Handlers.Messages)))
 	mux.Handle("POST /v1/messages/count_tokens", clientAuth(limit(config.Handlers.CountTokens)))
 	if config.Handlers.Admin != nil {
-		mux.Handle("/admin/api/v1/", middleware.AdminAuth(config.AdminAPIKey)(config.Handlers.Admin))
+		mux.Handle("/admin/api/v1/", middleware.AdminAuth(config.AdminAPIKey, config.AdminAttempts, config.AdminSources)(config.Handlers.Admin))
 	}
 	if config.Handlers.Web != nil {
 		mux.Handle("/admin/", config.Handlers.Web)

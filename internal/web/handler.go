@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gorilla/csrf"
+
+	"supergrok-api/internal/requestsource"
 )
 
 const defaultSessionTTL = 12 * time.Hour
@@ -20,10 +22,11 @@ const defaultSessionTTL = 12 * time.Hour
 type Options struct {
 	AdminPassword string
 	SessionStore  SessionStore
+	LoginAttempts LoginAttemptPolicy
 	CSRFKey       [32]byte
 	Services      Services
 	SessionTTL    time.Duration
-	TrustedProxy  TrustedProxies
+	TrustedProxy  requestsource.TrustedProxies
 	Now           func() time.Time
 }
 
@@ -31,9 +34,10 @@ type Options struct {
 // authentication, CSRF, cookie, and security-header middleware.
 type Handler struct {
 	sessions       SessionStore
+	loginAttempts  LoginAttemptPolicy
 	services       Services
 	sessionTTL     time.Duration
-	trustedProxies TrustedProxies
+	trustedProxies requestsource.TrustedProxies
 	now            func() time.Time
 	passwordHash   [32]byte
 	loginCSRFKey   [32]byte
@@ -47,6 +51,9 @@ func NewHandler(options Options) (*Handler, error) {
 	}
 	if options.SessionStore == nil {
 		return nil, errors.New("admin session store is required")
+	}
+	if options.LoginAttempts == nil {
+		return nil, errors.New("administrator login attempt policy is required")
 	}
 	if options.Services.Accounts == nil || options.Services.OAuth == nil || options.Services.Usage == nil || options.Services.Models == nil || options.Services.APIKeys == nil || options.Services.Readiness == nil {
 		return nil, errors.New("all Web UI services are required")
@@ -71,6 +78,7 @@ func NewHandler(options Options) (*Handler, error) {
 	loginKeyMaterial := append([]byte("supergrok-api/login-csrf/v1\x00"), options.CSRFKey[:]...)
 	handler := &Handler{
 		sessions:       options.SessionStore,
+		loginAttempts:  options.LoginAttempts,
 		services:       options.Services,
 		sessionTTL:     options.SessionTTL,
 		trustedProxies: options.TrustedProxy,

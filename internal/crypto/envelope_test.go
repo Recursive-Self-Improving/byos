@@ -3,6 +3,7 @@ package crypto
 import (
 	"bytes"
 	"encoding/base64"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -71,5 +72,12 @@ func TestDerivedKeysAreSeparatedAndFingerprintStable(t *testing.T) {
 	}
 	if first == keys.IdentityFingerprint("https://auth.x.ai", "other") {
 		t.Fatal("fingerprint ignores subject")
+	}
+	source := keys.AdminAuthSourceFingerprint(netip.MustParseAddr("192.0.2.10"))
+	if source != keys.AdminAuthSourceFingerprint(netip.MustParseAddr("::ffff:192.0.2.10")) {
+		t.Fatal("source fingerprint does not normalize IPv4-mapped addresses")
+	}
+	if source == keys.AdminAuthSourceFingerprint(netip.MustParseAddr("192.0.2.11")) || source == first {
+		t.Fatal("source fingerprint is not separated")
 	}
 }

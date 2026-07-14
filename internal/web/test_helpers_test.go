@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -13,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"supergrok-api/internal/auththrottle"
 	appcrypto "supergrok-api/internal/crypto"
+	"supergrok-api/internal/requestsource"
 	"supergrok-api/internal/store"
 )
 
@@ -195,6 +198,7 @@ type webFixture struct {
 	clock      *testClock
 	database   *store.SQLite
 	sessions   *store.AdminSessionRepository
+	attempts   *store.AdminAuthThrottleRepository
 	handler    *Handler
 	accounts   *fakeAccountService
 	oauth      *fakeOAuthService
@@ -218,6 +222,11 @@ func newWebFixture(t *testing.T, configure ...func(*Options)) *webFixture {
 		t.Fatal(err)
 	}
 	sessions := store.NewAdminSessionRepository(database.DB, keys)
+	attempts := store.NewAdminAuthThrottleRepository(database.DB)
+	guard, err := auththrottle.NewGuard(attempts, keys.AdminAuthSourceFingerprint, auththrottle.DefaultPolicy(), slog.New(slog.NewTextHandler(io.Discard, nil)), clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	search := true
 	limit := 100.0
 	monthly := 25.0
@@ -240,6 +249,8 @@ func newWebFixture(t *testing.T, configure ...func(*Options)) *webFixture {
 	options := Options{
 		AdminPassword: "correct horse battery staple",
 		SessionStore:  sessions,
+		LoginAttempts: guard,
+		TrustedProxy:  requestsource.TrustedProxies{},
 		CSRFKey:       keys.WebSession(),
 		Services:      Services{Accounts: accounts, OAuth: oauth, Usage: usage, Models: models, APIKeys: apiKeys, Readiness: fakeReadinessService{ready: true}},
 		SessionTTL:    30 * time.Minute,
@@ -252,7 +263,7 @@ func newWebFixture(t *testing.T, configure ...func(*Options)) *webFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &webFixture{clock: clock, database: database, sessions: sessions, handler: handler, accounts: accounts, oauth: oauth, usage: usage, models: models, apiKeys: apiKeys, derivedKey: keys}
+	return &webFixture{clock: clock, database: database, sessions: sessions, attempts: attempts, handler: handler, accounts: accounts, oauth: oauth, usage: usage, models: models, apiKeys: apiKeys, derivedKey: keys}
 }
 
 type testBrowser struct {

@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"testing"
 	"time"
@@ -11,7 +12,7 @@ import (
 )
 
 func TestCleanupRepositoriesUseFixedBatches(t *testing.T) {
-	for _, name := range []string{"responses", "oauth", "admin", "usage", "cooldowns"} {
+	for _, name := range []string{"responses", "oauth", "admin", "usage", "cooldowns", "attempts"} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			database, err := Open(ctx, t.TempDir())
@@ -44,8 +45,18 @@ func TestCleanupRepositoriesUseFixedBatches(t *testing.T) {
 					_, err = tx.ExecContext(ctx, `INSERT INTO usage_snapshots(account_id,normalized_json,fetched_at) VALUES(?,?,?)`, account.ID, `{}`, now.Add(-time.Hour).Unix())
 				case "cooldowns":
 					_, err = tx.ExecContext(ctx, `INSERT INTO account_model_states(account_id,model,cooldown_until,backoff_level) VALUES(?,?,?,1)`, account.ID, fmt.Sprintf("model-%d", index), now.Add(-time.Hour).Unix())
+				case "attempts":
+					hash := sha256.Sum256([]byte(fmt.Sprintf("attempt-%d", index)))
+					_, err = tx.ExecContext(ctx, `INSERT INTO admin_auth_sources(source_hash,failure_count,last_failure_at,updated_at) VALUES(?,1,?,?)`, hash[:], now.Add(-2*time.Hour).Unix(), now.Add(-2*time.Hour).Unix())
 				}
 				if err != nil {
+					_ = tx.Rollback()
+					t.Fatal(err)
+				}
+			}
+			if name == "attempts" {
+				fresh := sha256.Sum256([]byte("fresh-attempt"))
+				if _, err = tx.ExecContext(ctx, `INSERT INTO admin_auth_sources(source_hash,failure_count,last_failure_at,updated_at) VALUES(?,1,?,?)`, fresh[:], now.Unix(), now.Unix()); err != nil {
 					_ = tx.Rollback()
 					t.Fatal(err)
 				}
@@ -81,9 +92,22 @@ func TestCleanupRepositoriesUseFixedBatches(t *testing.T) {
 				if err == nil {
 					second, err = NewCooldownRepository(database.DB).PromoteExpired(ctx, now)
 				}
+			case "attempts":
+				cutoff := now.Add(-time.Minute)
+				first, err = NewAdminAuthThrottleRepository(database.DB).Cleanup(ctx, cutoff)
+				if err == nil {
+					second, err = NewAdminAuthThrottleRepository(database.DB).Cleanup(ctx, cutoff)
+				}
 			}
 			if err != nil || first != cleanupBatchSize || second != 1 {
 				t.Fatalf("first=%d second=%d err=%v", first, second, err)
+			}
+			if name == "attempts" {
+				fresh := sha256.Sum256([]byte("fresh-attempt"))
+				var count int
+				if err := database.DB.QueryRowContext(ctx, `SELECT count(*) FROM admin_auth_sources WHERE source_hash=?`, fresh[:]).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("fresh attempt count=%d err=%v", count, err)
+				}
 			}
 		})
 	}

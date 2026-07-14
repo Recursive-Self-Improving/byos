@@ -4,9 +4,12 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"supergrok-api/internal/auththrottle"
 )
 
 func (h *Handler) handleAdminRedirect(w http.ResponseWriter, r *http.Request) {
@@ -46,11 +49,61 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		h.renderError(w, r, http.StatusBadRequest, "The sign-in form could not be read.")
 		return
 	}
-	if !passwordMatches(h.passwordHash, r.PostForm.Get("password")) {
-		data := loginPage{layoutData: h.layout(r, "Sign in", ""), Error: "The administrator password was not accepted."}
-		h.render(w, "login", http.StatusUnauthorized, data)
+	password := r.PostForm.Get("password")
+	if state.authenticated() {
+		if passwordMatches(h.passwordHash, password) {
+			h.completeLogin(w, r, state)
+			return
+		}
+		source, err := h.trustedProxies.ClientIP(r)
+		if err != nil {
+			h.renderError(w, r, http.StatusServiceUnavailable, "Administration is temporarily unavailable.")
+			return
+		}
+		outcome, err := h.loginAttempts.RecordFailure(r.Context(), source, auththrottle.SurfaceWebPassword)
+		if err != nil {
+			h.renderError(w, r, http.StatusServiceUnavailable, "Administration is temporarily unavailable.")
+			return
+		}
+		if outcome.Disposition == auththrottle.Blocked {
+			w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(outcome.RetryAfter), 10))
+			h.renderError(w, r, http.StatusTooManyRequests, "Too many authentication attempts. Try again later.")
+			return
+		}
+		h.renderLoginRejected(w, r)
 		return
 	}
+	source, err := h.trustedProxies.ClientIP(r)
+	if err != nil {
+		h.renderError(w, r, http.StatusServiceUnavailable, "Administration is temporarily unavailable.")
+		return
+	}
+	outcome, err := h.loginAttempts.Evaluate(r.Context(), source, auththrottle.SurfaceWebPassword, func() bool {
+		return passwordMatches(h.passwordHash, password)
+	})
+	if err != nil {
+		h.renderError(w, r, http.StatusServiceUnavailable, "Administration is temporarily unavailable.")
+		return
+	}
+	switch outcome.Disposition {
+	case auththrottle.Blocked:
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(outcome.RetryAfter), 10))
+		h.renderError(w, r, http.StatusTooManyRequests, "Too many authentication attempts. Try again later.")
+	case auththrottle.Rejected:
+		h.renderLoginRejected(w, r)
+	case auththrottle.Authenticated:
+		h.completeLogin(w, r, state)
+	default:
+		h.renderError(w, r, http.StatusServiceUnavailable, "Administration is temporarily unavailable.")
+	}
+}
+
+func (h *Handler) renderLoginRejected(w http.ResponseWriter, r *http.Request) {
+	data := loginPage{layoutData: h.layout(r, "Sign in", ""), Error: "The administrator password was not accepted."}
+	h.render(w, "login", http.StatusUnauthorized, data)
+}
+
+func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request, state authState) {
 	now := h.now()
 	created, err := h.sessions.Create(r.Context(), now, now.Add(h.sessionTTL))
 	if err != nil {
@@ -67,6 +120,14 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	h.clearAuthCookies(w, r)
 	h.setSessionCookie(w, r, created)
 	h.redirect(w, r, "/admin/")
+}
+
+func retryAfterSeconds(value time.Duration) int64 {
+	seconds := int64((value + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
 }
 
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {

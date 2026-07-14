@@ -18,10 +18,12 @@ import (
 	"supergrok-api/internal/api/admin"
 	apianthropic "supergrok-api/internal/api/anthropic"
 	apiopenai "supergrok-api/internal/api/openai"
+	"supergrok-api/internal/auththrottle"
 	"supergrok-api/internal/config"
 	appcrypto "supergrok-api/internal/crypto"
 	"supergrok-api/internal/models"
 	oauthxai "supergrok-api/internal/oauth/xai"
+	"supergrok-api/internal/requestsource"
 	"supergrok-api/internal/routing"
 	"supergrok-api/internal/sessions"
 	"supergrok-api/internal/store"
@@ -223,6 +225,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	usageRepo := store.NewUsageRepository(database.DB, keys)
 	localUsageRepo := store.NewLocalUsageRepository(database.DB)
 	adminSessionRepo := store.NewAdminSessionRepository(database.DB, keys)
+	adminThrottleRepo := store.NewAdminAuthThrottleRepository(database.DB)
 	apiKeyService := accounts.NewAPIKeyService(store.NewAPIKeyRepository(database.DB))
 	upstream := xai.NewClient(xai.HTTPConfig{BaseURL: cfg.Upstream.CLIProxyBaseURL, ClientVersion: cfg.Upstream.GrokClientVersion, UserAgent: "supergrok-api", RequestTimeout: cfg.Upstream.RequestTimeout.Duration(), SSEIdleTimeout: cfg.Upstream.SSEIdleTimeout.Duration()})
 	catalog := models.NewCatalog(capabilityRepo, models.NewUpstream(upstream), cfg.Models.Allowlist, cfg.Models.Aliases)
@@ -272,13 +275,18 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	webOAuth := newWebOAuthAdapter(ctx, accountService, oauthService)
 	handlers.Admin = admin.NewHandler(admin.Services{Accounts: accountService, OAuth: webOAuth, Usage: usageService, UsageRefresh: usageWorker, Models: catalog, ModelsRefresh: modelWorker, Cooldowns: cooldownRepo, APIKeys: apiKeyService})
 	webAccounts := &webAccountAdapter{accounts: accountService, models: catalog, usage: usageService, cooldowns: cooldownRepo, now: func() time.Time { return time.Now().UTC() }}
-	trustedProxies, err := web.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	trustedProxies, err := requestsource.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	if err != nil {
+		return fail(err)
+	}
+	adminAuthGuard, err := auththrottle.NewGuard(adminThrottleRepo, keys.AdminAuthSourceFingerprint, auththrottle.DefaultPolicy(), logger, nil)
 	if err != nil {
 		return fail(err)
 	}
 	webHandler, err := web.NewHandler(web.Options{
 		AdminPassword: secrets.AdminPassword(),
 		SessionStore:  adminSessionRepo,
+		LoginAttempts: adminAuthGuard,
 		CSRFKey:       deriveWebCSRFKey(keys.WebSession()),
 		TrustedProxy:  trustedProxies,
 		Services: web.Services{
@@ -294,9 +302,9 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		return fail(err)
 	}
 	handlers.Web = webHandler
-	root := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: apiKeyService, AdminAPIKey: secrets.AdminAPIKey(), MaxBodyBytes: cfg.Limits.MaxBodyBytes, Logger: logger})
+	root := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: apiKeyService, AdminAPIKey: secrets.AdminAPIKey(), AdminAttempts: adminAuthGuard, AdminSources: trustedProxies, MaxBodyBytes: cfg.Limits.MaxBodyBytes, Logger: logger})
 	trackedRoot, activity := api.NewActivityTracker(root)
-	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, refreshService, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, cooldownRepo, 30*24*time.Hour), webOAuth: webOAuth, activity: activity, shutdownTimeout: 10 * time.Second, forceDrainTimeout: 5 * time.Second}
+	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, refreshService, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, adminThrottleRepo, cooldownRepo, 30*24*time.Hour, auththrottle.DefaultPolicy().SourceRetention), webOAuth: webOAuth, activity: activity, shutdownTimeout: 10 * time.Second, forceDrainTimeout: 5 * time.Second}
 	runtime.Server = &http.Server{Addr: cfg.Server.Listen, Handler: trackedRoot, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	return runtime, nil
 }

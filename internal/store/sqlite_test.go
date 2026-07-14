@@ -37,7 +37,7 @@ func TestOpenMigratesAndConfiguresSQLite(t *testing.T) {
 	if foreignKeys != 1 || busyTimeout != 5000 {
 		t.Fatalf("pragmas = foreign_keys:%d busy_timeout:%d", foreignKeys, busyTimeout)
 	}
-	for _, table := range []string{"schema_migrations", "accounts", "account_model_capabilities", "account_model_states", "oauth_sessions", "usage_snapshots", "api_keys", "response_sessions", "admin_sessions"} {
+	for _, table := range []string{"schema_migrations", "accounts", "account_model_capabilities", "account_model_states", "oauth_sessions", "usage_snapshots", "api_keys", "response_sessions", "admin_sessions", "admin_auth_sources", "admin_auth_global"} {
 		var count int
 		if err := store.DB.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -74,7 +74,7 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err := second.DB.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 3 {
+	if count != 4 {
 		t.Fatalf("migration count = %d", count)
 	}
 }

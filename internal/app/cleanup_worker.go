@@ -13,19 +13,22 @@ type cooldownPromoter interface {
 	PromoteExpired(context.Context, time.Time) (int64, error)
 }
 type CleanupWorker struct {
-	responses, oauth, admin, usage expiryCleaner
-	cooldowns                      cooldownPromoter
-	interval, usageRetention       time.Duration
-	now                            func() time.Time
-	timeout                        time.Duration
-	maxBatches                     int
+	responses, oauth, admin, usage, attempts   expiryCleaner
+	cooldowns                                  cooldownPromoter
+	interval, usageRetention, attemptRetention time.Duration
+	now                                        func() time.Time
+	timeout                                    time.Duration
+	maxBatches                                 int
 }
 
-func NewCleanupWorker(responses, oauth, admin, usage expiryCleaner, cooldowns cooldownPromoter, usageRetention time.Duration) *CleanupWorker {
+func NewCleanupWorker(responses, oauth, admin, usage, attempts expiryCleaner, cooldowns cooldownPromoter, usageRetention, attemptRetention time.Duration) *CleanupWorker {
 	if usageRetention <= 0 {
 		usageRetention = 30 * 24 * time.Hour
 	}
-	return &CleanupWorker{responses: responses, oauth: oauth, admin: admin, usage: usage, cooldowns: cooldowns, interval: time.Hour, usageRetention: usageRetention, timeout: 30 * time.Second, maxBatches: 20, now: func() time.Time { return time.Now().UTC() }}
+	if attemptRetention <= 0 {
+		attemptRetention = 24 * time.Hour
+	}
+	return &CleanupWorker{responses: responses, oauth: oauth, admin: admin, usage: usage, attempts: attempts, cooldowns: cooldowns, interval: time.Hour, usageRetention: usageRetention, attemptRetention: attemptRetention, timeout: 30 * time.Second, maxBatches: 20, now: func() time.Time { return time.Now().UTC() }}
 }
 func (w *CleanupWorker) Run(ctx context.Context) error {
 	if err := w.runOnce(ctx); err != nil {
@@ -49,7 +52,7 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	defer cancel()
 	now := w.now()
 	var errs []error
-	errs = append(errs, w.drainExpiry(runCtx, w.responses, now), w.drainExpiry(runCtx, w.oauth, now), w.drainExpiry(runCtx, w.admin, now), w.drainExpiry(runCtx, w.usage, now.Add(-w.usageRetention)), w.drainCooldowns(runCtx, now))
+	errs = append(errs, w.drainExpiry(runCtx, w.responses, now), w.drainExpiry(runCtx, w.oauth, now), w.drainExpiry(runCtx, w.admin, now), w.drainExpiry(runCtx, w.usage, now.Add(-w.usageRetention)), w.drainExpiry(runCtx, w.attempts, now.Add(-w.attemptRetention)), w.drainCooldowns(runCtx, now))
 	return errors.Join(errs...)
 }
 func (w *CleanupWorker) drainExpiry(ctx context.Context, cleaner expiryCleaner, cutoff time.Time) error {
