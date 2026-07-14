@@ -133,7 +133,7 @@ func (h *Handler) securityHeaders(next http.Handler) http.Handler {
 		headers.Set("Cross-Origin-Opener-Policy", "same-origin")
 		headers.Set("Cross-Origin-Resource-Policy", "same-origin")
 		headers.Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
-		headers.Set("Referrer-Policy", "no-referrer")
+		headers.Set("Referrer-Policy", "same-origin")
 		headers.Set("X-Content-Type-Options", "nosniff")
 		headers.Set("X-Frame-Options", "DENY")
 		if h.trustedProxies.RequestIsHTTPS(r) {

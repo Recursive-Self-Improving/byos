@@ -36,7 +36,7 @@ func TestAuthenticatedNavigationAndPageInventory(t *testing.T) {
 					t.Fatalf("GET %s missing navigation link %s", page.path, link)
 				}
 			}
-			if response.Header.Get("Content-Security-Policy") == "" || response.Header.Get("X-Frame-Options") != "DENY" {
+			if response.Header.Get("Content-Security-Policy") == "" || response.Header.Get("X-Frame-Options") != "DENY" || response.Header.Get("Referrer-Policy") != "same-origin" {
 				t.Fatalf("GET %s missing security headers", page.path)
 			}
 		})
