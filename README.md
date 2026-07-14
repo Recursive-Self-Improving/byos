@@ -171,7 +171,7 @@ Attach one Railway volume to the service and set its mount path to:
 /data
 ```
 
-This is required. The service stores its SQLite database and encrypted state there. Do not use an ephemeral path, and do not scale the service above one replica.
+This is required. The service stores its SQLite database and encrypted state there. Railway mounts volumes as `root`, so the dedicated Railway image runs as UID `0`; the application still restricts `/data` and its database to owner-only permissions. Do not use an ephemeral path, and do not scale the service above one replica.
 
 ### 3. Set service variables
 

@@ -23,9 +23,7 @@ LABEL org.opencontainers.image.version=$VERSION org.opencontainers.image.revisio
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes ca-certificates wget \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 supergrok \
-    && useradd --system --uid 10001 --gid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin --no-create-home supergrok \
-    && install --directory --mode=0700 --owner=supergrok --group=supergrok /data \
+    && install --directory --mode=0700 /data \
     && install --directory --mode=0755 /etc/supergrok-api \
     && install --directory --mode=0755 /usr/share/doc/supergrok-api
 
@@ -42,5 +40,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://127.0.0.1:8080/healthz || exit 1
 
-USER supergrok:supergrok
+# Railway volumes are mounted as root and require the service process to run as UID 0.
+USER root:root
 CMD ["supergrok-api", "serve", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
