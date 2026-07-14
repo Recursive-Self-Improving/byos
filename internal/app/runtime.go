@@ -61,7 +61,7 @@ func (v *lazyIdentity) Verify(ctx context.Context, raw string) (oauthxai.Identit
 		if err != nil {
 			return oauthxai.Identity{}, err
 		}
-		v.verifier = oauthxai.NewIdentityVerifier(ctx, document.Issuer, document.JWKSURI, v.clientID)
+		v.verifier = oauthxai.NewIdentityVerifier(ctx, document.Issuer, document.JWKSURI, v.clientID, document.IDTokenSigningAlgs)
 	}
 	return v.verifier.Verify(ctx, raw)
 }

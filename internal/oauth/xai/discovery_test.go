@@ -4,17 +4,20 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coreos/go-oidc/v3/oidc"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 func discoveryDocument(device string) string {
-	return `{"issuer":"https://auth.x.ai","authorization_endpoint":"https://auth.x.ai/authorize","device_authorization_endpoint":"` + device + `","token_endpoint":"https://auth.x.ai/token","jwks_uri":"https://auth.x.ai/.well-known/jwks.json"}`
+	return `{"issuer":"https://auth.x.ai","authorization_endpoint":"https://auth.x.ai/authorize","device_authorization_endpoint":"` + device + `","token_endpoint":"https://auth.x.ai/token","jwks_uri":"https://auth.x.ai/.well-known/jwks.json","id_token_signing_alg_values_supported":["ES256"]}`
 }
 func TestDiscoverValidatesAndCaches(t *testing.T) {
 	var calls atomic.Int32
@@ -28,12 +31,24 @@ func TestDiscoverValidatesAndCaches(t *testing.T) {
 		t.Fatal(err)
 	}
 	second, err := discovery.Discover(context.Background())
-	if err != nil || first != second || calls.Load() != 1 {
+	if err != nil || !reflect.DeepEqual(first, second) || calls.Load() != 1 {
 		t.Fatalf("cache=%+v %+v calls=%d err=%v", first, second, calls.Load(), err)
+	}
+	if len(first.IDTokenSigningAlgs) != 1 || first.IDTokenSigningAlgs[0] != oidc.ES256 {
+		t.Fatalf("signing algorithms = %v", first.IDTokenSigningAlgs)
 	}
 }
 func TestDiscoverRejectsUnsafeDocuments(t *testing.T) {
-	tests := []struct{ name, url, body string }{{"http discovery", "http://auth.x.ai/.well-known/openid-configuration", discoveryDocument("https://auth.x.ai/device")}, {"foreign device", DiscoveryURL, discoveryDocument("https://evil.example/device")}, {"http device", DiscoveryURL, discoveryDocument("http://auth.x.ai/device")}, {"empty device", DiscoveryURL, discoveryDocument("")}, {"malformed", DiscoveryURL, `{`}}
+	valid := discoveryDocument("https://auth.x.ai/device")
+	tests := []struct{ name, url, body string }{
+		{"http discovery", "http://auth.x.ai/.well-known/openid-configuration", valid},
+		{"foreign device", DiscoveryURL, discoveryDocument("https://evil.example/device")},
+		{"http device", DiscoveryURL, discoveryDocument("http://auth.x.ai/device")},
+		{"empty device", DiscoveryURL, discoveryDocument("")},
+		{"missing signing algorithm", DiscoveryURL, strings.Replace(valid, `,"id_token_signing_alg_values_supported":["ES256"]`, "", 1)},
+		{"unsupported signing algorithm", DiscoveryURL, strings.Replace(valid, `"ES256"`, `"HS256"`, 1)},
+		{"malformed", DiscoveryURL, `{`},
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

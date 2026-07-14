@@ -3,8 +3,9 @@ package xai
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,7 +37,7 @@ func (t issuerTransport) RoundTrip(request *http.Request) (*http.Response, error
 type completeFakeIssuer struct {
 	t               *testing.T
 	server          *httptest.Server
-	key             *rsa.PrivateKey
+	key             *ecdsa.PrivateKey
 	kid             string
 	jwks            *jwksFixture
 	mu              sync.Mutex
@@ -46,12 +47,12 @@ type completeFakeIssuer struct {
 }
 
 func newCompleteFakeIssuer(t *testing.T) *completeFakeIssuer {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	issuer := &completeFakeIssuer{t: t, key: key, kid: "one"}
-	issuer.jwks = &jwksFixture{keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: issuer.kid, Algorithm: string(jose.RS256), Use: "sig"}}}
+	issuer.jwks = &jwksFixture{keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: issuer.kid, Algorithm: string(jose.ES256), Use: "sig"}}}
 	issuer.server = httptest.NewServer(http.HandlerFunc(issuer.handle))
 	t.Cleanup(issuer.server.Close)
 	return issuer
@@ -67,7 +68,7 @@ func (f *completeFakeIssuer) handle(w http.ResponseWriter, r *http.Request) {
 		if f.malformed {
 			token = "https://evil.example/token"
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"issuer": Issuer, "authorization_endpoint": Issuer + "/authorize", "device_authorization_endpoint": Issuer + "/device", "token_endpoint": token, "jwks_uri": Issuer + "/jwks"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"issuer": Issuer, "authorization_endpoint": Issuer + "/authorize", "device_authorization_endpoint": Issuer + "/device", "token_endpoint": token, "jwks_uri": Issuer + "/jwks", "id_token_signing_alg_values_supported": []string{oidc.ES256}})
 	case "/device":
 		_ = json.NewEncoder(w).Encode(map[string]any{"device_code": "device-secret", "user_code": "CODE-1234", "verification_uri": Issuer + "/device/verify", "expires_in": 600, "interval": 1})
 	case "/jwks":
@@ -118,7 +119,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 		issuer := newCompleteFakeIssuer(t)
 		database, _, accounts, sessions := fakeOAuthRepositories(t)
 		defer database.Close()
-		idToken := signIdentityToken(t, issuer.key, issuer.kid, Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))
+		idToken := signIdentityTokenWithAlgorithm(t, issuer.key, jose.ES256, issuer.kid, Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))
 		issuer.deviceResponses = []string{`{"error":"slow_down"}`, `{"access_token":"access","refresh_token":"refresh","id_token":` + string(mustJSON(t, idToken)) + `,"expires_in":3600}`}
 		service := newIssuerOAuthService(t, issuer, sessions)
 		document, err := service.discovery.Discover(context.Background())
@@ -134,7 +135,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		verifyCtx := oidc.ClientContext(context.Background(), issuer.client())
-		verifier := NewIdentityVerifier(verifyCtx, document.Issuer, document.JWKSURI, DefaultClientID)
+		verifier := NewIdentityVerifier(verifyCtx, document.Issuer, document.JWKSURI, DefaultClientID, document.IDTokenSigningAlgs)
 		identity, err := verifier.Verify(verifyCtx, token.IDToken)
 		if err != nil {
 			t.Fatal(err)
@@ -144,14 +145,14 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rotatedKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		rotatedKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			t.Fatal(err)
 		}
 		issuer.jwks.mu.Lock()
-		issuer.jwks.keys = []jose.JSONWebKey{{Key: &rotatedKey.PublicKey, KeyID: "two", Algorithm: string(jose.RS256), Use: "sig"}}
+		issuer.jwks.keys = []jose.JSONWebKey{{Key: &rotatedKey.PublicKey, KeyID: "two", Algorithm: string(jose.ES256), Use: "sig"}}
 		issuer.jwks.mu.Unlock()
-		rotated := signIdentityToken(t, rotatedKey, "two", Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))
+		rotated := signIdentityTokenWithAlgorithm(t, rotatedKey, jose.ES256, "two", Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))
 		if _, err := verifier.Verify(verifyCtx, rotated); err != nil {
 			t.Fatalf("rotated JWKS rejected: %v", err)
 		}

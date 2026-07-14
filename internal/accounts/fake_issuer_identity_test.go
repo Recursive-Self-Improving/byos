@@ -48,7 +48,7 @@ func TestCompleteLoginRejectsUnverifiedIdentityBeforePersistence(t *testing.T) {
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			_ = json.NewEncoder(w).Encode(map[string]any{"issuer": oauthxai.Issuer, "authorization_endpoint": oauthxai.Issuer + "/authorize", "device_authorization_endpoint": oauthxai.Issuer + "/device", "token_endpoint": oauthxai.Issuer + "/token", "jwks_uri": oauthxai.Issuer + "/jwks"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"issuer": oauthxai.Issuer, "authorization_endpoint": oauthxai.Issuer + "/authorize", "device_authorization_endpoint": oauthxai.Issuer + "/device", "token_endpoint": oauthxai.Issuer + "/token", "jwks_uri": oauthxai.Issuer + "/jwks", "id_token_signing_alg_values_supported": []string{oidc.RS256}})
 		case "/device":
 			_ = json.NewEncoder(w).Encode(map[string]any{"device_code": "device-secret", "user_code": "CODE", "verification_uri": oauthxai.Issuer + "/verify", "expires_in": 600, "interval": 5})
 		case "/token":
@@ -75,7 +75,7 @@ func TestCompleteLoginRejectsUnverifiedIdentityBeforePersistence(t *testing.T) {
 	accountsRepo := store.NewAccountRepository(database.DB, keys)
 	oauthRepo := store.NewOAuthSessionRepository(database.DB, keys)
 	oauthService := oauthxai.NewService(oauthxai.NewDiscoveryClient(client, oauthxai.DiscoveryURL), client, oauthRepo, oauthxai.DefaultOptions())
-	identity := oauthxai.NewIdentityVerifier(ctx, oauthxai.Issuer, oauthxai.Issuer+"/jwks", oauthxai.DefaultClientID)
+	identity := oauthxai.NewIdentityVerifier(ctx, oauthxai.Issuer, oauthxai.Issuer+"/jwks", oauthxai.DefaultClientID, []string{oidc.RS256})
 	service := NewService(accountsRepo, oauthService, identity, oauthxai.NewRefreshService(client, accountsRepo, oauthxai.DefaultOptions()), nil, nil)
 	flow, err := service.StartLogin(ctx)
 	if err != nil {

@@ -13,9 +13,14 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+
+	"github.com/coreos/go-oidc/v3/oidc"
 )
 
-type Discovery struct{ Issuer, AuthorizationEndpoint, DeviceAuthorizationEndpoint, TokenEndpoint, JWKSURI string }
+type Discovery struct {
+	Issuer, AuthorizationEndpoint, DeviceAuthorizationEndpoint, TokenEndpoint, JWKSURI string
+	IDTokenSigningAlgs                                                                 []string
+}
 type DiscoveryClient struct {
 	http   *http.Client
 	url    string
@@ -64,10 +69,26 @@ func ValidateEndpoint(raw, field string) (string, error) {
 	}
 	return raw, nil
 }
+
+func supportedIDTokenSigningAlgs(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		switch value {
+		case oidc.RS256, oidc.RS384, oidc.RS512, oidc.ES256, oidc.ES384, oidc.ES512, oidc.PS256, oidc.PS384, oidc.PS512, oidc.EdDSA:
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func cloneDiscovery(value Discovery) Discovery {
+	value.IDTokenSigningAlgs = append([]string(nil), value.IDTokenSigningAlgs...)
+	return value
+}
 func (c *DiscoveryClient) Discover(ctx context.Context) (Discovery, error) {
 	c.mu.RLock()
 	if c.cached != nil {
-		value := *c.cached
+		value := cloneDiscovery(*c.cached)
 		c.mu.RUnlock()
 		return value, nil
 	}
@@ -95,14 +116,19 @@ func (c *DiscoveryClient) Discover(ctx context.Context) (Discovery, error) {
 		return Discovery{}, fmt.Errorf("xAI discovery returned HTTP %d", response.StatusCode)
 	}
 	var raw struct {
-		Issuer        string `json:"issuer"`
-		Authorization string `json:"authorization_endpoint"`
-		Device        string `json:"device_authorization_endpoint"`
-		Token         string `json:"token_endpoint"`
-		JWKS          string `json:"jwks_uri"`
+		Issuer            string   `json:"issuer"`
+		Authorization     string   `json:"authorization_endpoint"`
+		Device            string   `json:"device_authorization_endpoint"`
+		Token             string   `json:"token_endpoint"`
+		JWKS              string   `json:"jwks_uri"`
+		IDTokenSigningAlg []string `json:"id_token_signing_alg_values_supported"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return Discovery{}, errors.New("invalid xAI discovery document")
+	}
+	signingAlgs := supportedIDTokenSigningAlgs(raw.IDTokenSigningAlg)
+	if len(signingAlgs) == 0 {
+		return Discovery{}, errors.New("xAI discovery has no supported ID token signing algorithm")
 	}
 	values := []struct {
 		value, field string
@@ -118,13 +144,13 @@ func (c *DiscoveryClient) Discover(ctx context.Context) (Discovery, error) {
 	if raw.Issuer != Issuer {
 		return Discovery{}, errors.New("xAI discovery issuer mismatch")
 	}
-	result := Discovery{Issuer: raw.Issuer, AuthorizationEndpoint: raw.Authorization, DeviceAuthorizationEndpoint: raw.Device, TokenEndpoint: raw.Token, JWKSURI: raw.JWKS}
+	result := Discovery{Issuer: raw.Issuer, AuthorizationEndpoint: raw.Authorization, DeviceAuthorizationEndpoint: raw.Device, TokenEndpoint: raw.Token, JWKSURI: raw.JWKS, IDTokenSigningAlgs: signingAlgs}
 	c.mu.Lock()
 	if c.cached == nil {
-		copy := result
+		copy := cloneDiscovery(result)
 		c.cached = &copy
 	}
-	result = *c.cached
+	result = cloneDiscovery(*c.cached)
 	c.mu.Unlock()
 	return result, nil
 }

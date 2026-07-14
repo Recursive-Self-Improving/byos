@@ -2,6 +2,8 @@ package xai
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
@@ -25,9 +27,9 @@ func (f *jwksFixture) handler(w http.ResponseWriter, _ *http.Request) {
 	defer f.mu.RUnlock()
 	_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: f.keys})
 }
-func signIdentityToken(t *testing.T, key *rsa.PrivateKey, kid, issuer, audience, subject string, expiry time.Time) string {
+func signIdentityTokenWithAlgorithm(t *testing.T, key any, algorithm jose.SignatureAlgorithm, kid, issuer, audience, subject string, expiry time.Time) string {
 	t.Helper()
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: key, KeyID: kid, Algorithm: string(jose.RS256), Use: "sig"}}, nil)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: algorithm, Key: jose.JSONWebKey{Key: key, KeyID: kid, Algorithm: string(algorithm), Use: "sig"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,13 +40,33 @@ func signIdentityToken(t *testing.T, key *rsa.PrivateKey, kid, issuer, audience,
 	}
 	return raw
 }
+
+func signIdentityToken(t *testing.T, key *rsa.PrivateKey, kid, issuer, audience, subject string, expiry time.Time) string {
+	return signIdentityTokenWithAlgorithm(t, key, jose.RS256, kid, issuer, audience, subject, expiry)
+}
+func TestIdentityVerifierAcceptsDiscoveredES256(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &jwksFixture{keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "xai-es256", Algorithm: string(jose.ES256), Use: "sig"}}}
+	server := httptest.NewServer(http.HandlerFunc(fixture.handler))
+	defer server.Close()
+	verifier := NewIdentityVerifier(context.Background(), Issuer, server.URL, DefaultClientID, []string{string(jose.ES256)})
+	token := signIdentityTokenWithAlgorithm(t, key, jose.ES256, "xai-es256", Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))
+	identity, err := verifier.Verify(context.Background(), token)
+	if err != nil || identity.Subject != "subject" || identity.Email != "user@example.com" {
+		t.Fatalf("identity=%+v err=%v", identity, err)
+	}
+}
+
 func TestIdentityVerifierAndKeyRotation(t *testing.T) {
 	key1, _ := rsa.GenerateKey(rand.Reader, 2048)
 	key2, _ := rsa.GenerateKey(rand.Reader, 2048)
 	fixture := &jwksFixture{keys: []jose.JSONWebKey{{Key: &key1.PublicKey, KeyID: "one", Algorithm: string(jose.RS256), Use: "sig"}}}
 	server := httptest.NewServer(http.HandlerFunc(fixture.handler))
 	defer server.Close()
-	verifier := NewIdentityVerifier(context.Background(), Issuer, server.URL, DefaultClientID)
+	verifier := NewIdentityVerifier(context.Background(), Issuer, server.URL, DefaultClientID, []string{string(jose.RS256)})
 	token := signIdentityToken(t, key1, "one", Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))
 	identity, err := verifier.Verify(context.Background(), token)
 	if err != nil || identity.Subject != "subject" || identity.Email != "user@example.com" {
@@ -64,7 +86,7 @@ func TestIdentityVerifierRejectsInvalidClaims(t *testing.T) {
 	fixture := &jwksFixture{keys: []jose.JSONWebKey{{Key: &trusted.PublicKey, KeyID: "trusted", Algorithm: string(jose.RS256), Use: "sig"}}}
 	server := httptest.NewServer(http.HandlerFunc(fixture.handler))
 	defer server.Close()
-	verifier := NewIdentityVerifier(context.Background(), Issuer, server.URL, DefaultClientID)
+	verifier := NewIdentityVerifier(context.Background(), Issuer, server.URL, DefaultClientID, []string{string(jose.RS256)})
 	tests := []struct{ name, token string }{{"forged", signIdentityToken(t, forged, "forged", Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))}, {"wrong issuer", signIdentityToken(t, trusted, "trusted", "https://other.x.ai", DefaultClientID, "subject", time.Now().Add(time.Hour))}, {"wrong audience", signIdentityToken(t, trusted, "trusted", Issuer, "other-client", "subject", time.Now().Add(time.Hour))}, {"expired", signIdentityToken(t, trusted, "trusted", Issuer, DefaultClientID, "subject", time.Now().Add(-time.Hour))}, {"missing subject", signIdentityToken(t, trusted, "trusted", Issuer, DefaultClientID, "", time.Now().Add(time.Hour))}}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

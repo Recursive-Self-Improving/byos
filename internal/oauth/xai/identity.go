@@ -17,9 +17,10 @@ type IdentityVerifier struct {
 	issuer   string
 }
 
-func NewIdentityVerifier(ctx context.Context, issuer, jwksURI, clientID string) *IdentityVerifier {
+func NewIdentityVerifier(ctx context.Context, issuer, jwksURI, clientID string, signingAlgs []string) *IdentityVerifier {
 	keys := oidc.NewRemoteKeySet(ctx, jwksURI)
-	return &IdentityVerifier{verifier: oidc.NewVerifier(issuer, keys, &oidc.Config{ClientID: clientID}), issuer: issuer}
+	config := &oidc.Config{ClientID: clientID, SupportedSigningAlgs: append([]string(nil), signingAlgs...)}
+	return &IdentityVerifier{verifier: oidc.NewVerifier(issuer, keys, config), issuer: issuer}
 }
 func (v *IdentityVerifier) Verify(ctx context.Context, raw string) (Identity, error) {
 	token, err := v.verifier.Verify(ctx, raw)
