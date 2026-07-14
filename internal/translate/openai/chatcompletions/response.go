@@ -1,6 +1,6 @@
 // Response event mappings are adapted in part from CLIProxyAPI v7.2.71
 // internal/translator/codex/openai/chat-completions/codex_openai_response.go
-// (MIT License, https://github.com/router-for-me/CLIProxyAPI).
+// (MIT License, https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.71/internal/translator/codex/openai/chat-completions/codex_openai_response.go).
 package chatcompletions
 
 import (

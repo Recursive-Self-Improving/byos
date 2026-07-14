@@ -1,5 +1,5 @@
 // Portions adapted from CLIProxyAPI/v7 internal/auth/xai/xai.go (MIT): device-token polling and slow-down handling.
-// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/auth/xai/xai.go
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.71/internal/auth/xai/xai.go
 
 package xai
 

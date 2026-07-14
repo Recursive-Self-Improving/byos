@@ -91,7 +91,7 @@
 
 ### CLIProxyAPI 可抽取部分
 
-参考仓库 `github.com/router-for-me/CLIProxyAPI` 中：
+参考仓库 `https://github.com/router-for-me/CLIProxyAPI/tree/v7.2.71` 中：
 
 - `internal/auth/xai/types.go`
   - xAI issuer、OIDC discovery、public client ID、scope、默认 API URL 和 CLI chat proxy URL。

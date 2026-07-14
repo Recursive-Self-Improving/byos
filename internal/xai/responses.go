@@ -1,5 +1,5 @@
 // Portions adapted from CLIProxyAPI/v7 internal/runtime/executor/xai_executor.go (MIT): Responses execution and terminal SSE handling.
-// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/runtime/executor/xai_executor.go
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.71/internal/runtime/executor/xai_executor.go
 
 package xai
 

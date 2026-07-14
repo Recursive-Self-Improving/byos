@@ -1,5 +1,5 @@
 // Routing semantics adapted from CLIProxyAPI/v7 sdk/cliproxy/auth/selector.go and scheduler.go (MIT).
-// Upstream: https://github.com/router-for-me/CLIProxyAPI/tree/main/sdk/cliproxy/auth
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/tree/v7.2.71/sdk/cliproxy/auth
 
 package routing
 

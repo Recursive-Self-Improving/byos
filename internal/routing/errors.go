@@ -1,5 +1,5 @@
 // Retry classification semantics adapted from CLIProxyAPI/v7 sdk/cliproxy/auth/conductor.go (MIT).
-// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/sdk/cliproxy/auth/conductor.go
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.71/sdk/cliproxy/auth/conductor.go
 
 package routing
 

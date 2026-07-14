@@ -1,5 +1,5 @@
 // Portions adapted from CLIProxyAPI/v7 internal/auth/xai/xai.go (MIT): OIDC discovery and endpoint validation.
-// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/auth/xai/xai.go
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.71/internal/auth/xai/xai.go
 
 package xai
 

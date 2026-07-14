@@ -1,5 +1,5 @@
 // Portions adapted from CLIProxyAPI/v7 internal/auth/xai/types.go (MIT).
-// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/auth/xai/types.go
+// Upstream: https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.71/internal/auth/xai/types.go
 
 package xai
 

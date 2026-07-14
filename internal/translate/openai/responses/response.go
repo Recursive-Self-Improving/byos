@@ -1,6 +1,6 @@
 // Native Responses passthrough behavior is adapted in part from CLIProxyAPI v7.2.71
 // internal/translator/codex/openai/responses/codex_openai-responses_response.go
-// (MIT License, https://github.com/router-for-me/CLIProxyAPI).
+// (MIT License, https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.71/internal/translator/codex/openai/responses/codex_openai-responses_response.go).
 package responses
 
 import (
