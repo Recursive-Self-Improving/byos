@@ -152,7 +152,7 @@ Do not run `docker compose down -v` unless permanently deleting accounts, keys, 
 
 ## Deploy on Railway
 
-The repository includes a root `Dockerfile`, `railway.json`, and `deploy/railway.yaml`. Railway builds the Dockerfile, listens on Railway's injected `PORT`, mounts persistent state at `/data`, checks `/healthz`, and runs exactly one replica.
+The repository uses separate container definitions: root `Dockerfile` for Docker Compose and `Dockerfile.railway` for Railway, plus `railway.json` and `deploy/railway.yaml`. Railway builds its dedicated Dockerfile without a Docker `VOLUME` instruction, listens on Railway's injected `PORT`, mounts persistent state through a Railway Volume at `/data`, checks `/healthz`, and runs exactly one replica.
 
 ### 1. Create the service
 
@@ -161,7 +161,7 @@ Choose either method:
 - **Dashboard:** create a Railway project, select **Deploy from GitHub repo**, and choose this repository.
 - **Railway CLI:** link an existing Railway project and run `railway up` from the repository root. `railway up` deploys application source; `railway deploy` is for templates.
 
-Railway automatically detects the root `Dockerfile`; `railway.json` supplies the start command and deployment settings.
+`railway.json` explicitly selects `Dockerfile.railway` and supplies the start command and deployment settings; Railway storage is configured with a Railway Volume rather than Dockerfile `VOLUME` metadata.
 
 ### 2. Add a persistent volume
 
@@ -191,7 +191,7 @@ openssl rand -base64 24
 openssl rand -hex 32
 ```
 
-Keep `SUPERGROK_MASTER_KEY` stable for the lifetime of the volume and back it up outside Railway. The Docker build metadata arguments are optional on Railway because the Dockerfile provides safe defaults.
+Keep `SUPERGROK_MASTER_KEY` stable for the lifetime of the volume and back it up outside Railway. The Docker build metadata arguments are optional on Railway because `Dockerfile.railway` provides safe defaults.
 
 ### 4. Deploy and expose the service
 

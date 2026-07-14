@@ -5,3 +5,4 @@
 - Go `embed` cannot reference parent directories. Root `migrations/*.sql` are embedded by the root `migrations` package and consumed by `internal/store`.
 - `server.trusted_proxies` accepts IP addresses or CIDR prefixes. Web security treats `X-Forwarded-Proto: https` as authoritative only when `RemoteAddr` matches that configured set; otherwise forwarded headers are ignored.
 - Railway Dockerfile start commands run in exec form, so `$PORT` expansion requires an explicit `/bin/sh -c "exec …"`; the deployment uses one persistent `/data` volume and trusts Railway proxy peers in `100.0.0.0/8` via `deploy/railway.yaml`.
+- Railway rejects Dockerfiles containing a Docker `VOLUME` instruction; keep Compose on root `Dockerfile` and point `railway.json` to `Dockerfile.railway`, with persistence supplied only by the Railway Volume mounted at `/data`.
