@@ -100,10 +100,10 @@ func Request(model string, body []byte, stream bool) ([]byte, error) {
 					name = common.ShortName(name)
 				}
 				arguments, _ := json.Marshal(block["input"])
-				input = append(input, map[string]any{"type": "function_call", "call_id": common.String(block["id"]), "name": name, "arguments": string(arguments)})
+				input = append(input, map[string]any{"type": "function_call", "call_id": common.ShortName(common.String(block["id"])), "name": name, "arguments": string(arguments)})
 			case "tool_result":
 				flush()
-				input = append(input, map[string]any{"type": "function_call_output", "call_id": common.String(block["tool_use_id"]), "output": anthropicToolOutput(block["content"]), "status": toolStatus(block["is_error"])})
+				input = append(input, map[string]any{"type": "function_call_output", "call_id": common.ShortName(common.String(block["tool_use_id"])), "output": anthropicToolOutput(block["content"])})
 			}
 		}
 		flush()
@@ -124,8 +124,17 @@ func Request(model string, body []byte, stream bool) ([]byte, error) {
 		out["tools"] = converted
 	}
 	convertAnthropicChoice(out, common.Object(request["tool_choice"]), forward)
-	if thinking := common.Object(request["thinking"]); common.String(thinking["type"]) == "enabled" {
-		out["reasoning"] = map[string]any{"effort": "medium", "summary": "auto"}
+	if thinking := common.Object(request["thinking"]); thinking != nil {
+		switch common.String(thinking["type"]) {
+		case "enabled":
+			out["reasoning"] = map[string]any{"effort": "medium", "summary": "auto"}
+		case "adaptive", "auto":
+			effort := common.String(common.Object(request["output_config"])["effort"])
+			if effort != "low" && effort != "medium" && effort != "high" {
+				effort = "high"
+			}
+			out["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
+		}
 	}
 	if stops := common.Array(request["stop_sequences"]); len(stops) > 0 {
 		out["stop"] = stops
@@ -173,16 +182,14 @@ func anthropicToolOutput(value any) any {
 	}
 	return ""
 }
-func toolStatus(value any) string {
-	if failed, ok := value.(bool); ok && failed {
-		return "failed"
-	}
-	return "completed"
-}
 func convertAnthropicChoice(out map[string]any, choice map[string]any, names map[string]string) {
 	if choice == nil {
 		return
 	}
+	if disabled, ok := choice["disable_parallel_tool_use"].(bool); ok {
+		out["parallel_tool_calls"] = !disabled
+	}
+
 	switch common.String(choice["type"]) {
 	case "auto", "any", "none":
 		value := common.String(choice["type"])

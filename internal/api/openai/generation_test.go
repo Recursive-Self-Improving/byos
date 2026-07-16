@@ -150,6 +150,34 @@ func TestResponsesHandlerPersistsAndEmitsNativeEvents(t *testing.T) {
 	_ = time.Second
 }
 
+func TestResponsesHandlerAcceptsEasyInputMessages(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, _ := appcrypto.DeriveKeys(bytes.Repeat([]byte{20}, 32))
+	transform, _ := translate.NewRegistry().Get(registry.OpenAIResponses)
+	handler := ResponsesHandler{
+		Transform: transform,
+		Execute: func(_ context.Context, request routing.Request) (routing.Result, error) {
+			if !strings.Contains(string(request.Body), `"type":"message"`) {
+				t.Fatalf("easy input message was not normalized: %s", request.Body)
+			}
+			return routing.Result{Model: "grok-4.5", AccountID: "acct", Events: []xai.Event{completedEvent()}}, nil
+		},
+		Sessions: sessions.NewService(store.NewResponseRepository(database.DB, keys)),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"grok","input":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("response=%d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestChatHandlerMapsUnavailableModel(t *testing.T) {
 	transform, _ := translate.NewRegistry().Get(registry.OpenAIChat)
 	handler := ChatHandler{Transform: transform, Execute: func(context.Context, routing.Request) (routing.Result, error) {

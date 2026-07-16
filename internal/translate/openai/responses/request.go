@@ -24,10 +24,25 @@ func Request(model string, body []byte, _ bool) ([]byte, error) {
 	case string:
 		request["input"] = []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": input}}}}
 	case []any:
-		for _, raw := range input {
+		for index, raw := range input {
 			item := common.Object(raw)
-			if common.String(item["role"]) == "system" {
-				item["role"] = "developer"
+			if item == nil {
+				return nil, errors.New("input items must be objects")
+			}
+			kind := common.String(item["type"])
+			if kind == "" && common.String(item["role"]) != "" {
+				kind = "message"
+				item["type"] = kind
+			}
+			switch kind {
+			case "message":
+				if err := normalizeMessage(item); err != nil {
+					return nil, err
+				}
+				input[index] = item
+			case "function_call", "function_call_output", "reasoning", "item_reference":
+			default:
+				return nil, errors.New("unsupported input item type")
 			}
 		}
 	case nil:
@@ -46,6 +61,39 @@ func Request(model string, body []byte, _ bool) ([]byte, error) {
 		delete(request, "service_tier")
 	}
 	return json.Marshal(request)
+}
+func normalizeMessage(item map[string]any) error {
+	role := common.String(item["role"])
+	switch role {
+	case "system":
+		role = "developer"
+	case "developer", "user", "assistant":
+	default:
+		return errors.New("message role must be developer, user, or assistant")
+	}
+	item["role"] = role
+	item["type"] = "message"
+	textType := "input_text"
+	if role == "assistant" {
+		textType = "output_text"
+	}
+	switch content := item["content"].(type) {
+	case string:
+		item["content"] = []any{map[string]any{"type": textType, "text": content}}
+	case []any:
+		for _, raw := range content {
+			part := common.Object(raw)
+			if part == nil {
+				return errors.New("message content items must be objects")
+			}
+			if common.String(part["type"]) == "text" {
+				part["type"] = textType
+			}
+		}
+	default:
+		return errors.New("message content must be a string or array")
+	}
+	return nil
 }
 func mergeInclude(values []any, want string) []any {
 	for _, v := range values {
