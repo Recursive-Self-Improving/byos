@@ -122,6 +122,7 @@ func Request(model string, body []byte, stream bool) ([]byte, error) {
 			converted = append(converted, item)
 		}
 		out["tools"] = converted
+		out["tool_choice"] = "auto"
 	}
 	convertAnthropicChoice(out, common.Object(request["tool_choice"]), forward)
 	if thinking := common.Object(request["thinking"]); thinking != nil {
@@ -133,7 +134,6 @@ func Request(model string, body []byte, stream bool) ([]byte, error) {
 	if stops := common.Array(request["stop_sequences"]); len(stops) > 0 {
 		out["stop"] = stops
 	}
-	common.CopyFields(out, request, "metadata")
 	return json.Marshal(out)
 }
 func anthropicSystem(value any) ([]any, error) {

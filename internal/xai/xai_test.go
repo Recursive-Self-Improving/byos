@@ -68,6 +68,18 @@ func TestResponsesExecutorAndHeaders(t *testing.T) {
 	}
 }
 
+func TestPrepareDoesNotInflatePromptsWithHTMLEscaping(t *testing.T) {
+	text := strings.Repeat("<system-notice>", 6000)
+	body := []byte(`{"input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"` + text + `"}]}],"tools":[{"type":"x_search"}]}`)
+	prepared, err := (&Client{}).prepare(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(prepared), `\u003c`) || len(prepared) > len(body)+128 {
+		t.Fatalf("request expanded from %d to %d bytes", len(body), len(prepared))
+	}
+}
+
 func TestResponsesExecutorAcceptsIncompleteTerminal(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

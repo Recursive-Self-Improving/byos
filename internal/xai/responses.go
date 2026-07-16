@@ -60,11 +60,17 @@ func (c *Client) prepare(body []byte) ([]byte, error) {
 	}
 	request["stream"] = true
 	request["store"] = false
-	updated, err := json.Marshal(request)
-	if err != nil {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(request); err != nil {
 		return nil, err
 	}
-	return updated, nil
+	prepared := encoded.Bytes()
+	if len(prepared) > 0 && prepared[len(prepared)-1] == '\n' {
+		prepared = prepared[:len(prepared)-1]
+	}
+	return prepared, nil
 }
 func (c *Client) open(ctx context.Context, token, model string, body []byte) (*http.Response, *SSEParser, context.CancelFunc, error) {
 	prepared, err := c.prepare(body)

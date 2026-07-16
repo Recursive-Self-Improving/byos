@@ -55,6 +55,24 @@ func TestRequestSupportsCurrentToolChoiceAndThinkingFields(t *testing.T) {
 	}
 }
 
+func TestRequestDropsUnsupportedMetadataAndDefaultsToolChoice(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read","input_schema":{"type":"object","properties":{}}}],"metadata":{"user_id":"session"}}`)
+	out, err := Request("grok-4.5", body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := got["metadata"]; exists {
+		t.Fatalf("unsupported metadata forwarded: %s", out)
+	}
+	if got["tool_choice"] != "auto" {
+		t.Fatalf("tool choice=%v body=%s", got["tool_choice"], out)
+	}
+}
+
 func TestResponseSuppressesSearchAndUsesEndTurn(t *testing.T) {
 	event := []byte(`{"type":"response.completed","response":{"id":"r1","model":"grok","status":"completed","output":[{"type":"x_search_call","id":"s1"},{"type":"message","content":[{"type":"output_text","text":"answer [post](https://x.com/a)","annotations":[{"type":"url_citation","url":"https://x.com/a"}]}]}],"usage":{"input_tokens":2,"output_tokens":3}}}`)
 	out, err := Response("grok", []byte(`{"messages":[]}`), [][]byte{event})
