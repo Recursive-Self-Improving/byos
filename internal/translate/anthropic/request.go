@@ -126,14 +126,8 @@ func Request(model string, body []byte, stream bool) ([]byte, error) {
 	convertAnthropicChoice(out, common.Object(request["tool_choice"]), forward)
 	if thinking := common.Object(request["thinking"]); thinking != nil {
 		switch common.String(thinking["type"]) {
-		case "enabled":
-			out["reasoning"] = map[string]any{"effort": "medium", "summary": "auto"}
-		case "adaptive", "auto":
-			effort := common.String(common.Object(request["output_config"])["effort"])
-			if effort != "low" && effort != "medium" && effort != "high" {
-				effort = "high"
-			}
-			out["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
+		case "enabled", "adaptive", "auto":
+			out["reasoning"] = map[string]any{"summary": "auto"}
 		}
 	}
 	if stops := common.Array(request["stop_sequences"]); len(stops) > 0 {

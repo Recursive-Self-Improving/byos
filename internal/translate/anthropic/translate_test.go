@@ -21,7 +21,7 @@ func TestRequestPreservesBlocksToolsResultsAndStopSequences(t *testing.T) {
 
 func TestRequestSupportsCurrentToolChoiceAndThinkingFields(t *testing.T) {
 	callID := strings.Repeat("tool-call-", 10)
-	body := []byte(`{"model":"grok","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"` + callID + `","name":"lookup","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + callID + `","content":"boom","is_error":true}]}],"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"thinking":{"type":"adaptive"}}`)
+	body := []byte(`{"model":"grok","max_tokens":1024,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"` + callID + `","name":"lookup","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + callID + `","content":"boom","is_error":true}]}],"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"thinking":{"type":"adaptive"}}`)
 	out, err := Request("grok-4.5", body, true)
 	if err != nil {
 		t.Fatal(err)
@@ -34,8 +34,11 @@ func TestRequestSupportsCurrentToolChoiceAndThinkingFields(t *testing.T) {
 		t.Fatalf("parallel tool choice lost: %s", out)
 	}
 	reasoning := got["reasoning"].(map[string]any)
-	if reasoning["effort"] != "high" || reasoning["summary"] != "auto" {
+	if reasoning["summary"] != "auto" {
 		t.Fatalf("adaptive thinking lost: %s", out)
+	}
+	if _, exists := reasoning["effort"]; exists {
+		t.Fatalf("unsupported reasoning effort forwarded: %s", out)
 	}
 	items := got["input"].([]any)
 	if len(items) != 2 {

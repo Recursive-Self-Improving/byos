@@ -41,12 +41,19 @@ func TestMessagesHandlerContracts(t *testing.T) {
 		if err := search.Validate(request.Body); err != nil {
 			t.Fatal(err)
 		}
+		canonical := string(request.Body)
+		if strings.Contains(canonical, `"effort"`) {
+			t.Fatalf("unsupported reasoning effort forwarded: %s", canonical)
+		}
+		if strings.Contains(canonical, `"name":"lookup"`) && !strings.Contains(canonical, `"parallel_tool_calls":false`) {
+			t.Fatalf("parallel tool choice lost: %s", canonical)
+		}
 		return routing.Result{Model: "grok-4.5", AccountID: "acct", Events: []xai.Event{anthropicCompleted()}}, nil
 	}
 	handler := MessagesHandler{Transform: transform, Execute: execute, OpenStream: func(context.Context, routing.Request) (api.RoutedStream, error) {
 		return &fakeStream{events: []xai.Event{{Data: []byte(`{"type":"response.output_text.delta","delta":"hi"}`)}, anthropicCompleted()}}, nil
 	}}
-	for _, body := range []string{`{"model":"grok","messages":[{"role":"user","content":"hello"}]}`, `{"model":"grok","messages":[{"role":"user","content":"hello"}],"stream":true}`} {
+	for _, body := range []string{`{"model":"grok","messages":[{"role":"user","content":"hello"}]}`, `{"model":"grok","messages":[{"role":"user","content":"hello"}],"stream":true}`, `{"model":"grok","max_tokens":1024,"messages":[{"role":"user","content":"hello"}],"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"thinking":{"type":"adaptive"}}`} {
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("anthropic-version", "2023-06-01")
