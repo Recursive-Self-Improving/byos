@@ -21,7 +21,7 @@
   <div class="eyebrow">Waiting for authorization</div>
   <h2>Approve the connection with xAI</h2>
   {{if .Flow.VerificationURL}}<p><a class="verification-link" href="{{.Flow.VerificationURL}}" target="_blank" rel="noopener noreferrer">Open xAI verification</a></p>{{else}}<div class="notice notice-error" role="alert">The verification link was invalid. Cancel this flow and start again.</div>{{end}}
-  <div class="user-code" aria-label="Device user code">{{.Flow.UserCode}}</div>
+  <div class="user-code" role="note" aria-label="Device user code">{{.Flow.UserCode}}</div>
   <p class="quiet">Enter this code only on the xAI verification page.</p>
   <dl class="flow-status">
     <div><dt>Status</dt><dd data-oauth-status role="status" aria-live="polite">Waiting for approval</dd></div>
