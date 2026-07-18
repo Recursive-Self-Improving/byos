@@ -7,8 +7,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"supergrok-api/internal/translate/common"
-	"supergrok-api/internal/translate/registry"
+	"byos/internal/translate/common"
+	"byos/internal/translate/registry"
 )
 
 type StreamState struct {

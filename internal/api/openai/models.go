@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	apierrors "supergrok-api/internal/api/errors"
+	apierrors "byos/internal/api/errors"
 )
 
 type Model struct {

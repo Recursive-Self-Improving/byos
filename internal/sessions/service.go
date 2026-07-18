@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byos/internal/store"
 )
 
 const Retention = 30 * 24 * time.Hour

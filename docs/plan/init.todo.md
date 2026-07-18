@@ -1,5 +1,7 @@
 # Todo List
 
+> Historical note: This todo list predates the BYOS (Bring Your Own Subscription) rebrand. Legacy project names, paths, and identifiers below are intentionally preserved; current operational names are documented in the repository README and source.
+
 ## Locked decisions
 
 - Go 1.26 single-process service; persistence uses encrypted SQLite and does not support multi-instance coordination.

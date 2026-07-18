@@ -1,4 +1,4 @@
-module supergrok-api
+module byos
 
 go 1.26
 

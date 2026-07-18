@@ -38,7 +38,7 @@ func TestResponsesExecutorAndHeaders(t *testing.T) {
 		if r.URL.Path != "/v1/responses" {
 			t.Fatalf("path=%s", r.URL.Path)
 		}
-		for name, want := range map[string]string{"Authorization": "Bearer token", "X-Xai-Token-Auth": "xai-grok-cli", "X-Grok-Client-Version": "0.2.99", "X-Grok-Model-Override": "grok-4.5", "User-Agent": "supergrok-api/test"} {
+		for name, want := range map[string]string{"Authorization": "Bearer token", "X-Xai-Token-Auth": "xai-grok-cli", "X-Grok-Client-Version": "0.2.99", "X-Grok-Model-Override": "grok-4.5", "User-Agent": "byos/test"} {
 			if got := r.Header.Get(name); got != want {
 				t.Fatalf("%s=%q", name, got)
 			}
@@ -51,7 +51,7 @@ func TestResponsesExecutorAndHeaders(t *testing.T) {
 		fmt.Fprint(w, "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.completed\"}\n\n")
 	}))
 	defer server.Close()
-	client := NewClient(HTTPConfig{BaseURL: server.URL + "/v1", ClientVersion: "0.2.99", UserAgent: "supergrok-api/test", RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
+	client := NewClient(HTTPConfig{BaseURL: server.URL + "/v1", ClientVersion: "0.2.99", UserAgent: "byos/test", RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
 	body := []byte(`{"model":"grok-4.5","stream":false,"stream":false,"store":true,"store":true,"tools":[{"type":"x_search"}]}`)
 	events, err := client.Execute(context.Background(), "token", "grok-4.5", body)
 	if err != nil || len(events) != 2 {

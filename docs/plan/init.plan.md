@@ -1,5 +1,7 @@
 # Implementation Plan
 
+> Historical note: This plan predates the BYOS (Bring Your Own Subscription) rebrand. Legacy project names, paths, and identifiers below are intentionally preserved; current operational names are documented in the repository README and source.
+
 ## Goal
 
 在空仓库 `supergrok-api` 中实现单实例 Go Proxy 服务：

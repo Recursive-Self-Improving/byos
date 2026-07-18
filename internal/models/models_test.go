@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/xai"
+	"byos/internal/store"
+	"byos/internal/xai"
 )
 
 func TestDiscoverySchemasFallbackAndCredentials(t *testing.T) {

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
+	appcrypto "byos/internal/crypto"
+	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/store"
 )
 
 type refreshHookFunc func(context.Context, string) error

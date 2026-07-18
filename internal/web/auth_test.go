@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/requestsource"
+	"byos/internal/requestsource"
 )
 
 func TestAdminSessionRepositoryLifecycleAndEncryptedState(t *testing.T) {

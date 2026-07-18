@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/xai"
+	appcrypto "byos/internal/crypto"
+	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/store"
+	"byos/internal/xai"
 )
 
 type executeStep struct {

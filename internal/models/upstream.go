@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"supergrok-api/internal/xai"
+	"byos/internal/xai"
 )
 
 type Upstream struct {

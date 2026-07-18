@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	"supergrok-api/internal/translate/common"
+	"byos/internal/translate/common"
 )
 
 func Request(model string, body []byte, stream bool) ([]byte, error) {

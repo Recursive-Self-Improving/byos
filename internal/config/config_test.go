@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	oauthxai "supergrok-api/internal/oauth/xai"
+	oauthxai "byos/internal/oauth/xai"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -38,7 +38,7 @@ func TestRailwayConfig(t *testing.T) {
 
 func TestYAMLOverrideRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("server:\n  listen: 127.0.0.1:9090\n  trusted_proxies: [127.0.0.1, '10.0.0.0/8']\ndata_dir: /tmp/supergrok\nupstream:\n  request_timeout: 3m\noauth:\n  client_id: deployment-client\n  scopes: openid offline_access\n")
+	data := []byte("server:\n  listen: 127.0.0.1:9090\n  trusted_proxies: [127.0.0.1, '10.0.0.0/8']\ndata_dir: /tmp/byos\nupstream:\n  request_timeout: 3m\noauth:\n  client_id: deployment-client\n  scopes: openid offline_access\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}

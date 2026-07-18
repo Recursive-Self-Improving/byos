@@ -17,13 +17,15 @@ type Keys struct {
 	adminAuthSource [32]byte
 }
 
+const keyDerivationDomain = "byos/v1"
+
 func DeriveKeys(master []byte) (Keys, error) {
 	if len(master) != 32 {
 		return Keys{}, fmt.Errorf("master key must be 32 bytes")
 	}
 	derive := func(info string) ([32]byte, error) {
 		var key [32]byte
-		value, err := hkdf.Key(sha256.New, master, []byte("supergrok-api/v1"), info, len(key))
+		value, err := hkdf.Key(sha256.New, master, []byte(keyDerivationDomain), info, len(key))
 		if err != nil {
 			return key, err
 		}

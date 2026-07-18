@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/sessions"
+	"byos/internal/routing"
+	"byos/internal/sessions"
 )
 
 type Kind string

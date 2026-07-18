@@ -16,9 +16,9 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
-	appcrypto "supergrok-api/internal/crypto"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
+	appcrypto "byos/internal/crypto"
+	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/store"
 )
 
 type issuerRewriteTransport struct{ target *url.URL }

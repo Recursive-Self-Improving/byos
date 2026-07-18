@@ -3,7 +3,7 @@ package translate
 import (
 	"testing"
 
-	"supergrok-api/internal/translate/registry"
+	"byos/internal/translate/registry"
 )
 
 func TestNewRegistryContainsAllProtocols(t *testing.T) {

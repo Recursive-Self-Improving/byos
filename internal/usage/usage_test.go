@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/xai"
+	"byos/internal/store"
+	"byos/internal/xai"
 )
 
 const monthlyFixture = `{"config":{"monthlyLimit":{"val":1000},"used":{"val":250},"billingPeriodEnd":"2026-08-01T00:00:00Z"}}`

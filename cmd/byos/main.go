@@ -11,9 +11,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"supergrok-api/internal/app"
-	"supergrok-api/internal/config"
-	oauthxai "supergrok-api/internal/oauth/xai"
+	"byos/internal/app"
+	"byos/internal/config"
+	oauthxai "byos/internal/oauth/xai"
 )
 
 var version = "dev"
@@ -35,14 +35,14 @@ func defaults() dependencies {
 func run(args []string) error { return runWith(context.Background(), args, defaults()) }
 func runWith(parent context.Context, args []string, deps dependencies) error {
 	if len(args) == 0 {
-		return errors.New("usage: supergrok-api <serve|login|version>")
+		return errors.New("usage: byos <serve|login|version>")
 	}
 	switch args[0] {
 	case "version":
 		if len(args) != 1 {
-			return errors.New("usage: supergrok-api version")
+			return errors.New("usage: byos version")
 		}
-		_, err := fmt.Fprintf(deps.stdout, "supergrok-api %s (commit %s, built %s, grok-client %s)\n", version, commit, buildDate, config.DefaultGrokClientVersion)
+		_, err := fmt.Fprintf(deps.stdout, "byos %s (commit %s, built %s, grok-client %s)\n", version, commit, buildDate, config.DefaultGrokClientVersion)
 		return err
 	case "serve", "login":
 		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
@@ -54,7 +54,7 @@ func runWith(parent context.Context, args []string, deps dependencies) error {
 			return err
 		}
 		if flags.NArg() != 0 {
-			return fmt.Errorf("usage: supergrok-api %s [--config path] [--listen address] [--data-dir path]", args[0])
+			return fmt.Errorf("usage: byos %s [--config path] [--listen address] [--data-dir path]", args[0])
 		}
 		cfg, err := deps.loadConfig(*configPath)
 		if err != nil {
