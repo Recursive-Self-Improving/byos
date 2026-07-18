@@ -11,17 +11,17 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/api"
-	"supergrok-api/internal/config"
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/models"
-	"supergrok-api/internal/store"
+	"byoo/internal/api"
+	"byoo/internal/config"
+	appcrypto "byoo/internal/crypto"
+	"byoo/internal/models"
+	"byoo/internal/store"
 )
 
 func TestRuntimeHealthAndReadinessWithoutAccounts(t *testing.T) {
-	t.Setenv("SUPERGROK_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	t.Setenv("SUPERGROK_ADMIN_PASSWORD", "password")
-	t.Setenv("SUPERGROK_ADMIN_API_KEY", "admin-key")
+	t.Setenv("BYOO_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("BYOO_ADMIN_PASSWORD", "password")
+	t.Setenv("BYOO_ADMIN_API_KEY", "admin-key")
 	secrets, err := config.LoadSecrets()
 	if err != nil {
 		t.Fatal(err)
@@ -111,9 +111,9 @@ func TestPublicModelsAndReadinessRequireRoutableSearchAccount(t *testing.T) {
 }
 
 func TestRuntimeRunStopsOnCancellation(t *testing.T) {
-	t.Setenv("SUPERGROK_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)))
-	t.Setenv("SUPERGROK_ADMIN_PASSWORD", "password")
-	t.Setenv("SUPERGROK_ADMIN_API_KEY", "admin-key")
+	t.Setenv("BYOO_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)))
+	t.Setenv("BYOO_ADMIN_PASSWORD", "password")
+	t.Setenv("BYOO_ADMIN_API_KEY", "admin-key")
 	secrets, err := config.LoadSecrets()
 	if err != nil {
 		t.Fatal(err)
@@ -151,9 +151,9 @@ func TestRuntimeRunDrainsOrLeavesDatabaseOpenForActiveHandlers(t *testing.T) {
 			}
 			address := listener.Addr().String()
 			_ = listener.Close()
-			t.Setenv("SUPERGROK_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32)))
-			t.Setenv("SUPERGROK_ADMIN_PASSWORD", "password")
-			t.Setenv("SUPERGROK_ADMIN_API_KEY", "admin-key")
+			t.Setenv("BYOO_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32)))
+			t.Setenv("BYOO_ADMIN_PASSWORD", "password")
+			t.Setenv("BYOO_ADMIN_API_KEY", "admin-key")
 			secrets, err := config.LoadSecrets()
 			if err != nil {
 				t.Fatal(err)

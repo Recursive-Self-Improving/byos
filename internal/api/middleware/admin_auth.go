@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"supergrok-api/internal/auththrottle"
+	"byoo/internal/auththrottle"
 )
 
 type AdminAttemptPolicy interface {

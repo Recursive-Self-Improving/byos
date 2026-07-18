@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byoo/internal/store"
 )
 
 const (

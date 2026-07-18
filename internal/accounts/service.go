@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
+	oauthxai "byoo/internal/oauth/xai"
+	"byoo/internal/store"
 )
 
 type CapabilityRefresher interface {

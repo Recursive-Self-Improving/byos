@@ -8,7 +8,7 @@ import (
 	"errors"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
+	appcrypto "byoo/internal/crypto"
 )
 
 const oauthAuthorizationRetention = 24 * time.Hour

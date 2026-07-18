@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
+	appcrypto "byoo/internal/crypto"
 )
 
 func TestOAuthAuthorizationAndCompletionSurviveRestart(t *testing.T) {

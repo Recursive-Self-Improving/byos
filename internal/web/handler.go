@@ -14,7 +14,7 @@ import (
 
 	"github.com/gorilla/csrf"
 
-	"supergrok-api/internal/requestsource"
+	"byoo/internal/requestsource"
 )
 
 const defaultSessionTTL = 12 * time.Hour
@@ -75,7 +75,7 @@ func NewHandler(options Options) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	loginKeyMaterial := append([]byte("supergrok-api/login-csrf/v1\x00"), options.CSRFKey[:]...)
+	loginKeyMaterial := append([]byte("byoo/login-csrf/v1\x00"), options.CSRFKey[:]...)
 	handler := &Handler{
 		sessions:       options.SessionStore,
 		loginAttempts:  options.LoginAttempts,

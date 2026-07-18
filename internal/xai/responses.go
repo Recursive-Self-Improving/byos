@@ -14,7 +14,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"supergrok-api/internal/search"
+	"byoo/internal/search"
 )
 
 type UpstreamError struct {

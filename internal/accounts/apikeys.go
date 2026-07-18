@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byoo/internal/store"
 )
 
-const APIKeyPrefix = "sgk_"
+const APIKeyPrefix = "byoo_"
 
 type CreatedAPIKey struct {
 	Key       store.APIKey

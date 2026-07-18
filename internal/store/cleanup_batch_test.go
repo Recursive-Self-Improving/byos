@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
+	appcrypto "byoo/internal/crypto"
 )
 
 func TestCleanupRepositoriesUseFixedBatches(t *testing.T) {

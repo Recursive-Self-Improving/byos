@@ -12,7 +12,7 @@ import (
 
 const envelopePrefix = "v1:"
 
-var envelopeAAD = []byte("supergrok-api/envelope/v1")
+var envelopeAAD = []byte("byoo/envelope/v1")
 
 func Encrypt(key [32]byte, plaintext []byte) (string, error) {
 	gcm, err := newGCM(key)

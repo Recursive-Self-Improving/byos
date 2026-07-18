@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"net/http"
 
-	"supergrok-api/internal/api"
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/search"
-	"supergrok-api/internal/sessions"
-	"supergrok-api/internal/translate/registry"
+	"byoo/internal/api"
+	"byoo/internal/routing"
+	"byoo/internal/search"
+	"byoo/internal/sessions"
+	"byoo/internal/translate/registry"
 )
 
 type ResponsesHandler struct {

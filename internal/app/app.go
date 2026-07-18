@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"supergrok-api/internal/config"
+	"byoo/internal/config"
 )
 
 type App struct {

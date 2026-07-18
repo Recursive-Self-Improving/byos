@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/auththrottle"
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/store"
+	"byoo/internal/auththrottle"
+	appcrypto "byoo/internal/crypto"
+	"byoo/internal/store"
 )
 
 func TestGuardBlocksWithoutEvaluatingAndResetsOnSuccess(t *testing.T) {

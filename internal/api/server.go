@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/api/middleware"
+	"byoo/internal/accounts"
+	"byoo/internal/api/middleware"
 )
 
 type ServerHandlers struct{ Health, Ready, Models, Chat, Responses, Messages, CountTokens, Admin, Web http.Handler }

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"supergrok-api/migrations"
+	"byoo/migrations"
 )
 
 func TestOpenMigratesAndConfiguresSQLite(t *testing.T) {
@@ -20,6 +20,9 @@ func TestOpenMigratesAndConfiguresSQLite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	if filepath.Base(store.Path()) != "byoo.db" {
+		t.Fatalf("database path = %q", store.Path())
+	}
 	var journal string
 	if err := store.DB.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journal); err != nil {
 		t.Fatal(err)

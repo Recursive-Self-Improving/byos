@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/sessions"
-	"supergrok-api/internal/store"
+	appcrypto "byoo/internal/crypto"
+	"byoo/internal/sessions"
+	"byoo/internal/store"
 )
 
 func TestSchedulerRoundRobinCapabilitiesAndAffinity(t *testing.T) {

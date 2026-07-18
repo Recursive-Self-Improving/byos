@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/auththrottle"
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/requestsource"
-	"supergrok-api/internal/store"
+	"byoo/internal/auththrottle"
+	appcrypto "byoo/internal/crypto"
+	"byoo/internal/requestsource"
+	"byoo/internal/store"
 )
 
 type testClock struct{ value time.Time }
@@ -245,7 +245,7 @@ func newWebFixture(t *testing.T, configure ...func(*Options)) *webFixture {
 	oauth := &fakeOAuthService{startFlow: oauthFlow, flows: map[string]OAuthFlow{"state_test": oauthFlow}}
 	usage := &fakeUsageService{values: []AccountUsage{{AccountID: "acct_test", AccountLabel: "Primary account", Monthly: UsagePeriod{Used: 25, Limit: &limit, Percent: &monthly, Unit: "credits"}, Weekly: UsagePeriod{Used: 40, Limit: &limit, Percent: &weekly, Unit: "credits"}, Local: LocalUsage{Requests: 10, InputTokens: 200, OutputTokens: 80}, FetchedAt: &fetched}}}
 	models := &fakeModelService{values: []ModelSupport{{AccountID: "acct_test", AccountLabel: "Primary account", Name: "grok-4.5", DisplayName: "Grok 4.5", Supported: true, SupportsBackendSearch: &search, Allowlisted: true, ContextWindow: 131072, MaxOutputTokens: 8192, DiscoveredAt: fetched}}}
-	apiKeys := &fakeAPIKeyService{keys: []APIKey{{ID: "key_test", Prefix: "sgk_example", Label: "Test client", CreatedAt: fetched}}, created: CreatedAPIKey{Key: APIKey{ID: "key_new", Prefix: "sgk_new", Label: "New key", CreatedAt: clock.value}, Plaintext: "sgk_one_time_plaintext"}}
+	apiKeys := &fakeAPIKeyService{keys: []APIKey{{ID: "key_test", Prefix: "byoo_example", Label: "Test client", CreatedAt: fetched}}, created: CreatedAPIKey{Key: APIKey{ID: "key_new", Prefix: "byoo_new", Label: "New key", CreatedAt: clock.value}, Plaintext: "byoo_one_time_plaintext"}}
 	options := Options{
 		AdminPassword: "correct horse battery staple",
 		SessionStore:  sessions,

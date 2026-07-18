@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/sessions"
+	"byoo/internal/routing"
+	"byoo/internal/sessions"
 )
 
 func TestSemanticMappings(t *testing.T) {

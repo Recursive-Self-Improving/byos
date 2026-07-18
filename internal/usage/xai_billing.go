@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"time"
 
-	"supergrok-api/internal/xai"
+	"byoo/internal/xai"
 )
 
 var ErrSchema = errors.New("invalid xai billing schema")

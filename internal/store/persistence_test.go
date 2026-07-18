@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
+	appcrypto "byoo/internal/crypto"
 )
 
 func openRepositories(t *testing.T) (*SQLite, appcrypto.Keys) {

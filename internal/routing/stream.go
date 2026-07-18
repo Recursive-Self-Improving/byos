@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/xai"
+	"byoo/internal/store"
+	"byoo/internal/xai"
 )
 
 // RoutedStream owns one committed upstream stream. It never changes accounts after returning an event.

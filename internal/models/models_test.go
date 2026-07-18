@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/xai"
+	"byoo/internal/store"
+	"byoo/internal/xai"
 )
 
 func TestDiscoverySchemasFallbackAndCredentials(t *testing.T) {
@@ -126,6 +126,9 @@ func TestCatalogAllowlistAliasesAndStaleSnapshot(t *testing.T) {
 	public, err := catalog.Public(context.Background(), []string{"a"})
 	if err != nil || len(public) != 2 || public[0].ID != "grok" || public[1].ID != "grok-4.5" {
 		t.Fatalf("public=%+v err=%v", public, err)
+	}
+	if public[0].OwnedBy != "byoo" || public[1].OwnedBy != "xai" {
+		t.Fatalf("model ownership = %+v", public)
 	}
 	if resolved, ok := catalog.Resolve("grok"); !ok || resolved != "grok-4.5" {
 		t.Fatalf("resolve=%s,%v", resolved, ok)

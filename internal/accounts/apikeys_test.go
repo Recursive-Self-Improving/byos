@@ -3,12 +3,13 @@ package accounts
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byoo/internal/store"
 )
 
 func TestAPIKeyLifecycleAndLastUseRateLimit(t *testing.T) {
@@ -82,8 +83,11 @@ func TestAPIKeyLifecycleAndLastUseRateLimit(t *testing.T) {
 	if _, err := service.Authenticate(ctx, created.Plaintext); err == nil {
 		t.Fatal("revoked key authenticated")
 	}
-	if _, err := service.Authenticate(ctx, "sgk_unknown"); err == nil {
+	if _, err := service.Authenticate(ctx, "byoo_unknown"); err == nil {
 		t.Fatal("unknown key authenticated")
+	}
+	if _, err := service.Authenticate(ctx, "sgk_legacy_key"); err == nil {
+		t.Fatal("legacy key prefix authenticated")
 	}
 	if err := database.Checkpoint(ctx); err != nil {
 		t.Fatal(err)
@@ -100,4 +104,4 @@ func TestAPIKeyLifecycleAndLastUseRateLimit(t *testing.T) {
 		t.Fatalf("hash count = %d, %v", hashCount, err)
 	}
 }
-func APIKeyPrefixLength() int { return 47 }
+func APIKeyPrefixLength() int { return len(APIKeyPrefix) + base64.RawURLEncoding.EncodedLen(32) }

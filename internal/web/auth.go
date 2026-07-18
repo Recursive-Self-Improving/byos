@@ -13,13 +13,13 @@ import (
 
 	"github.com/gorilla/csrf"
 
-	"supergrok-api/internal/auththrottle"
-	"supergrok-api/internal/store"
+	"byoo/internal/auththrottle"
+	"byoo/internal/store"
 )
 
 const (
-	SessionCookieName = "supergrok_admin_session"
-	CSRFCookieName    = "supergrok_admin_csrf"
+	SessionCookieName = "byoo_admin_session"
+	CSRFCookieName    = "byoo_admin_csrf"
 	adminCookiePath   = "/admin"
 	maxFormBytes      = 64 << 10
 )

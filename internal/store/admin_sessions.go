@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
+	appcrypto "byoo/internal/crypto"
 )
 
 const adminSessionTokenBytes = 32

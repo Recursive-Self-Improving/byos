@@ -23,7 +23,7 @@ func DeriveKeys(master []byte) (Keys, error) {
 	}
 	derive := func(info string) ([32]byte, error) {
 		var key [32]byte
-		value, err := hkdf.Key(sha256.New, master, []byte("supergrok-api/v1"), info, len(key))
+		value, err := hkdf.Key(sha256.New, master, []byte("byoo/v1"), info, len(key))
 		if err != nil {
 			return key, err
 		}

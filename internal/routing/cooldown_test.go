@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/store"
+	appcrypto "byoo/internal/crypto"
+	"byoo/internal/store"
 )
 
 func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"supergrok-api/internal/auththrottle"
+	"byoo/internal/auththrottle"
 )
 
 func (h *Handler) handleAdminRedirect(w http.ResponseWriter, r *http.Request) {

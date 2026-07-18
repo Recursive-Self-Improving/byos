@@ -1,4 +1,4 @@
-module supergrok-api
+module byoo
 
 go 1.26
 

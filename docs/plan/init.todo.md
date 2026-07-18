@@ -1,5 +1,7 @@
 # Todo List
 
+> Historical note: this todo predates the repository rename from `supergrok-api` / SuperGrok to `byoo` (bring-your-own-oauth). Legacy project names, paths, and variables below describe the implementation at that time; provider references to xAI SuperGrok remain literal.
+
 ## Locked decisions
 
 - Go 1.26 single-process service; persistence uses encrypted SQLite and does not support multi-instance coordination.

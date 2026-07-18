@@ -13,7 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	oauthxai "supergrok-api/internal/oauth/xai"
+	oauthxai "byoo/internal/oauth/xai"
 )
 
 const (

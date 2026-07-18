@@ -13,25 +13,25 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/api"
-	"supergrok-api/internal/api/admin"
-	apianthropic "supergrok-api/internal/api/anthropic"
-	apiopenai "supergrok-api/internal/api/openai"
-	"supergrok-api/internal/auththrottle"
-	"supergrok-api/internal/config"
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/models"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/requestsource"
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/sessions"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/translate"
-	"supergrok-api/internal/translate/registry"
-	"supergrok-api/internal/usage"
-	"supergrok-api/internal/web"
-	"supergrok-api/internal/xai"
+	"byoo/internal/accounts"
+	"byoo/internal/api"
+	"byoo/internal/api/admin"
+	apianthropic "byoo/internal/api/anthropic"
+	apiopenai "byoo/internal/api/openai"
+	"byoo/internal/auththrottle"
+	"byoo/internal/config"
+	appcrypto "byoo/internal/crypto"
+	"byoo/internal/models"
+	oauthxai "byoo/internal/oauth/xai"
+	"byoo/internal/requestsource"
+	"byoo/internal/routing"
+	"byoo/internal/sessions"
+	"byoo/internal/store"
+	"byoo/internal/translate"
+	"byoo/internal/translate/registry"
+	"byoo/internal/usage"
+	"byoo/internal/web"
+	"byoo/internal/xai"
 )
 
 type Runtime struct {
@@ -196,7 +196,7 @@ func (a publicCatalog) Ready(ctx context.Context) (bool, error) {
 }
 
 func deriveWebCSRFKey(sessionKey [32]byte) [32]byte {
-	const label = "supergrok-api/web-csrf/v1\x00"
+	const label = "byoo/web-csrf/v1\x00"
 	var material [len(label) + 32]byte
 	copy(material[:], label)
 	copy(material[len(label):], sessionKey[:])
@@ -227,7 +227,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	adminSessionRepo := store.NewAdminSessionRepository(database.DB, keys)
 	adminThrottleRepo := store.NewAdminAuthThrottleRepository(database.DB)
 	apiKeyService := accounts.NewAPIKeyService(store.NewAPIKeyRepository(database.DB))
-	upstream := xai.NewClient(xai.HTTPConfig{BaseURL: cfg.Upstream.CLIProxyBaseURL, ClientVersion: cfg.Upstream.GrokClientVersion, UserAgent: "supergrok-api", RequestTimeout: cfg.Upstream.RequestTimeout.Duration(), SSEIdleTimeout: cfg.Upstream.SSEIdleTimeout.Duration()})
+	upstream := xai.NewClient(xai.HTTPConfig{BaseURL: cfg.Upstream.CLIProxyBaseURL, ClientVersion: cfg.Upstream.GrokClientVersion, UserAgent: "byoo", RequestTimeout: cfg.Upstream.RequestTimeout.Duration(), SSEIdleTimeout: cfg.Upstream.SSEIdleTimeout.Duration()})
 	catalog := models.NewCatalog(capabilityRepo, models.NewUpstream(upstream), cfg.Models.Allowlist, cfg.Models.Aliases)
 	modelWorker := models.NewWorker(models.NewStoreAccountProvider(accountRepo), catalog, 15*time.Minute, cfg.Upstream.RequestTimeout.Duration(), 4)
 	usageService := usage.NewService(usage.NewBillingAdapter(upstream), usageRepo, localUsageRepo)

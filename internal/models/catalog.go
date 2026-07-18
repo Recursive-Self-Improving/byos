@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byoo/internal/store"
 )
 
 type CapabilityStore interface {
@@ -132,7 +132,7 @@ func (c *Catalog) Public(ctx context.Context, enabledAccountIDs []string) ([]Pub
 	}
 	for alias, target := range c.aliases {
 		if _, allowed := c.allowed[target]; allowed && (!hasSnapshot || supported[target]) {
-			result = append(result, PublicModel{ID: alias, Object: "model", OwnedBy: "supergrok-api", AliasOf: target})
+			result = append(result, PublicModel{ID: alias, Object: "model", OwnedBy: "byoo", AliasOf: target})
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return strings.Compare(result[i].ID, result[j].ID) < 0 })

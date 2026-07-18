@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"supergrok-api/internal/store"
+	"byoo/internal/store"
 )
 
 type Service struct {

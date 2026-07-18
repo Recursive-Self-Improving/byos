@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"supergrok-api/internal/auththrottle"
+	"byoo/internal/auththrottle"
 )
 
 type AdminAuthThrottleRepository struct{ db *sql.DB }

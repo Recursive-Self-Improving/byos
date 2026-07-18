@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/requestsource"
+	"byoo/internal/requestsource"
 )
 
 func TestAdminSessionRepositoryLifecycleAndEncryptedState(t *testing.T) {
@@ -140,6 +140,17 @@ func TestLoginLogoutExpiryAndServerSideRevocation(t *testing.T) {
 			t.Fatalf("revoked session response = %d %q", response.StatusCode, response.Header.Get("Location"))
 		}
 	})
+}
+
+func TestLegacySessionCookieDoesNotAuthenticate(t *testing.T) {
+	fixture := newWebFixture(t)
+	request := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	request.AddCookie(&http.Cookie{Name: "supergrok_admin_session", Value: base64.RawURLEncoding.EncodeToString(make([]byte, 32))})
+	response := httptest.NewRecorder()
+	fixture.handler.Routes().ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("legacy cookie response = %d %q", response.Code, response.Header().Get("Location"))
+	}
 }
 
 func TestCSRFMiddlewareProtectsLoginAndManagementMutations(t *testing.T) {

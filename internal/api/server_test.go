@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/auththrottle"
-	"supergrok-api/internal/store"
+	"byoo/internal/accounts"
+	"byoo/internal/auththrottle"
+	"byoo/internal/store"
 )
 
 func statusHandler(status int) http.Handler {

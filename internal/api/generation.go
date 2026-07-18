@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	apierrors "supergrok-api/internal/api/errors"
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/xai"
+	apierrors "byoo/internal/api/errors"
+	"byoo/internal/routing"
+	"byoo/internal/xai"
 )
 
 const DefaultMaxBody = 16 << 20

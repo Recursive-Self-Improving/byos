@@ -11,15 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/api"
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/search"
-	"supergrok-api/internal/sessions"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/translate"
-	"supergrok-api/internal/translate/registry"
-	"supergrok-api/internal/xai"
+	"byoo/internal/api"
+	appcrypto "byoo/internal/crypto"
+	"byoo/internal/routing"
+	"byoo/internal/search"
+	"byoo/internal/sessions"
+	"byoo/internal/store"
+	"byoo/internal/translate"
+	"byoo/internal/translate/registry"
+	"byoo/internal/xai"
 )
 
 type fakeStream struct {

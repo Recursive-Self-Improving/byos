@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"supergrok-api/internal/accounts"
-	apierrors "supergrok-api/internal/api/errors"
+	"byoo/internal/accounts"
+	apierrors "byoo/internal/api/errors"
 )
 
 type clientIdentity struct{ ID, Label string }

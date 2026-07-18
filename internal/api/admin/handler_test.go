@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/models"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/usage"
+	"byoo/internal/accounts"
+	"byoo/internal/models"
+	oauthxai "byoo/internal/oauth/xai"
+	"byoo/internal/store"
+	"byoo/internal/usage"
 )
 
 type fakeAccounts struct {
@@ -364,19 +364,19 @@ func TestModelsListPreservesStaleStateAndRefreshesEnabledAccounts(t *testing.T) 
 
 func TestAPIKeyPlaintextIsReturnedOnceAndRevocationWorks(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	key := store.APIKey{ID: "key_1", Prefix: "sgk_visible", Label: "automation", CreatedAt: now}
-	keys := &fakeKeys{values: []store.APIKey{key}, created: accounts.CreatedAPIKey{Key: key, Plaintext: "sgk_one_time_private"}}
+	key := store.APIKey{ID: "key_1", Prefix: "byoo_visible", Label: "automation", CreatedAt: now}
+	keys := &fakeKeys{values: []store.APIKey{key}, created: accounts.CreatedAPIKey{Key: key, Plaintext: "byoo_one_time_private"}}
 	handler := NewHandler(Services{APIKeys: keys})
 
 	created := request(t, handler, http.MethodPost, basePath+"/api-keys", `{"label":" automation "}`)
 	requireStatus(t, created, http.StatusCreated)
-	if keys.label != "automation" || !strings.Contains(created.Body.String(), `"plaintext":"sgk_one_time_private"`) {
+	if keys.label != "automation" || !strings.Contains(created.Body.String(), `"plaintext":"byoo_one_time_private"`) {
 		t.Fatalf("create body = %s, label=%q", created.Body.String(), keys.label)
 	}
 
 	listed := request(t, handler, http.MethodGet, basePath+"/api-keys", "")
 	requireStatus(t, listed, http.StatusOK)
-	if strings.Contains(listed.Body.String(), "sgk_one_time_private") || !strings.Contains(listed.Body.String(), `"prefix":"sgk_visible"`) {
+	if strings.Contains(listed.Body.String(), "byoo_one_time_private") || !strings.Contains(listed.Body.String(), `"prefix":"byoo_visible"`) {
 		t.Fatalf("list body = %s", listed.Body.String())
 	}
 

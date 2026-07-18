@@ -15,19 +15,19 @@ type Secrets struct {
 }
 
 func LoadSecrets() (Secrets, error) {
-	master, err := secretValue("SUPERGROK_MASTER_KEY")
+	master, err := secretValue("BYOO_MASTER_KEY")
 	if err != nil {
 		return Secrets{}, err
 	}
 	decoded, err := base64.StdEncoding.DecodeString(master)
 	if err != nil || len(decoded) != 32 {
-		return Secrets{}, errors.New("SUPERGROK_MASTER_KEY must be base64-encoded 32 bytes")
+		return Secrets{}, errors.New("BYOO_MASTER_KEY must be base64-encoded 32 bytes")
 	}
-	password, err := secretValue("SUPERGROK_ADMIN_PASSWORD")
+	password, err := secretValue("BYOO_ADMIN_PASSWORD")
 	if err != nil {
 		return Secrets{}, err
 	}
-	apiKey, err := secretValue("SUPERGROK_ADMIN_API_KEY")
+	apiKey, err := secretValue("BYOO_ADMIN_API_KEY")
 	if err != nil {
 		return Secrets{}, err
 	}

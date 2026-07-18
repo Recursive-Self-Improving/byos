@@ -1,5 +1,7 @@
 # Implementation Plan
 
+> Historical note: this plan predates the repository rename from `supergrok-api` / SuperGrok to `byoo` (bring-your-own-oauth). Legacy project names, paths, and variables below describe the implementation at that time; provider references to xAI SuperGrok remain literal.
+
 ## Goal
 
 在空仓库 `supergrok-api` 中实现单实例 Go Proxy 服务：

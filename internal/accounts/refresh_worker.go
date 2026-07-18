@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
+	oauthxai "byoo/internal/oauth/xai"
+	"byoo/internal/store"
 )
 
 type RefreshHook interface {
