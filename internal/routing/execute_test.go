@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -561,5 +562,445 @@ func TestExecutePermissionFailureIsTerminalWithoutRecoveryOrFailover(t *testing.
 	}
 	if len(f.client.requests) != 1 || len(credentials.credentialIDs) != 1 || len(credentials.recoveryIDs) != 0 {
 		t.Fatalf("requests=%d credential calls=%v recovery calls=%v", len(f.client.requests), credentials.credentialIDs, credentials.recoveryIDs)
+	}
+}
+
+// passthroughPolicy is the Devin pass-through request policy: it performs no
+// canonical mutation, mirroring the production Devin policy that does not apply
+// xAI-specific backend-search gating.
+type passthroughPolicy struct{}
+
+func (passthroughPolicy) Prepare(_ context.Context, _ provider.ResolvedModel, _ provider.CanonicalRequest) error {
+	return nil
+}
+
+// recordingCredentials serves only accounts seeded into its values map and
+// records every Credential / AuthenticationFailed / CredentialUsable call so
+// tests can assert no cross-provider credential access occurred.
+type recordingCredentials struct {
+	values        map[string]string
+	credentialIDs []string
+	recoveryIDs   []string
+	recoveryErr   error
+}
+
+func (c *recordingCredentials) Credential(_ context.Context, id string) (provider.Credential, error) {
+	c.credentialIDs = append(c.credentialIDs, id)
+	return provider.Credential{Value: c.values[id]}, nil
+}
+
+func (c *recordingCredentials) AuthenticationFailed(_ context.Context, id string, _ *provider.UpstreamError) error {
+	c.recoveryIDs = append(c.recoveryIDs, id)
+	if c.recoveryErr == nil && c.values[id] != "" {
+		c.values[id] = "fresh-" + id
+	}
+	return c.recoveryErr
+}
+
+func (c *recordingCredentials) CredentialUsable(_ context.Context, id string) (bool, error) {
+	return c.values[id] != "", nil
+}
+
+// staticFiveModels returns the five fixed static model identities resolved by
+// the production catalog, keyed by public name.
+func staticFiveModels() map[string]provider.ResolvedModel {
+	return map[string]provider.ResolvedModel{
+		"grok":         {PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "byos", PolicyKey: "xai"},
+		"grok-4.5":     {PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"},
+		"kimi-k2-7":    {PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
+		"glm-5-2":      {PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
+		"swe-1-6-slow": {PublicName: "swe-1-6-slow", UpstreamName: "swe-1-6-slow", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
+	}
+}
+
+type multiProviderFixture struct {
+	executor     *Executor
+	xaiClient    *fakeGeneration
+	devinClient  *fakeGeneration
+	xaiCreds     *recordingCredentials
+	devinCreds   *recordingCredentials
+	accounts     *store.AccountRepository
+	db           *sql.DB
+	close        func()
+	ledger       *[]string
+	usage        *[]usageRecord
+	xaiAccount   store.Account
+	devinAccount store.Account
+}
+
+func newMultiProviderFixture(t *testing.T) *multiProviderFixture {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{41}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := store.NewAccountRepository(db.DB, keys)
+	xaiAccount, err := accountRepo.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Label: "x", Status: "ready", Credentials: store.AccountCredentials{Issuer: "issuer", Subject: "multi-xai", AccessToken: "xai-token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	devinExpiry := time.Now().Add(time.Hour)
+	devinAccount, err := accountRepo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d", Status: "ready", ExpiresAt: &devinExpiry, Credentials: store.AccountCredentials{OpaqueToken: "devin-token", OpaqueTokenExpiresAt: &devinExpiry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := []string{}
+	usage := []usageRecord{}
+	xaiCreds := &recordingCredentials{values: map[string]string{xaiAccount.ID: "xai-token"}}
+	devinCreds := &recordingCredentials{values: map[string]string{devinAccount.ID: "devin-token"}}
+	xaiClient := &fakeGeneration{ledger: &ledger}
+	devinClient := &fakeGeneration{ledger: &ledger}
+	catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+	registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
+		"xai/xai":     {Policy: ledgerPolicy{ledger: &ledger, policy: xai.RequestPolicy{}}, Generation: xaiClient, Credentials: xaiCreds},
+		"devin/devin": {Policy: passthroughPolicy{}, Generation: devinClient, Credentials: devinCreds},
+	}}
+	states := store.NewCooldownRepository(db.DB)
+	executor := newExecutor(NewScheduler(), catalog, registry, NewCooldownManager(states, accountRepo), ledgerAccounts{ledger: &ledger, repo: accountRepo}, ledgerCapabilities{ledger: &ledger, repo: store.NewModelCapabilityRepository(db.DB)}, ledgerCooldowns{ledger: &ledger, repo: states})
+	executor.SetUsageRecorder(ledgerUsage{ledger: &ledger, records: &usage})
+	return &multiProviderFixture{executor: executor, xaiClient: xaiClient, devinClient: devinClient, xaiCreds: xaiCreds, devinCreds: devinCreds, accounts: accountRepo, db: db.DB, close: func() { db.Close() }, ledger: &ledger, usage: &usage, xaiAccount: xaiAccount, devinAccount: devinAccount}
+}
+
+// protocolBodies returns three canonical body shapes representing the OpenAI
+// Chat, OpenAI Responses, and Anthropic Messages protocols. Routing parses each
+// once and dispatches by resolved model name; the body shape must not change
+// the selected provider or upstream.
+func protocolBodies(model string) [][]byte {
+	return [][]byte{
+		[]byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hello"}]}`),
+		[]byte(`{"model":"` + model + `","input":"hello"}`),
+		[]byte(`{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"system":"hi"}`),
+	}
+}
+
+// TestExecuteDispatchesAllFiveStaticNamesToExactProviderWithNoCrossProviderCalls
+// asserts C9.3: for every fixed static model name and every protocol body shape,
+// non-stream dispatch reaches exactly the resolved provider's generation client
+// and credentials with the correct upstream name, and never touches the other
+// provider's client or credential manager.
+func TestExecuteDispatchesAllFiveStaticNamesToExactProviderWithNoCrossProviderCalls(t *testing.T) {
+	f := newMultiProviderFixture(t)
+	defer f.close()
+	ctx := context.Background()
+	for _, name := range []string{"grok", "grok-4.5", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+		resolved := staticFiveModels()[name]
+		for bodyIndex, body := range protocolBodies(name) {
+			f.xaiClient.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+			f.devinClient.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+			f.xaiClient.requests = nil
+			f.devinClient.requests = nil
+			f.xaiCreds.credentialIDs = nil
+			f.devinCreds.credentialIDs = nil
+			original := bytes.Clone(body)
+			result, err := f.executor.Execute(ctx, Request{Model: name, Body: body})
+			if err != nil {
+				t.Fatalf("model=%s body=%d err=%v", name, bodyIndex, err)
+			}
+			if result.Model != resolved.UpstreamName {
+				t.Fatalf("model=%s body=%d upstream=%q want=%q", name, bodyIndex, result.Model, resolved.UpstreamName)
+			}
+			if !bytes.Equal(body, original) {
+				t.Fatalf("model=%s body=%d mutated: %s", name, bodyIndex, body)
+			}
+			var servedClient *fakeGeneration
+			var wrongClient *fakeGeneration
+			var servedCreds, wrongCreds *recordingCredentials
+			var servedAccount store.Account
+			if resolved.Provider == provider.XAI {
+				servedClient, wrongClient = f.xaiClient, f.devinClient
+				servedCreds, wrongCreds = f.xaiCreds, f.devinCreds
+				servedAccount = f.xaiAccount
+			} else {
+				servedClient, wrongClient = f.devinClient, f.xaiClient
+				servedCreds, wrongCreds = f.devinCreds, f.xaiCreds
+				servedAccount = f.devinAccount
+			}
+			if len(servedClient.requests) != 1 {
+				t.Fatalf("model=%s body=%d served client requests=%d", name, bodyIndex, len(servedClient.requests))
+			}
+			if len(wrongClient.requests) != 0 {
+				t.Fatalf("model=%s body=%d cross-provider client calls=%d", name, bodyIndex, len(wrongClient.requests))
+			}
+			if servedClient.requests[0].Model.Provider != resolved.Provider || servedClient.requests[0].Model.UpstreamName != resolved.UpstreamName {
+				t.Fatalf("model=%s body=%d request model=%+v", name, bodyIndex, servedClient.requests[0].Model)
+			}
+			if len(servedCreds.credentialIDs) != 1 || servedCreds.credentialIDs[0] != servedAccount.ID {
+				t.Fatalf("model=%s body=%d served credential calls=%v", name, bodyIndex, servedCreds.credentialIDs)
+			}
+			if len(wrongCreds.credentialIDs) != 0 {
+				t.Fatalf("model=%s body=%d cross-provider credential calls=%v", name, bodyIndex, wrongCreds.credentialIDs)
+			}
+			if result.AccountID != servedAccount.ID {
+				t.Fatalf("model=%s body=%d account=%q want=%q", name, bodyIndex, result.AccountID, servedAccount.ID)
+			}
+		}
+	}
+}
+
+// TestExecuteManagedAffinitySkipsWrongProviderWithoutCrossProviderCredential
+// asserts C9.3 managed Responses affinity: a preferred account of the wrong
+// provider is skipped before any credential access, and dispatch falls back to
+// a same-provider account with no cross-provider client or credential calls.
+func TestExecuteManagedAffinitySkipsWrongProviderWithoutCrossProviderCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		model        string
+		preferredXAI bool
+		wantProvider provider.Kind
+	}{
+		{name: "xAI model with Devin preferred", model: "grok-4.5", preferredXAI: false, wantProvider: provider.XAI},
+		{name: "Devin model with xAI preferred", model: "kimi-k2-7", preferredXAI: true, wantProvider: provider.Devin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMultiProviderFixture(t)
+			defer f.close()
+			ctx := context.Background()
+			preferred := f.devinAccount.ID
+			var wantAccount store.Account
+			var wantClient *fakeGeneration
+			var wrongClient *fakeGeneration
+			var wantCreds, wrongCreds *recordingCredentials
+			if tc.preferredXAI {
+				preferred = f.xaiAccount.ID
+			}
+			if tc.wantProvider == provider.XAI {
+				wantAccount = f.xaiAccount
+				wantClient, wrongClient = f.xaiClient, f.devinClient
+				wantCreds, wrongCreds = f.xaiCreds, f.devinCreds
+			} else {
+				wantAccount = f.devinAccount
+				wantClient, wrongClient = f.devinClient, f.xaiClient
+				wantCreds, wrongCreds = f.devinCreds, f.xaiCreds
+			}
+			wantClient.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+			result, err := f.executor.Execute(ctx, Request{Model: tc.model, Body: []byte(`{"model":"` + tc.model + `"}`), PreferredAccountID: preferred})
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if result.AccountID != wantAccount.ID {
+				t.Fatalf("account=%q want=%q (preferred=%q)", result.AccountID, wantAccount.ID, preferred)
+			}
+			if len(wantClient.requests) != 1 || len(wrongClient.requests) != 0 {
+				t.Fatalf("client calls served=%d wrong=%d", len(wantClient.requests), len(wrongClient.requests))
+			}
+			if len(wantCreds.credentialIDs) != 1 || wantCreds.credentialIDs[0] != wantAccount.ID {
+				t.Fatalf("served credential calls=%v", wantCreds.credentialIDs)
+			}
+			if len(wrongCreds.credentialIDs) != 0 {
+				t.Fatalf("cross-provider credential calls=%v", wrongCreds.credentialIDs)
+			}
+		})
+	}
+}
+
+// TestExecuteDevinUnauthorizedRecoveryPersistsReloginAndFailsOver asserts C9.4:
+// a Devin 401/403 with RefreshSame triggers AuthenticationFailed (persisting
+// relogin), then fails over to another Devin account without resending the
+// rejected token. The recovery classification must carry ReloginRequired and
+// DisableAccount so the account is marked for relogin.
+func TestExecuteDevinUnauthorizedRecoveryPersistsReloginAndFailsOver(t *testing.T) {
+	ctx := context.Background()
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(fmt.Sprintf("status=%d", status), func(t *testing.T) {
+			db, err := store.Open(ctx, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{42}, 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			accountRepo := store.NewAccountRepository(db.DB, keys)
+			expiry := time.Now().Add(time.Hour)
+			first, err := accountRepo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d1", Status: "ready", ExpiresAt: &expiry, Credentials: store.AccountCredentials{OpaqueToken: "devin-one", OpaqueTokenExpiresAt: &expiry}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := accountRepo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d2", Status: "ready", ExpiresAt: &expiry, Credentials: store.AccountCredentials{OpaqueToken: "devin-two", OpaqueTokenExpiresAt: &expiry}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger := []string{}
+			usage := []usageRecord{}
+			creds := &recordingCredentials{values: map[string]string{first.ID: "devin-one", second.ID: "devin-two"}, recoveryErr: &provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: provider.ErrorClassification{Class: provider.ClassUnauthorized, RetryNext: true, DisableAccount: true, ReloginRequired: true, CooldownScope: provider.CooldownAccount, PublicStatus: http.StatusUnauthorized, PublicCode: "provider_authentication_error", PublicMessage: "account requires login"}}}
+			client := &fakeGeneration{ledger: &ledger}
+			catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+			registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
+				"devin/devin": {Policy: passthroughPolicy{}, Generation: client, Credentials: creds},
+			}}
+			states := store.NewCooldownRepository(db.DB)
+			executor := newExecutor(NewScheduler(), catalog, registry, NewCooldownManager(states, accountRepo), ledgerAccounts{ledger: &ledger, repo: accountRepo}, ledgerCapabilities{ledger: &ledger, repo: store.NewModelCapabilityRepository(db.DB)}, ledgerCooldowns{ledger: &ledger, repo: states})
+			executor.SetUsageRecorder(ledgerUsage{ledger: &ledger, records: &usage})
+			client.steps = []executeStep{
+				{err: &provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: provider.ErrorClassification{Class: provider.ClassUnauthorized, RefreshSame: true, RetryNext: true, CooldownScope: provider.CooldownAccount, PublicStatus: status, PublicCode: "provider_authentication_error"}}},
+				{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}},
+			}
+			result, err := executor.Execute(ctx, Request{Model: "kimi-k2-7", Body: []byte(`{"model":"kimi-k2-7"}`), PreferredAccountID: first.ID})
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if len(creds.recoveryIDs) != 1 || creds.recoveryIDs[0] != first.ID {
+				t.Fatalf("recovery calls=%v, want first account %q", creds.recoveryIDs, first.ID)
+			}
+			if len(client.requests) != 2 || client.requests[0].Credential.Value == client.requests[1].Credential.Value {
+				t.Fatalf("requests=%d credentials=%q,%q", len(client.requests), client.requests[0].Credential.Value, client.requests[1].Credential.Value)
+			}
+			if result.AccountID != second.ID {
+				t.Fatalf("account=%q want failover to %q", result.AccountID, second.ID)
+			}
+			storedFirst, err := accountRepo.Get(ctx, first.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if storedFirst.Status != "relogin_required" || storedFirst.Enabled {
+				t.Fatalf("first account not marked relogin: status=%q enabled=%v", storedFirst.Status, storedFirst.Enabled)
+			}
+		})
+	}
+}
+
+// TestExecuteDevinTransientFailoverAppliesModelCooldownAndStaysProviderLocal
+// asserts C9.4: a Devin transient upstream error fails over to another Devin
+// account, applies a model-scoped cooldown, and never crosses to xAI.
+func TestExecuteDevinTransientFailoverAppliesModelCooldownAndStaysProviderLocal(t *testing.T) {
+	f := newMultiProviderFixture(t)
+	defer f.close()
+	ctx := context.Background()
+	secondExpiry := time.Now().Add(time.Hour)
+	second, err := f.accounts.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d2", Status: "ready", ExpiresAt: &secondExpiry, Credentials: store.AccountCredentials{OpaqueToken: "devin-second", OpaqueTokenExpiresAt: &secondExpiry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.devinCreds.values[second.ID] = "devin-second"
+	f.devinClient.steps = []executeStep{
+		{err: &provider.UpstreamError{Provider: provider.Devin, Status: 503, Classification: provider.ErrorClassification{Class: provider.ClassTransient, RetryNext: true, CooldownScope: provider.CooldownModel, Cooldown: time.Minute}}},
+		{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}},
+	}
+	result, err := f.executor.Execute(ctx, Request{Model: "glm-5-2", Body: []byte(`{"model":"glm-5-2"}`), PreferredAccountID: f.devinAccount.ID})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if result.AccountID == f.devinAccount.ID {
+		t.Fatalf("failover did not move off failed Devin account: %q", result.AccountID)
+	}
+	if result.AccountID != second.ID {
+		t.Fatalf("account=%q want=%q", result.AccountID, second.ID)
+	}
+	if len(f.devinClient.requests) != 2 || len(f.xaiClient.requests) != 0 {
+		t.Fatalf("devin requests=%d xai requests=%d", len(f.devinClient.requests), len(f.xaiClient.requests))
+	}
+	for _, req := range f.devinClient.requests {
+		if req.Model.Provider != provider.Devin {
+			t.Fatalf("cross-provider failover: %+v", req.Model)
+		}
+	}
+}
+
+// TestExecuteDevinRateLimitCooldownFailsOverAndClassifiesRateLimit asserts C9.4:
+// a Devin 429 applies a model-scoped rate-limit cooldown and fails over to
+// another Devin account; when all Devin accounts are cooling, the error
+// classifies as rate-limited with a retry-after.
+func TestExecuteDevinRateLimitCooldownFailsOverAndClassifiesRateLimit(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{43}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := store.NewAccountRepository(db.DB, keys)
+	expiry := time.Now().Add(time.Hour)
+	first, err := accountRepo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d1", Status: "ready", ExpiresAt: &expiry, Credentials: store.AccountCredentials{OpaqueToken: "devin-one", OpaqueTokenExpiresAt: &expiry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := accountRepo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d2", Status: "ready", ExpiresAt: &expiry, Credentials: store.AccountCredentials{OpaqueToken: "devin-two", OpaqueTokenExpiresAt: &expiry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := []string{}
+	usage := []usageRecord{}
+	creds := &recordingCredentials{values: map[string]string{first.ID: "devin-one", second.ID: "devin-two"}}
+	client := &fakeGeneration{ledger: &ledger}
+	catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+	registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
+		"devin/devin": {Policy: passthroughPolicy{}, Generation: client, Credentials: creds},
+	}}
+	states := store.NewCooldownRepository(db.DB)
+	executor := newExecutor(NewScheduler(), catalog, registry, NewCooldownManager(states, accountRepo), ledgerAccounts{ledger: &ledger, repo: accountRepo}, ledgerCapabilities{ledger: &ledger, repo: store.NewModelCapabilityRepository(db.DB)}, ledgerCooldowns{ledger: &ledger, repo: states})
+	executor.SetUsageRecorder(ledgerUsage{ledger: &ledger, records: &usage})
+	client.steps = []executeStep{
+		{err: &provider.UpstreamError{Provider: provider.Devin, Status: http.StatusTooManyRequests, Classification: provider.ErrorClassification{Class: provider.ClassRateLimit, RetryNext: true, CooldownScope: provider.CooldownModel, Cooldown: time.Minute, PublicStatus: http.StatusTooManyRequests, PublicCode: "rate_limit_exceeded"}}},
+		{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}},
+	}
+	result, err := executor.Execute(ctx, Request{Model: "swe-1-6-slow", Body: []byte(`{"model":"swe-1-6-slow"}`), PreferredAccountID: first.ID})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if result.AccountID != second.ID {
+		t.Fatalf("account=%q want failover to %q", result.AccountID, second.ID)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("requests=%d", len(client.requests))
+	}
+}
+
+// TestExecuteDevinRecordsTerminalUsageExactlyOnce asserts C9.4: a successful
+// Devin dispatch records exactly one local usage row with the terminal token
+// delta, attributed to the serving Devin account.
+func TestExecuteDevinRecordsTerminalUsageExactlyOnce(t *testing.T) {
+	f := newMultiProviderFixture(t)
+	defer f.close()
+	f.devinClient.steps = []executeStep{{events: []provider.Event{
+		{Event: "response.output_text.delta", Data: []byte(`{"type":"response.output_text.delta"}`)},
+		{Event: "response.completed", Data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":19,"output_tokens":29}}}`)},
+	}}}
+	result, err := f.executor.Execute(context.Background(), Request{Model: "kimi-k2-7", Body: []byte(`{"model":"kimi-k2-7"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Model != "kimi-k2-7" {
+		t.Fatalf("model=%q", result.Model)
+	}
+	if len(*f.usage) != 1 {
+		t.Fatalf("usage records=%+v", *f.usage)
+	}
+	want := usageRecord{accountID: result.AccountID, delta: LocalUsageDelta{Requests: 1, InputTokens: 19, OutputTokens: 29}}
+	if (*f.usage)[0] != want {
+		t.Fatalf("usage=%+v, want %+v", (*f.usage)[0], want)
+	}
+}
+
+// TestExecuteRejectsDevinModelWhenGenerationTrioMissing asserts C9.1: a Devin
+// static model whose policy key has no registered generation trio is rejected
+// before any credential or client call, even when a Devin account exists.
+func TestExecuteRejectsDevinModelWhenGenerationTrioMissing(t *testing.T) {
+	f := newMultiProviderFixture(t)
+	defer f.close()
+	ctx := context.Background()
+	original := []byte(`{"model":"kimi-k2-7"}`)
+	before := len(f.devinCreds.credentialIDs)
+	// Strip the Devin capability registration before any Execute so the Devin
+	// static model has no registered generation trio: the model must be
+	// rejected with ErrModelUnavailable and no speculative credential or
+	// client calls, even though a Devin account exists.
+	f.executor.registry = fakeRegistry{ledger: f.ledger, caps: map[string]provider.Capabilities{
+		"xai/xai": {Policy: ledgerPolicy{ledger: f.ledger, policy: xai.RequestPolicy{}}, Generation: f.xaiClient, Credentials: f.xaiCreds},
+	}}
+	_, err := f.executor.Execute(ctx, Request{Model: "kimi-k2-7", Body: original})
+	if !errors.Is(err, ErrModelUnavailable) {
+		t.Fatalf("err=%v want ErrModelUnavailable", err)
+	}
+	if len(f.devinCreds.credentialIDs) != before || len(f.devinClient.requests) != 0 || len(f.xaiCreds.credentialIDs) != 0 {
+		t.Fatalf("speculative side effects: devinCreds=%v devinClient=%d xaiCreds=%v", f.devinCreds.credentialIDs, len(f.devinClient.requests), f.xaiCreds.credentialIDs)
 	}
 }

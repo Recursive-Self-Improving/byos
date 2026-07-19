@@ -149,7 +149,7 @@ func TestLegacyModelsRespectStaticCatalogOwnership(t *testing.T) {
 			m.Default = "fast"
 			m.Allowlist = []string{"fast", DefaultModel}
 		}},
-		{name: "alias default without canonical allowlist", mutate: func(m *ModelsConfig) {
+		{name: "alias default without canonical allowlist", valid: true, mutate: func(m *ModelsConfig) {
 			m.Aliases["fast"] = DefaultModel
 			m.Default = "fast"
 			m.Allowlist = []string{"fast"}
@@ -179,7 +179,7 @@ func TestLegacyModelsRespectStaticCatalogOwnership(t *testing.T) {
 			m.Aliases["turbo"] = DefaultModel
 			m.Aliases["fast"] = "turbo"
 		}},
-		{name: "Devin default", mutate: func(m *ModelsConfig) {
+		{name: "Devin default", valid: true, mutate: func(m *ModelsConfig) {
 			m.Default = "kimi-k2-7"
 			m.Allowlist = []string{"kimi-k2-7"}
 		}},
@@ -187,7 +187,7 @@ func TestLegacyModelsRespectStaticCatalogOwnership(t *testing.T) {
 			m.Default = "other"
 			m.Allowlist = []string{"other"}
 		}},
-		{name: "Devin allowlist entry", mutate: func(m *ModelsConfig) {
+		{name: "Devin allowlist entry", valid: true, mutate: func(m *ModelsConfig) {
 			m.Allowlist = append(m.Allowlist, "glm-5-2")
 		}},
 		{name: "unknown allowlist entry", mutate: func(m *ModelsConfig) {
@@ -274,4 +274,54 @@ func loadYAMLError(t *testing.T, body string) (Config, error) {
 		t.Fatal(err)
 	}
 	return Load(path)
+}
+
+// TestConfigAcceptsAnyFixedStaticPublicModelAsDefault asserts C9.2: config
+// accepts any of the five fixed static public model names as the default while
+// preserving Grok alias ownership (models.aliases.grok stays fixed at the
+// canonical xAI model). This guards against the prior xAI-only default/allowlist
+// boundary that prevented Devin defaults.
+func TestConfigAcceptsAnyFixedStaticPublicModelAsDefault(t *testing.T) {
+	for _, name := range []string{DefaultModel, "grok", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Models.Default = name
+			cfg.Models.Allowlist = []string{name}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("default %q rejected: %v", name, err)
+			}
+			if cfg.Models.Aliases["grok"] != DefaultModel {
+				t.Fatalf("grok alias ownership changed for default %q: %q", name, cfg.Models.Aliases["grok"])
+			}
+		})
+	}
+}
+
+// TestConfigRejectsNonFixedDefaultWhilePreservingGrokAlias asserts C9.2: a
+// default that is not one of the five fixed static public names (and not a
+// permitted xAI alias) is rejected, while the Grok alias ownership constraint
+// stays intact.
+func TestConfigRejectsNonFixedDefaultWhilePreservingGrokAlias(t *testing.T) {
+	cfg := Default()
+	cfg.Models.Default = "not-a-fixed-model"
+	cfg.Models.Allowlist = []string{"not-a-fixed-model"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("non-fixed default accepted")
+	}
+	if cfg.Models.Aliases["grok"] != DefaultModel {
+		t.Fatalf("grok alias ownership changed: %q", cfg.Models.Aliases["grok"])
+	}
+}
+
+// TestConfigGrokAliasStaysFixedAtCanonicalXAIModel asserts C9.2: the Grok alias
+// must always target the canonical xAI model and cannot be redirected, even
+// when the default is a Devin model.
+func TestConfigGrokAliasStaysFixedAtCanonicalXAIModel(t *testing.T) {
+	cfg := Default()
+	cfg.Models.Default = "kimi-k2-7"
+	cfg.Models.Allowlist = []string{"kimi-k2-7"}
+	cfg.Models.Aliases["grok"] = "kimi-k2-7"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("grok alias redirect to Devin accepted")
+	}
 }

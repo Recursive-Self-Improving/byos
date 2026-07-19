@@ -24,6 +24,10 @@ func NewProviderClient(client *Client) *ProviderClient {
 	return &ProviderClient{client: client, newResponseID: newResponseID}
 }
 
+// newResponseID is the production crypto-random response-ID generator. It is
+// package-private; tests pin response IDs by setting ProviderClient.newResponseID
+// directly within the devin package.
+
 func (c *ProviderClient) Stream(ctx context.Context, request provider.GenerationRequest) (provider.Stream, error) {
 	if c == nil || c.client == nil {
 		return nil, ErrInvalidClientConfig
@@ -127,6 +131,7 @@ func classifyGenerationStatus(status int) provider.ErrorClassification {
 		result.PublicMessage = "invalid model or request payload"
 	case http.StatusUnauthorized, http.StatusForbidden:
 		result.Class = provider.ClassUnauthorized
+		result.RefreshSame = true
 		result.RetryNext = true
 		result.DisableAccount = true
 		result.ReloginRequired = true

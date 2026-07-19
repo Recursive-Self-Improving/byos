@@ -14,14 +14,21 @@ import (
 type CooldownManager struct {
 	states   *store.CooldownRepository
 	accounts *store.AccountRepository
-	now      func() time.Time
 }
 
 func NewCooldownManager(states *store.CooldownRepository, accounts *store.AccountRepository) *CooldownManager {
-	return &CooldownManager{states: states, accounts: accounts, now: func() time.Time { return time.Now().UTC() }}
+	return &CooldownManager{states: states, accounts: accounts}
 }
+
 func (m *CooldownManager) Apply(ctx context.Context, accountID, model string, classified provider.ErrorClassification) error {
-	now := m.now()
+	now := time.Now().UTC()
+	if classified.ReloginRequired {
+		account, err := m.accounts.Get(ctx, accountID)
+		if err != nil {
+			return err
+		}
+		return m.accounts.MarkReloginRequired(ctx, accountID, account.Provider)
+	}
 	if classified.DisableAccount {
 		account, err := m.accounts.Get(ctx, accountID)
 		if err != nil {

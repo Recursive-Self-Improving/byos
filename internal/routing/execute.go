@@ -40,7 +40,6 @@ type Executor struct {
 	capabilities modelCapabilitySource
 	states       cooldownSource
 	usage        UsageRecorder
-	now          func() time.Time
 }
 
 func NewExecutor(scheduler *Scheduler, catalog provider.ModelCatalog, registry provider.CapabilityRegistry, cooldowns *CooldownManager, accounts *store.AccountRepository, capabilities *store.ModelCapabilityRepository, states *store.CooldownRepository) *Executor {
@@ -51,7 +50,7 @@ func newExecutor(scheduler *Scheduler, catalog provider.ModelCatalog, registry p
 	if scheduler == nil {
 		scheduler = NewScheduler()
 	}
-	return &Executor{scheduler: scheduler, catalog: catalog, registry: registry, cooldowns: cooldowns, accounts: accounts, capabilities: capabilities, states: states, now: func() time.Time { return time.Now().UTC() }}
+	return &Executor{scheduler: scheduler, catalog: catalog, registry: registry, cooldowns: cooldowns, accounts: accounts, capabilities: capabilities, states: states}
 }
 func (e *Executor) SetUsageRecorder(recorder UsageRecorder) { e.usage = recorder }
 
@@ -280,7 +279,7 @@ func (e *Executor) candidates(ctx context.Context, resolved provider.ResolvedMod
 	if err != nil {
 		return nil, err
 	}
-	now := e.now()
+	now := time.Now().UTC()
 	candidates := make([]Candidate, 0, len(accounts))
 	usability, checkUsability := credentials.(provider.CredentialUsability)
 	for _, account := range accounts {
@@ -301,9 +300,13 @@ func (e *Executor) candidates(ctx context.Context, resolved provider.ResolvedMod
 		}
 		candidate.CapabilitiesKnown = len(capabilities) > 0
 		for _, capability := range capabilities {
-			if capability.Supported && (capability.SupportsBackendSearch == nil || *capability.SupportsBackendSearch) {
-				candidate.Capabilities[capability.Model] = true
+			if !capability.Supported {
+				continue
 			}
+			if resolved.Provider == provider.XAI && capability.SupportsBackendSearch != nil && !*capability.SupportsBackendSearch {
+				continue
+			}
+			candidate.Capabilities[capability.Model] = true
 		}
 		for _, scope := range []string{resolved.UpstreamName, "*"} {
 			state, err := e.states.Get(ctx, account.ID, scope, now)
@@ -370,7 +373,7 @@ func (e *Executor) applyFailure(ctx context.Context, accountID, model string, cl
 	if classified.CooldownScope == provider.CooldownAccount {
 		scope = "*"
 	}
-	now := e.now()
+	now := time.Now().UTC()
 	state, err := e.states.Get(ctx, accountID, scope, now)
 	if errors.Is(err, sql.ErrNoRows) {
 		return classified, nil

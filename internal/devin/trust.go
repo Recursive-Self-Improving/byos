@@ -22,6 +22,11 @@ type Resolver interface {
 	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
 }
 
+// trustedDialer uses a concrete *net.Dialer so production callers cannot
+// inject a custom dial abstraction. Tests that need to route the validated
+// resolved IP to a local listener mutate the transport's DialContext after
+// construction (the security suite already covers that path).
+
 type publicResolver struct{ resolver *net.Resolver }
 
 func (r publicResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {

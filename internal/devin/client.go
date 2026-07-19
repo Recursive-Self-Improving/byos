@@ -154,9 +154,16 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if transport.TLSClientConfig != nil && transport.TLSClientConfig.RootCAs != nil {
 		rootCAs = transport.TLSClientConfig.RootCAs.Clone()
 	}
+	// Rebuild the TLS config from scratch so only safe fields survive.
+	// Verification-bypass hooks/flags (InsecureSkipVerify, VerifyPeerCertificate,
+	// VerifyConnection, ServerName overrides, client certs, KeyLogWriter, etc.)
+	// from the injected transport are dropped unconditionally. Only the cloned
+	// RootCAs are preserved so custom trust roots remain usable for TLS test
+	// fixtures and production private CAs. MinVersion is pinned to TLS 1.2.
 	transport.TLSClientConfig = &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    rootCAs,
+		MinVersion:         tls.VersionTLS12,
+		RootCAs:            rootCAs,
+		InsecureSkipVerify: false,
 	}
 	transport.Proxy = nil
 	transport.DialContext = trustedDialer(resolver, dialer)

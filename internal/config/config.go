@@ -266,7 +266,15 @@ func validateLegacyModels(models ModelsConfig) error {
 	if models.Aliases["grok"] != DefaultModel {
 		return errors.New("models.aliases.grok is fixed at grok-4.5")
 	}
+	// executable reports whether a name is routable: any fixed static public
+	// model name (any provider), the canonical xAI model, or a one-hop alias
+	// to the canonical xAI model. This lets the default and allowlist select
+	// any fixed static public model (including Devin) without weakening the
+	// strict unknown-name, duplicate, or Grok alias ownership rules.
 	executable := func(model string) bool {
+		if _, fixed := staticNames[model]; fixed {
+			return true
+		}
 		if model == DefaultModel {
 			return true
 		}
@@ -276,16 +284,13 @@ func validateLegacyModels(models ModelsConfig) error {
 	if len(models.Allowlist) == 0 || !slices.Contains(models.Allowlist, models.Default) {
 		return errors.New("models.allowlist must include models.default")
 	}
-	if !slices.Contains(models.Allowlist, DefaultModel) {
-		return fmt.Errorf("models.allowlist must include canonical xAI model %q", DefaultModel)
-	}
 	for _, model := range models.Allowlist {
 		if strings.TrimSpace(model) == "" || model != strings.TrimSpace(model) || !executable(model) {
-			return fmt.Errorf("models.allowlist model %q is not executable by the xAI boundary", model)
+			return fmt.Errorf("models.allowlist model %q is not executable by a fixed static model or xAI alias", model)
 		}
 	}
 	if !executable(models.Default) {
-		return fmt.Errorf("models.default %q is not executable by the xAI boundary", models.Default)
+		return fmt.Errorf("models.default %q is not executable by a fixed static model or xAI alias", models.Default)
 	}
 	return nil
 }

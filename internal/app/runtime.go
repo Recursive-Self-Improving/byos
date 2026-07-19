@@ -5,10 +5,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +22,7 @@ import (
 	"byos/internal/auththrottle"
 	"byos/internal/config"
 	appcrypto "byos/internal/crypto"
+	"byos/internal/devin"
 	"byos/internal/models"
 	oauthdevin "byos/internal/oauth/devin"
 	oauthxai "byos/internal/oauth/xai"
@@ -113,18 +114,11 @@ type publicCatalog struct {
 	now             func() time.Time
 	defaultModel    string
 	catalogResolver provider.ModelCatalog
-	xaiModels       map[string]provider.ResolvedModel
+	registry        provider.CapabilityRegistry
 }
 
-func newPublicCatalog(catalog *models.Catalog, static *provider.StaticModelCatalog, resolver provider.ModelCatalog, accounts *store.AccountRepository, cooldowns *store.CooldownRepository, now func() time.Time, defaultModel string) publicCatalog {
-	models := static.Models()
-	xaiModels := make(map[string]provider.ResolvedModel)
-	for _, resolved := range models {
-		if resolved.Provider == provider.XAI {
-			xaiModels[resolved.UpstreamName] = resolved
-		}
-	}
-	return publicCatalog{catalog: catalog, models: models, accounts: accounts, cooldowns: cooldowns, now: now, defaultModel: defaultModel, catalogResolver: resolver, xaiModels: xaiModels}
+func newPublicCatalog(catalog *models.Catalog, static *provider.StaticModelCatalog, resolver provider.ModelCatalog, accounts *store.AccountRepository, cooldowns *store.CooldownRepository, now func() time.Time, defaultModel string, registry provider.CapabilityRegistry) publicCatalog {
+	return publicCatalog{catalog: catalog, models: static.Models(), accounts: accounts, cooldowns: cooldowns, now: now, defaultModel: defaultModel, catalogResolver: resolver, registry: registry}
 }
 
 func (a publicCatalog) PublicModels(ctx context.Context) ([]apiopenai.Model, error) {
@@ -135,6 +129,9 @@ func (a publicCatalog) PublicModels(ctx context.Context) ([]apiopenai.Model, err
 	now := a.now()
 	result := make([]apiopenai.Model, 0, len(a.models))
 	for _, resolved := range a.models {
+		if !a.hasRuntimeCapabilities(resolved) {
+			continue
+		}
 		routable, err := a.modelRoutable(ctx, accounts, resolved, now)
 		if err != nil {
 			return nil, err
@@ -146,9 +143,59 @@ func (a publicCatalog) PublicModels(ctx context.Context) ([]apiopenai.Model, err
 	return result, nil
 }
 
+// hasRuntimeCapabilities reports whether the registry has the exact
+// (Provider, PolicyKey) entry with the complete generation trio required to
+// route the resolved model. A missing or incomplete capability suppresses
+// public listing and readiness so a static model can never be advertised
+// without exact runtime generation support.
+func (a publicCatalog) hasRuntimeCapabilities(resolved provider.ResolvedModel) bool {
+	if a.registry == nil {
+		return false
+	}
+	capabilities, ok := a.registry.Capabilities(resolved.Provider, resolved.PolicyKey)
+	if !ok {
+		return false
+	}
+	return capabilities.Policy != nil && capabilities.Generation != nil && capabilities.Credentials != nil
+}
+
+// credentialUsability resolves the exact (Provider, PolicyKey) runtime
+// capability and projects its Credentials as a CredentialUsability, mirroring
+// Executor.candidates. A missing registry entry, nil Credentials, or a
+// CredentialManager that does not implement CredentialUsability fails closed:
+// the catalog cannot confirm an account can yield a credential, so no
+// provider-matched account is admitted to listing or readiness. No
+// provider-specific expiry logic lives here; the resolved CredentialManager
+// is the sole authority for usability and relogin transitions.
+func (a publicCatalog) credentialUsability(resolved provider.ResolvedModel) (provider.CredentialUsability, bool) {
+	if a.registry == nil {
+		return nil, false
+	}
+	capabilities, ok := a.registry.Capabilities(resolved.Provider, resolved.PolicyKey)
+	if !ok || capabilities.Credentials == nil {
+		return nil, false
+	}
+	usability, ok := capabilities.Credentials.(provider.CredentialUsability)
+	if !ok {
+		return nil, false
+	}
+	return usability, true
+}
+
 func (a publicCatalog) modelRoutable(ctx context.Context, accounts []store.Account, resolved provider.ResolvedModel, now time.Time) (bool, error) {
+	usability, ok := a.credentialUsability(resolved)
+	if !ok {
+		return false, nil
+	}
 	for _, account := range accounts {
-		if !account.Enabled || account.Status != "ready" || account.Provider != resolved.Provider || !accountCredentialsUsable(account, now) {
+		if !account.Enabled || account.Status != "ready" || account.Provider != resolved.Provider {
+			continue
+		}
+		usable, err := usability.CredentialUsable(ctx, account.ID)
+		if err != nil {
+			return false, err
+		}
+		if !usable {
 			continue
 		}
 		supported, err := a.catalog.AccountSupports(ctx, account.ID, resolved)
@@ -176,18 +223,36 @@ func (a publicCatalog) modelRoutable(ctx context.Context, accounts []store.Accou
 	return false, nil
 }
 
-func accountCredentialsUsable(account store.Account, now time.Time) bool {
-	switch account.Provider {
-	case provider.XAI:
-		return oauthxai.CredentialsUsable(account, now)
-	case provider.Devin:
-		if strings.TrimSpace(account.Credentials.OpaqueToken) == "" {
-			return false
-		}
-		return account.Credentials.OpaqueTokenExpiresAt == nil || account.Credentials.OpaqueTokenExpiresAt.After(now)
-	default:
-		return false
+// validateStaticCatalogCapabilities cross-validates that every static catalog
+// (Provider, PolicyKey) pair resolves to a RuntimeCapabilityRegistry entry with
+// the complete generation trio (Policy, Generation, Credentials). A missing
+// required capability fails startup. Optional capabilities (Lifecycle,
+// ModelDiscoverer, UsageFetcher, CredentialRefresher) remain optional.
+func validateStaticCatalogCapabilities(static *provider.StaticModelCatalog, registry *provider.RuntimeCapabilityRegistry) error {
+	if static == nil {
+		return fmt.Errorf("%w: static model catalog is required", provider.ErrInvalidCapabilities)
 	}
+	if registry == nil {
+		return fmt.Errorf("%w: runtime capability registry is required", provider.ErrInvalidCapabilities)
+	}
+	seen := make(map[provider.Kind]map[string]struct{})
+	for _, resolved := range static.Models() {
+		if seen[resolved.Provider] == nil {
+			seen[resolved.Provider] = make(map[string]struct{})
+		}
+		if _, ok := seen[resolved.Provider][resolved.PolicyKey]; ok {
+			continue
+		}
+		seen[resolved.Provider][resolved.PolicyKey] = struct{}{}
+		capabilities, ok := registry.Capabilities(resolved.Provider, resolved.PolicyKey)
+		if !ok {
+			return fmt.Errorf("%w: static model %q references unregistered capability (%s,%s)", provider.ErrInvalidCapabilities, resolved.PublicName, resolved.Provider, resolved.PolicyKey)
+		}
+		if capabilities.Policy == nil || capabilities.Generation == nil || capabilities.Credentials == nil {
+			return fmt.Errorf("%w: static model %q capability (%s,%s) is missing the complete generation trio", provider.ErrInvalidCapabilities, resolved.PublicName, resolved.Provider, resolved.PolicyKey)
+		}
+	}
+	return nil
 }
 
 func (a publicCatalog) Ready(ctx context.Context) (bool, error) {
@@ -196,12 +261,11 @@ func (a publicCatalog) Ready(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	now := a.now()
-	resolvedDefault, err := a.catalogResolver.Resolve(a.defaultModel)
+	resolved, err := a.catalogResolver.Resolve(a.defaultModel)
 	if err != nil {
 		return false, nil
 	}
-	resolved, ok := a.xaiModels[resolvedDefault.UpstreamName]
-	if !ok {
+	if !a.hasRuntimeCapabilities(resolved) {
 		return false, nil
 	}
 	return a.modelRoutable(ctx, accounts, resolved, now)
@@ -262,7 +326,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	credentialManager := oauthxai.NewProviderCredentialManager(accountRepo, refreshService)
 	xaiLifecycle := oauthxai.NewProviderLifecycle(oauthService, accountRepo, identity)
 	devinCredentialManager := oauthdevin.NewProviderCredentialManager(accountRepo)
-	devinClient, err := oauthdevin.NewClient(oauthdevin.ClientConfig{
+	devinExchangeClient, err := oauthdevin.NewClient(oauthdevin.ClientConfig{
 		Timeout:              cfg.Devin.Runtime.UnaryTimeout.Duration(),
 		MaxCompressedBytes:   cfg.Devin.Runtime.MaxUnaryCompressedBytes,
 		MaxDecompressedBytes: cfg.Devin.Runtime.MaxUnaryDecompressedBytes,
@@ -270,7 +334,23 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	if err != nil {
 		return fail(err)
 	}
-	devinLifecycle := oauthdevin.NewProviderLifecycle(oauthRepo, devinClient, store.NewDevinOAuthTransaction(database.DB, keys), oauthdevin.OAuthConfig{
+	devinGenerationClient, err := devin.NewClient(devin.ClientConfig{
+		AllowedChatHosts:          append([]string(nil), cfg.Devin.Runtime.AllowedChatHosts...),
+		UnaryTimeout:              cfg.Devin.Runtime.UnaryTimeout.Duration(),
+		MaxCompressedBytes:        cfg.Devin.Runtime.MaxUnaryCompressedBytes,
+		MaxDecompressedBytes:      cfg.Devin.Runtime.MaxUnaryDecompressedBytes,
+		StreamIdleTimeout:         cfg.Devin.Runtime.StreamIdleTimeout.Duration(),
+		StreamDeadline:            cfg.Devin.Runtime.StreamDeadline.Duration(),
+		MaxFrameCompressedBytes:   cfg.Devin.Runtime.MaxFrameCompressedBytes,
+		MaxFrameDecompressedBytes: cfg.Devin.Runtime.MaxFrameDecompressedBytes,
+		MaxStreamBytes:            cfg.Devin.Runtime.MaxStreamBytes,
+		MaxToolArgumentBytes:      cfg.Devin.Runtime.MaxToolArgumentBytes,
+		MaxNonStreamBytes:         cfg.Devin.Runtime.MaxNonStreamBytes,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	devinLifecycle := oauthdevin.NewProviderLifecycle(oauthRepo, devinExchangeClient, store.NewDevinOAuthTransaction(database.DB, keys), oauthdevin.OAuthConfig{
 		CallbackOrigin: cfg.Devin.OAuth.CallbackOrigin,
 		CallbackPath:   cfg.Devin.OAuth.CallbackPath,
 	})
@@ -292,19 +372,25 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 			Provider:  provider.Devin,
 			PolicyKey: "devin",
 			Capabilities: provider.Capabilities{
-				Lifecycle: devinLifecycle,
+				Policy:      devin.RequestPolicy{},
+				Generation:  devin.NewProviderClient(devinGenerationClient),
+				Credentials: devinCredentialManager,
+				Lifecycle:   devinLifecycle,
 			},
 		},
 	})
 	if err != nil {
 		return fail(err)
 	}
+	if err := validateStaticCatalogCapabilities(staticCatalog, capabilityRegistry); err != nil {
+		return fail(err)
+	}
 	// Purpose-specific credential usability registry for the refresh worker.
-	// Devin's runtime capability registration is lifecycle-only until full
-	// generation composition, so its usability projection lives here rather
-	// than in RuntimeCapabilityRegistry. This keeps the all-or-none generation
-	// trio intact while still letting production maintenance resolve real Devin
-	// credential usability via oauthdevin.NewProviderCredentialManager.
+	// Devin now registers a complete generation trio in
+	// RuntimeCapabilityRegistry, but the refresh worker observes credential
+	// usability through this separate purpose-specific registry so maintenance
+	// can project usability without depending on generation-facing capability
+	// lookup. xAI refreshes explicitly and has no usability projection here.
 	credentialUsabilityRegistry, err := provider.NewCredentialUsabilityRegistry([]provider.CredentialUsabilityRegistration{
 		{Provider: provider.Devin, Usability: devinCredentialManager},
 	})
@@ -332,7 +418,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		return fail(errors.New("Anthropic translator is not registered"))
 	}
 	sessionService := sessions.NewService(responseRepo)
-	publicModels := newPublicCatalog(catalog, staticCatalog, modelCatalog, accountRepo, cooldownRepo, func() time.Time { return time.Now().UTC() }, cfg.Models.Default)
+	publicModels := newPublicCatalog(catalog, staticCatalog, modelCatalog, accountRepo, cooldownRepo, func() time.Time { return time.Now().UTC() }, cfg.Models.Default, capabilityRegistry)
 	handlers := api.ServerHandlers{Health: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), Ready: readyHandler(database.DB, publicModels), Models: apiopenai.ModelsHandler(publicModels), Chat: apiopenai.ChatHandler{Transform: chatTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {
 		return executor.Stream(ctx, request)
 	}}, Responses: apiopenai.ResponsesHandler{Transform: responsesTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {

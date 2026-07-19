@@ -64,7 +64,7 @@ func TestRuntimeHealthAndReadinessWithoutAccounts(t *testing.T) {
 	}
 }
 
-func TestRuntimeRegistersCompleteXAIAndLifecycleOnlyDevin(t *testing.T) {
+func TestRuntimeRegistersCompleteXAIAndDevinGenerationTrio(t *testing.T) {
 	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
 	t.Setenv("BYOS_ADMIN_PASSWORD", "password")
 	t.Setenv("BYOS_ADMIN_API_KEY", "admin-key")
@@ -89,10 +89,10 @@ func TestRuntimeRegistersCompleteXAIAndLifecycleOnlyDevin(t *testing.T) {
 	}
 	devinCapabilities, ok := runtime.capabilityRegistry.Capabilities(provider.Devin, "devin")
 	if !ok {
-		t.Fatal("Devin lifecycle registration is missing")
+		t.Fatal("Devin capability registration is missing")
 	}
-	if devinCapabilities.Lifecycle == nil || devinCapabilities.Policy != nil || devinCapabilities.Generation != nil || devinCapabilities.Credentials != nil || devinCapabilities.CredentialRefresher != nil || devinCapabilities.ModelDiscoverer != nil || devinCapabilities.UsageFetcher != nil {
-		t.Fatalf("Devin registration is not lifecycle-only: %+v", devinCapabilities)
+	if devinCapabilities.Lifecycle == nil || devinCapabilities.Policy == nil || devinCapabilities.Generation == nil || devinCapabilities.Credentials == nil || devinCapabilities.ModelDiscoverer != nil || devinCapabilities.UsageFetcher != nil || devinCapabilities.CredentialRefresher != nil {
+		t.Fatalf("Devin registration is not the complete generation trio plus lifecycle: %+v", devinCapabilities)
 	}
 	for _, lookup := range []struct {
 		provider provider.Kind
@@ -145,12 +145,12 @@ func TestRuntimeWiresRealDevinCredentialUsabilityForRefreshWorker(t *testing.T) 
 	if xaiUsability, ok := runtime.credentialUsabilityRegistry.CredentialUsability(provider.XAI); ok || xaiUsability != nil {
 		t.Fatalf("xAI unexpectedly projected through usability registry: ok=%v usability=%T", ok, xaiUsability)
 	}
-	// Devin's runtime capability registration must remain lifecycle-only: no
-	// placeholder generation, policy, or credentials leaked into
-	// RuntimeCapabilityRegistry to satisfy maintenance.
+	// Devin's runtime capability registration now carries the complete
+	// generation trio (Policy, Generation, Credentials) plus Lifecycle, with
+	// ModelDiscoverer/UsageFetcher/CredentialRefresher still absent.
 	devinCapabilities, ok := runtime.capabilityRegistry.Capabilities(provider.Devin, "devin")
-	if !ok || devinCapabilities.Lifecycle == nil || devinCapabilities.Policy != nil || devinCapabilities.Generation != nil || devinCapabilities.Credentials != nil || devinCapabilities.CredentialRefresher != nil {
-		t.Fatalf("Devin capability registration is not lifecycle-only: %+v", devinCapabilities)
+	if !ok || devinCapabilities.Lifecycle == nil || devinCapabilities.Policy == nil || devinCapabilities.Generation == nil || devinCapabilities.Credentials == nil || devinCapabilities.ModelDiscoverer != nil || devinCapabilities.UsageFetcher != nil || devinCapabilities.CredentialRefresher != nil {
+		t.Fatalf("Devin capability registration is not the complete generation trio plus lifecycle: %+v", devinCapabilities)
 	}
 }
 
@@ -201,17 +201,17 @@ func TestPublicModelsAndReadinessAreProviderAware(t *testing.T) {
 			wantReady:    http.StatusServiceUnavailable,
 		},
 		{
-			name:         "devin known capability ignores backend search",
+			name:         "devin known capability ready without backend search",
 			entry:        config.ModelEntry{PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: config.ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
 			account:      devinRuntimeAccount("devin-known"),
 			capabilities: []store.ModelCapability{{Model: "kimi-k2-7", Supported: true, SupportsBackendSearch: &falseValue}},
-			wantModels:   []apiopenai.Model{{ID: "kimi-k2-7", OwnedBy: "devin"}}, wantReady: http.StatusServiceUnavailable,
+			wantModels:   []apiopenai.Model{{ID: "kimi-k2-7", OwnedBy: "devin"}}, wantReady: http.StatusOK,
 		},
 		{
-			name:       "devin unknown capability stays provider local",
+			name:       "devin unknown capability ready stays provider local",
 			entry:      config.ModelEntry{PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: config.ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
 			account:    devinRuntimeAccount("devin-unknown"),
-			wantModels: []apiopenai.Model{{ID: "glm-5-2", OwnedBy: "devin"}}, wantReady: http.StatusServiceUnavailable,
+			wantModels: []apiopenai.Model{{ID: "glm-5-2", OwnedBy: "devin"}}, wantReady: http.StatusOK,
 		},
 		{
 			name:      "owner text cannot substitute for provider",
@@ -264,7 +264,7 @@ func TestPublicModelsAndReadinessAreProviderAware(t *testing.T) {
 			if defaultModel == "" {
 				defaultModel = test.entry.PublicName
 			}
-			projection := newPublicCatalog(catalog, static, resolver, accountsRepo, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, defaultModel)
+			projection := newPublicCatalog(catalog, static, resolver, accountsRepo, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, defaultModel, testCapabilityRegistryFor(t, accountsRepo, test.entry))
 			listed, err := projection.PublicModels(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -312,7 +312,7 @@ func TestAliasDefaultDoesNotChangeFiveModelPublicProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projection := newPublicCatalog(catalog, static, resolver, accounts, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, "fast")
+	projection := newPublicCatalog(catalog, static, resolver, accounts, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, "fast", testCapabilityRegistry(t, accounts))
 	listed, err := projection.PublicModels(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -339,16 +339,9 @@ func TestPublicCatalogCachesStaticSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projection := newPublicCatalog(nil, static, static, nil, nil, time.Now, "grok")
+	projection := newPublicCatalog(nil, static, static, nil, nil, time.Now, "grok", nil)
 	if len(projection.models) != 2 {
 		t.Fatalf("cached models=%+v", projection.models)
-	}
-	resolved, ok := projection.xaiModels["grok-upstream"]
-	if !ok || resolved.PublicName != "grok" {
-		t.Fatalf("cached xAI models=%+v", projection.xaiModels)
-	}
-	if _, ok := projection.xaiModels["devin-upstream"]; ok {
-		t.Fatalf("non-xAI model entered canonical lookup: %+v", projection.xaiModels)
 	}
 	external := static.Models()
 	external[0].PublicName = "mutated"
