@@ -33,6 +33,7 @@ import (
 var _ admin.AccountManager = (*accounts.Service)(nil)
 var _ provider.CapabilityRegistry = (*provider.RuntimeCapabilityRegistry)(nil)
 var _ provider.LifecycleRegistry = (*provider.RuntimeCapabilityRegistry)(nil)
+var _ provider.CredentialUsabilityRegistry = (*provider.RuntimeCredentialUsabilityRegistry)(nil)
 var _ admin.CompletionCoordinator = (*webOAuthAdapter)(nil)
 
 func TestRuntimeHealthAndReadinessWithoutAccounts(t *testing.T) {
@@ -100,6 +101,56 @@ func TestRuntimeRegistersCompleteXAIAndLifecycleOnlyDevin(t *testing.T) {
 		if _, registered := runtime.capabilityRegistry.Capabilities(lookup.provider, lookup.policy); registered {
 			t.Fatalf("unexpected runtime registration for provider=%q policy=%q", lookup.provider, lookup.policy)
 		}
+	}
+}
+
+// TestRuntimeWiresRealDevinCredentialUsabilityForRefreshWorker asserts the
+// production runtime resolves Devin credential usability through the real
+// oauthdevin.ProviderCredentialManager, not a fake or no-op. The refresh
+// worker's usability dependency is a purpose-specific registry separate from
+// RuntimeCapabilityRegistry, so Devin's lifecycle-only capability registration
+// stays intact while maintenance still projects real usability. This guards
+// against the prior fake-only masking regression: if the wiring reverts to a
+// capability-only lookup or a nil/empty usability registry, Devin usability
+// resolves to false and this test fails.
+func TestRuntimeWiresRealDevinCredentialUsabilityForRefreshWorker(t *testing.T) {
+	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
+	t.Setenv("BYOS_ADMIN_PASSWORD", "password")
+	t.Setenv("BYOS_ADMIN_API_KEY", "admin-key")
+	secrets, err := config.LoadSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	runtime, err := New(t.Context(), cfg, secrets, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if runtime.credentialUsabilityRegistry == nil {
+		t.Fatal("production runtime did not construct a credential usability registry")
+	}
+	// Devin usability must resolve to a non-nil projection. The concrete type
+	// is oauthdevin.ProviderCredentialManager; asserting non-nil usability plus
+	// the runtime construction path (which only registers the real Devin
+	// manager) is sufficient to prevent fake-only masking.
+	usability, ok := runtime.credentialUsabilityRegistry.CredentialUsability(provider.Devin)
+	if !ok || usability == nil {
+		t.Fatalf("Devin credential usability not wired in production: ok=%v usability=%T", ok, usability)
+	}
+	// xAI has no usability projection here: it refreshes explicitly and must
+	// not be projected through the usability registry.
+	if xaiUsability, ok := runtime.credentialUsabilityRegistry.CredentialUsability(provider.XAI); ok || xaiUsability != nil {
+		t.Fatalf("xAI unexpectedly projected through usability registry: ok=%v usability=%T", ok, xaiUsability)
+	}
+	// Devin's runtime capability registration must remain lifecycle-only: no
+	// placeholder generation, policy, or credentials leaked into
+	// RuntimeCapabilityRegistry to satisfy maintenance.
+	devinCapabilities, ok := runtime.capabilityRegistry.Capabilities(provider.Devin, "devin")
+	if !ok || devinCapabilities.Lifecycle == nil || devinCapabilities.Policy != nil || devinCapabilities.Generation != nil || devinCapabilities.Credentials != nil || devinCapabilities.CredentialRefresher != nil {
+		t.Fatalf("Devin capability registration is not lifecycle-only: %+v", devinCapabilities)
 	}
 }
 

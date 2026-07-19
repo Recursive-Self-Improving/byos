@@ -43,6 +43,7 @@ type Runtime struct {
 	Store                              *store.SQLite
 	Accounts                           *accounts.Service
 	capabilityRegistry                 *provider.RuntimeCapabilityRegistry
+	credentialUsabilityRegistry        *provider.RuntimeCredentialUsabilityRegistry
 	modelWorker                        *models.Worker
 	usageWorker                        *usage.Worker
 	refreshWorker                      *accounts.RefreshWorker
@@ -260,6 +261,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	cooldowns := routing.NewCooldownManager(cooldownRepo, accountRepo)
 	credentialManager := oauthxai.NewProviderCredentialManager(accountRepo, refreshService)
 	xaiLifecycle := oauthxai.NewProviderLifecycle(oauthService, accountRepo, identity)
+	devinCredentialManager := oauthdevin.NewProviderCredentialManager(accountRepo)
 	devinClient, err := oauthdevin.NewClient(oauthdevin.ClientConfig{
 		Timeout:              cfg.Devin.Runtime.UnaryTimeout.Duration(),
 		MaxCompressedBytes:   cfg.Devin.Runtime.MaxUnaryCompressedBytes,
@@ -293,6 +295,18 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 				Lifecycle: devinLifecycle,
 			},
 		},
+	})
+	if err != nil {
+		return fail(err)
+	}
+	// Purpose-specific credential usability registry for the refresh worker.
+	// Devin's runtime capability registration is lifecycle-only until full
+	// generation composition, so its usability projection lives here rather
+	// than in RuntimeCapabilityRegistry. This keeps the all-or-none generation
+	// trio intact while still letting production maintenance resolve real Devin
+	// credential usability via oauthdevin.NewProviderCredentialManager.
+	credentialUsabilityRegistry, err := provider.NewCredentialUsabilityRegistry([]provider.CredentialUsabilityRegistration{
+		{Provider: provider.Devin, Usability: devinCredentialManager},
 	})
 	if err != nil {
 		return fail(err)
@@ -358,7 +372,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	handlers.Web = webHandler
 	root := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: apiKeyService, AdminAPIKey: secrets.AdminAPIKey(), AdminAttempts: adminAuthGuard, AdminSources: trustedProxies, MaxBodyBytes: cfg.Limits.MaxBodyBytes, Logger: logger})
 	trackedRoot, activity := api.NewActivityTracker(root)
-	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, capabilityRegistry: capabilityRegistry, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, capabilityRegistry, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, adminThrottleRepo, cooldownRepo, 30*24*time.Hour, auththrottle.DefaultPolicy().SourceRetention), webOAuth: webOAuth, activity: activity, shutdownTimeout: 15 * time.Second, forceDrainTimeout: 5 * time.Second}
+	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, capabilityRegistry: capabilityRegistry, credentialUsabilityRegistry: credentialUsabilityRegistry, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, capabilityRegistry, credentialUsabilityRegistry, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, adminThrottleRepo, cooldownRepo, 30*24*time.Hour, auththrottle.DefaultPolicy().SourceRetention), webOAuth: webOAuth, activity: activity, shutdownTimeout: 15 * time.Second, forceDrainTimeout: 5 * time.Second}
 	runtime.Server = &http.Server{Addr: cfg.Server.Listen, Handler: trackedRoot, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	return runtime, nil
 }

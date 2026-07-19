@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,15 +189,15 @@ func TestServiceStaleFallbackAndUnknown(t *testing.T) {
 	}
 	observedAt := reset.Add(time.Minute)
 	unknown, err := service.ApplyUsage(context.Background(), "missing", provider.UsageSnapshot{FetchedAt: observedAt}, fetchErr)
-	if err == nil || !unknown.Unknown || !unknown.Stale || unknown.Error != fetchErr.Error() || unknown.Monthly != nil || unknown.Weekly != nil || !unknown.FetchedAt.Equal(observedAt) || unknown.Local.Requests != 7 || unknown.Local.OutputTokens != 13 {
+	if err == nil || !unknown.Unknown || !unknown.Stale || unknown.Error != "usage refresh failed" || unknown.Monthly != nil || unknown.Weekly != nil || !unknown.FetchedAt.Equal(observedAt) || unknown.Local.Requests != 7 || unknown.Local.OutputTokens != 13 {
 		t.Fatalf("unknown=%+v err=%v", unknown, err)
 	}
 	storedUnknown, storedErr := snapshots.Latest(context.Background(), "missing")
-	if storedErr != nil || storedUnknown.Raw != nil || !storedUnknown.Stale || storedUnknown.Error != fetchErr.Error() || !storedUnknown.FetchedAt.Equal(observedAt) {
+	if storedErr != nil || storedUnknown.Raw != nil || !storedUnknown.Stale || storedUnknown.Error != "usage refresh failed" || !storedUnknown.FetchedAt.Equal(observedAt) {
 		t.Fatalf("stored unknown=%+v err=%v", storedUnknown, storedErr)
 	}
 	restartedUnknown, err := NewService(snapshots, counters).Latest(context.Background(), "missing")
-	if err != nil || !restartedUnknown.Unknown || !restartedUnknown.Stale || restartedUnknown.Error != fetchErr.Error() || restartedUnknown.Monthly != nil || restartedUnknown.Weekly != nil || !restartedUnknown.FetchedAt.Equal(observedAt) || restartedUnknown.Local.Requests != 7 || restartedUnknown.Local.Failures != 2 || restartedUnknown.Local.InputTokens != 11 || restartedUnknown.Local.OutputTokens != 13 {
+	if err != nil || !restartedUnknown.Unknown || !restartedUnknown.Stale || restartedUnknown.Error != "usage refresh failed" || restartedUnknown.Monthly != nil || restartedUnknown.Weekly != nil || !restartedUnknown.FetchedAt.Equal(observedAt) || restartedUnknown.Local.Requests != 7 || restartedUnknown.Local.Failures != 2 || restartedUnknown.Local.InputTokens != 11 || restartedUnknown.Local.OutputTokens != 13 {
 		t.Fatalf("restarted unknown=%+v err=%v", restartedUnknown, err)
 	}
 }
@@ -236,16 +237,16 @@ func TestWorkerCredentialFailurePersistsStaleOrReportsUnknown(t *testing.T) {
 	if err := worker.RefreshAccount(context.Background(), Account{ID: "prior", Provider: provider.XAI, Enabled: true}); !errors.Is(err, credentialErr) {
 		t.Fatalf("refresh error = %v", err)
 	}
-	if !applier.snapshot.Stale || applier.snapshot.Unknown || applier.snapshot.Error != credentialErr.Error() || applier.snapshot.Monthly == nil || applier.snapshot.Monthly.Remaining != 6 {
+	if !applier.snapshot.Stale || applier.snapshot.Unknown || applier.snapshot.Error != "usage refresh failed" || applier.snapshot.Monthly == nil || applier.snapshot.Monthly.Remaining != 6 {
 		t.Fatalf("stale snapshot = %+v", applier.snapshot)
 	}
 	status := worker.Status("prior")
-	if status.Refreshing || !status.Stale || status.LastError != credentialErr.Error() {
+	if status.Refreshing || !status.Stale || status.LastError != "credential refresh failed" {
 		t.Fatalf("status = %+v", status)
 	}
 	restarted := NewService(snapshots, counters)
 	persisted, err := restarted.Latest(context.Background(), "prior")
-	if err != nil || !persisted.Stale || persisted.Unknown || persisted.Error != credentialErr.Error() || persisted.Monthly == nil || persisted.Monthly.Remaining != 6 {
+	if err != nil || !persisted.Stale || persisted.Unknown || persisted.Error != "usage refresh failed" || persisted.Monthly == nil || persisted.Monthly.Remaining != 6 {
 		t.Fatalf("persisted = %+v, error = %v", persisted, err)
 	}
 
@@ -255,18 +256,18 @@ func TestWorkerCredentialFailurePersistsStaleOrReportsUnknown(t *testing.T) {
 	if err := worker.RefreshAccount(context.Background(), Account{ID: "missing", Provider: provider.XAI, Enabled: true}); !errors.Is(err, credentialErr) {
 		t.Fatalf("missing refresh error = %v", err)
 	}
-	if !applier.snapshot.Stale || !applier.snapshot.Unknown || applier.snapshot.Error != credentialErr.Error() || applier.snapshot.Monthly != nil || applier.snapshot.Weekly != nil || applier.snapshot.FetchedAt.IsZero() || applier.snapshot.Local.Requests != 3 || applier.snapshot.Local.OutputTokens != 8 {
+	if !applier.snapshot.Stale || !applier.snapshot.Unknown || applier.snapshot.Error != "usage refresh failed" || applier.snapshot.Monthly != nil || applier.snapshot.Weekly != nil || applier.snapshot.FetchedAt.IsZero() || applier.snapshot.Local.Requests != 3 || applier.snapshot.Local.OutputTokens != 8 {
 		t.Fatalf("unknown snapshot = %+v", applier.snapshot)
 	}
 	if fetcher.calls.Load() != 0 {
 		t.Fatalf("fetch calls = %d", fetcher.calls.Load())
 	}
 	storedUnknown, storedErr := snapshots.Latest(context.Background(), "missing")
-	if storedErr != nil || storedUnknown.Raw != nil || !storedUnknown.Stale || storedUnknown.Error != credentialErr.Error() {
+	if storedErr != nil || storedUnknown.Raw != nil || !storedUnknown.Stale || storedUnknown.Error != "usage refresh failed" {
 		t.Fatalf("stored unknown = %+v, error = %v", storedUnknown, storedErr)
 	}
 	restartedUnknown, err := NewService(snapshots, counters).Latest(context.Background(), "missing")
-	if err != nil || !restartedUnknown.Stale || !restartedUnknown.Unknown || restartedUnknown.Error != credentialErr.Error() || restartedUnknown.Monthly != nil || restartedUnknown.Weekly != nil || restartedUnknown.FetchedAt.IsZero() || restartedUnknown.Local.Requests != 3 || restartedUnknown.Local.Failures != 1 || restartedUnknown.Local.InputTokens != 5 || restartedUnknown.Local.OutputTokens != 8 {
+	if err != nil || !restartedUnknown.Stale || !restartedUnknown.Unknown || restartedUnknown.Error != "usage refresh failed" || restartedUnknown.Monthly != nil || restartedUnknown.Weekly != nil || restartedUnknown.FetchedAt.IsZero() || restartedUnknown.Local.Requests != 3 || restartedUnknown.Local.Failures != 1 || restartedUnknown.Local.InputTokens != 5 || restartedUnknown.Local.OutputTokens != 8 {
 		t.Fatalf("restarted unknown = %+v, error = %v", restartedUnknown, err)
 	}
 }
@@ -334,6 +335,50 @@ func TestCredentialUpstreamErrorPersistenceIsSanitizedAfterRestart(t *testing.T)
 		if strings.Contains(persisted.Error, forbidden) {
 			t.Fatalf("persisted credential error leaked %q: %q", forbidden, persisted.Error)
 		}
+	}
+}
+
+func TestServiceSanitizesWrappedContextErrors(t *testing.T) {
+	// Wrapped context errors must canonicalize to the bare context error text
+	// so outer wrapper text (which may carry secrets) never persists.
+	const cancelSentinel = "wrapped-cancel-secret-sentinel-7f3a"
+	const deadlineSentinel = "wrapped-deadline-secret-sentinel-2c91"
+	cases := []struct {
+		name     string
+		wrapped  error
+		want     string
+		sentinel string
+	}{
+		{
+			name:     "canceled",
+			wrapped:  fmt.Errorf("fetching usage for token=%s: %w", cancelSentinel, context.Canceled),
+			want:     context.Canceled.Error(),
+			sentinel: cancelSentinel,
+		},
+		{
+			name:     "deadline exceeded",
+			wrapped:  fmt.Errorf("billing request body=%s: %w", deadlineSentinel, context.DeadlineExceeded),
+			want:     context.DeadlineExceeded.Error(),
+			sentinel: deadlineSentinel,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshots := &memorySnapshots{values: map[string][]store.UsageSnapshot{}}
+			counters := &memoryCounters{values: map[string]store.LocalUsageCounters{}}
+			service := NewService(snapshots, counters)
+			unknown, err := service.ApplyUsage(context.Background(), "ctx-"+tc.name, provider.UsageSnapshot{FetchedAt: time.Now().UTC()}, tc.wrapped)
+			if err == nil || !unknown.Stale || !unknown.Unknown || unknown.Error != tc.want {
+				t.Fatalf("unknown = %+v, err = %v", unknown, err)
+			}
+			if strings.Contains(unknown.Error, tc.sentinel) {
+				t.Fatalf("wrapped context error leaked sentinel %q: %q", tc.sentinel, unknown.Error)
+			}
+			stored, storedErr := snapshots.Latest(context.Background(), "ctx-"+tc.name)
+			if storedErr != nil || stored.Error != tc.want || strings.Contains(stored.Error, tc.sentinel) {
+				t.Fatalf("stored = %+v, err = %v", storedErr, stored)
+			}
+		})
 	}
 }
 

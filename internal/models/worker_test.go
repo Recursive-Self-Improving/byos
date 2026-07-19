@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"byos/internal/config"
 	"byos/internal/provider"
 	"byos/internal/store"
 )
@@ -477,5 +478,189 @@ func TestModelWorkerNearTimeoutSuccessPersistsFreshSnapshot(t *testing.T) {
 	status := worker.Status("a")
 	if status.Refreshing || status.Stale || status.LastSuccess.IsZero() || status.LastError != "" {
 		t.Fatalf("success status = %+v", status)
+	}
+}
+
+// blockingModelAccounts exposes a controllable set of accounts and lets a test
+type blockingModelAccounts struct {
+	mu       sync.Mutex
+	accounts []Account
+	started  chan struct{}
+	release  chan struct{}
+	start    sync.Once
+}
+
+func (b *blockingModelAccounts) ModelAccounts(ctx context.Context) ([]Account, error) {
+	if b.started != nil {
+		b.startOnce()
+	}
+	if b.release != nil {
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]Account(nil), b.accounts...), nil
+}
+
+func (b *blockingModelAccounts) startOnce() {
+	b.start.Do(func() { close(b.started) })
+}
+
+// restartApplier counts ApplyDiscovery calls and signals when the second call
+// begins. With worker concurrency 1 and two accounts, the second apply can
+// only start after the first refresh cycle completed ApplyDiscovery and
+// released its limiter slot, so observing the second call proves a full
+// discover+apply cycle ran to completion — not merely that ApplyDiscovery was
+// entered.
+type restartApplier struct {
+	mu     sync.Mutex
+	calls  int
+	second chan struct{}
+	once   sync.Once
+}
+
+func (a *restartApplier) ApplyDiscovery(_ context.Context, _ string, _ []provider.DiscoveredModel, _ error) ([]Model, error) {
+	a.mu.Lock()
+	a.calls++
+	n := a.calls
+	a.mu.Unlock()
+	if n == 2 {
+		a.once.Do(func() { close(a.second) })
+	}
+	return nil, nil
+}
+
+func (a *restartApplier) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
+}
+
+func TestModelWorkerRunCancelsAndRestartsCleanly(t *testing.T) {
+	discoverer := &workerDiscoverer{models: []provider.DiscoveredModel{{UpstreamName: "grok"}}}
+	registry := workerCapabilityRegistry{entries: map[provider.Kind]provider.Capabilities{
+		provider.XAI: {Credentials: &workerCredentials{}, ModelDiscoverer: discoverer},
+	}}
+	accounts := &blockingModelAccounts{
+		accounts: []Account{{ID: "a", Provider: provider.XAI, Enabled: true}},
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	worker := NewWorker(accounts, registry, &recordingDiscoveryApplier{}, time.Hour, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	select {
+	case <-accounts.started:
+	case <-time.After(time.Second):
+		t.Fatal("first worker did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first Run did not return after cancel")
+	}
+	// Restart with a fresh worker and context: it must be reusable after the
+	// prior cancellation and must not retain stuck limiter slots. Using
+	// concurrency 1 with two accounts, the second apply can only begin once
+	// the first refresh cycle completed ApplyDiscovery and released its
+	// limiter slot, so observing the second apply entry proves a full
+	// discover+apply cycle ran to completion — not merely that ApplyDiscovery
+	// was entered. Then assert the success status and confirm Run returns
+	// context.Canceled, all observed deterministically without sleeping.
+	accounts2 := &blockingModelAccounts{accounts: []Account{
+		{ID: "a", Provider: provider.XAI, Enabled: true},
+		{ID: "b", Provider: provider.XAI, Enabled: true},
+	}}
+	applier2 := &restartApplier{second: make(chan struct{})}
+	restarted := NewWorker(accounts2, registry, applier2, time.Hour, time.Second, 1)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	done2 := make(chan error, 1)
+	go func() { done2 <- restarted.Run(ctx2) }()
+	select {
+	case <-applier2.second:
+	case <-time.After(time.Second):
+		t.Fatalf("restarted worker did not complete a cycle and release its limiter slot (applies=%d)", applier2.count())
+	}
+	if calls := applier2.count(); calls != 2 {
+		t.Fatalf("apply calls = %d, want 2", calls)
+	}
+	// The second apply entry proves the first refresh released its limiter
+	// slot and ran its terminal status update, so account "a" must now be
+	// non-refreshing, non-stale, with a nonzero LastSuccess and no LastError.
+	status := restarted.Status("a")
+	if status.Refreshing || status.Stale || status.LastSuccess.IsZero() || status.LastError != "" {
+		t.Fatalf("restarted status = %+v, want non-refreshing success", status)
+	}
+	cancel2()
+	select {
+	case err := <-done2:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("second Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second Run did not return after cancel")
+	}
+}
+
+func TestModelWorkerDevinHasNoDiscovererAndAbsentCapabilityIsNoOp(t *testing.T) {
+	// C8.3: Devin has no ModelDiscoverer registered. The worker must treat the
+	// absent capability as a clean no-op: no credential, discovery, or apply
+	// calls, no status mutation, and no error. The static three-model fallback
+	// remains independent of this worker.
+	xaiDiscoverer := &workerDiscoverer{models: []provider.DiscoveredModel{{UpstreamName: "grok"}}}
+	xaiCredentials := &workerCredentials{token: "xai-secret"}
+	devinCredentials := &workerCredentials{token: "devin-secret"}
+	registry := workerCapabilityRegistry{entries: map[provider.Kind]provider.Capabilities{
+		provider.XAI:   {Credentials: xaiCredentials, ModelDiscoverer: xaiDiscoverer},
+		provider.Devin: {Credentials: devinCredentials},
+	}}
+	applier := &recordingDiscoveryApplier{}
+	worker := NewWorker(modelAccounts{}, registry, applier, time.Hour, time.Second)
+	if err := worker.RefreshAccount(context.Background(), Account{ID: "devin", Provider: provider.Devin, Enabled: true}); err != nil {
+		t.Fatalf("Devin refresh error = %v", err)
+	}
+	if got := worker.Status("devin"); got != (RefreshStatus{}) {
+		t.Fatalf("Devin status mutated: %+v", got)
+	}
+	xaiDiscovery := xaiDiscoverer.snapshot()
+	application := applier.snapshot()
+	if xaiCredentials.calls.Load() != 0 || devinCredentials.calls.Load() != 0 || xaiDiscovery.calls != 0 || application.calls != 0 {
+		t.Fatalf("unexpected calls xaiCred=%d devinCred=%d discover=%d apply=%d", xaiCredentials.calls.Load(), devinCredentials.calls.Load(), xaiDiscovery.calls, application.calls)
+	}
+	// The static catalog fallback is independent of this worker: the
+	// real/default configured static entries resolve the Devin models
+	// without any worker/discoverer involvement. The zero-call assertions
+	// above prove the worker adds no Devin discovery of its own; the
+	// configured static catalog still resolves them.
+	staticCatalog, err := NewStaticCatalog(config.Default().Models.Entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+		resolved, err := staticCatalog.Resolve(name)
+		if err != nil {
+			t.Fatalf("static catalog resolve %q = %v", name, err)
+		}
+		if resolved.Provider != provider.Devin {
+			t.Fatalf("static catalog %q provider = %v, want devin", name, resolved.Provider)
+		}
+	}
+	// The absent capability/unknown snapshot fallback keeps a Devin account
+	// eligible: with no capability snapshot stored, AccountSupports reports
+	// the resolved Devin model routable via the real Catalog APIs.
+	catalog := NewCatalog(capabilityStoreStub{}, nil, nil)
+	devin := provider.ResolvedModel{PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"}
+	if supported, err := catalog.AccountSupports(context.Background(), "devin", devin); err != nil || !supported {
+		t.Fatalf("AccountSupports absent snapshot = %v, %v; want true, nil", supported, err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	oauthdevin "byos/internal/oauth/devin"
 	"byos/internal/provider"
 	"byos/internal/store"
 )
@@ -35,6 +36,10 @@ func (r *workerCredentialRefresher) Refresh(_ context.Context, id string) error 
 	return r.refreshError[id]
 }
 
+// workerRefreshRegistry is a fake CredentialRefreshRegistry. It also
+// implements CredentialUsabilityRegistry by resolving no usability, so it can
+// be supplied as the worker's explicit usability dependency for tests that
+// only exercise the explicit-refresher dispatch path.
 type workerRefreshRegistry struct {
 	provider provider.Kind
 	policy   string
@@ -46,6 +51,10 @@ func (r workerRefreshRegistry) CredentialRefresher(kind provider.Kind, policy st
 		return nil, false
 	}
 	return r.refresh, true
+}
+
+func (r workerRefreshRegistry) CredentialUsability(provider.Kind) (provider.CredentialUsability, bool) {
+	return nil, false
 }
 
 func TestRefreshWorkerDispatchesExactCapabilityAndHooksOnlySuccess(t *testing.T) {
@@ -90,8 +99,9 @@ func TestRefreshWorkerDispatchesExactCapabilityAndHooksOnlySuccess(t *testing.T)
 		refreshError: map[string]error{refreshFailed.ID: errors.New("refresh failed")},
 		needsCalls:   make(map[string]int), refreshCalls: make(map[string]int),
 	}
+	registry := workerRefreshRegistry{provider: provider.XAI, policy: "xai", refresh: refresher}
 	var hookCalls atomic.Int32
-	worker := NewRefreshWorker(repo, workerRefreshRegistry{provider: provider.XAI, policy: "xai", refresh: refresher}, refreshHookFunc(func(_ context.Context, id string) error {
+	worker := NewRefreshWorker(repo, registry, registry, refreshHookFunc(func(_ context.Context, id string) error {
 		if id != success.ID {
 			t.Fatalf("hook account id = %q, want %q", id, success.ID)
 		}
@@ -112,5 +122,135 @@ func TestRefreshWorkerDispatchesExactCapabilityAndHooksOnlySuccess(t *testing.T)
 	}
 	if hookCalls.Load() != 1 {
 		t.Fatalf("hook calls = %d", hookCalls.Load())
+	}
+}
+
+// workerRefreshAndUsabilityRegistry is a fake registry that implements both
+// CredentialRefreshRegistry and CredentialUsabilityRegistry so the refresh
+// worker can exercise mixed-provider dispatch: xAI gets an explicit refresher,
+// Devin gets only a CredentialUsability projection through its real credential
+// manager.
+type workerRefreshAndUsabilityRegistry struct {
+	workerRefreshRegistry
+	usability map[provider.Kind]provider.CredentialUsability
+}
+
+func (r workerRefreshAndUsabilityRegistry) CredentialUsability(kind provider.Kind) (provider.CredentialUsability, bool) {
+	usability, ok := r.usability[kind]
+	return usability, ok
+}
+
+func TestRefreshWorkerProjectsDevinUsabilityWithoutRefreshOrCredentialOrHooks(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{9}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := store.NewAccountRepository(database.DB, keys)
+	now := time.Now().UTC()
+	expires := now.Add(time.Minute)
+	expired := now.Add(-time.Minute)
+	xaiAccount, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.XAI, ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: "issuer", Subject: "xai", AccessToken: "access", RefreshToken: "refresh", TokenEndpoint: "https://auth.x.ai/token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	devinValid, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, ExpiresAt: &expires, Credentials: store.AccountCredentials{OpaqueToken: "devin-valid"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	devinExpired, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, ExpiresAt: &expired, Credentials: store.AccountCredentials{OpaqueToken: "devin-expired"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	devinMissing, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, ExpiresAt: &expires, Credentials: store.AccountCredentials{OpaqueToken: " "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresher := &workerCredentialRefresher{
+		due:        map[string]bool{xaiAccount.ID: true},
+		needsCalls: make(map[string]int), refreshCalls: make(map[string]int),
+	}
+	// Real Devin credential manager: CredentialUsable durably transitions
+	// expired/missing credentials to relogin_required via MarkReloginRequired,
+	// exactly as production routing sees. No fake usability stub.
+	devinManager := oauthdevin.NewProviderCredentialManager(repo)
+	registry := workerRefreshAndUsabilityRegistry{
+		workerRefreshRegistry: workerRefreshRegistry{provider: provider.XAI, policy: "xai", refresh: refresher},
+		usability: map[provider.Kind]provider.CredentialUsability{
+			provider.Devin: devinManager,
+		},
+	}
+	var hookCalls atomic.Int32
+	worker := NewRefreshWorker(repo, registry, registry, refreshHookFunc(func(_ context.Context, id string) error {
+		if id != xaiAccount.ID {
+			t.Fatalf("hook fired for non-xAI account %q", id)
+		}
+		hookCalls.Add(1)
+		return nil
+	}))
+	if err := worker.refreshDue(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// xAI refresh and hook behavior remains exact: one refresh, one hook, and
+	// Devin accounts never reach the xAI refresher.
+	if refresher.refreshCalls[xaiAccount.ID] != 1 {
+		t.Fatalf("xAI refresh calls = %#v", refresher.refreshCalls)
+	}
+	if refresher.needsCalls[devinValid.ID] != 0 || refresher.needsCalls[devinExpired.ID] != 0 || refresher.needsCalls[devinMissing.ID] != 0 {
+		t.Fatalf("Devin accounts reached xAI refresher: %#v", refresher.needsCalls)
+	}
+	if hookCalls.Load() != 1 {
+		t.Fatalf("hook calls = %d; Devin must not trigger hooks", hookCalls.Load())
+	}
+
+	// Reload accounts and assert durable Devin transitions: expired and
+	// missing credentials become disabled with relogin_required, while valid
+	// Devin remains ready/enabled. This proves the persistence-level
+	// transition, not merely a method return value.
+	reload := func(id string) store.Account {
+		t.Helper()
+		got, err := repo.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("reload %s: %v", id, err)
+		}
+		return got
+	}
+	validAfter := reload(devinValid.ID)
+	if !validAfter.Enabled || validAfter.Status != "ready" {
+		t.Fatalf("valid Devin after refresh = %+v; want enabled/ready", validAfter)
+	}
+	for _, id := range []string{devinExpired.ID, devinMissing.ID} {
+		got := reload(id)
+		if got.Enabled || got.Status != "relogin_required" || got.LastError != "authentication expired; reconnect required" {
+			t.Fatalf("Devin %s after refresh = %+v; want disabled relogin_required", id, got)
+		}
+	}
+
+	// A second refresh pass is a valid no-op: already-disabled Devin accounts
+	// are skipped (not enabled), valid Devin stays ready, and no extra xAI
+	// refresh or hooks fire. Devin still never reaches xAI refresh.
+	beforeRefresh := refresher.refreshCalls[xaiAccount.ID]
+	beforeHooks := hookCalls.Load()
+	if err := worker.refreshDue(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if refresher.refreshCalls[xaiAccount.ID] != beforeRefresh+1 {
+		t.Fatalf("second pass xAI refresh calls = %#v", refresher.refreshCalls)
+	}
+	if hookCalls.Load() != beforeHooks+1 {
+		t.Fatalf("second pass hook calls = %d", hookCalls.Load())
+	}
+	if refresher.needsCalls[devinValid.ID] != 0 || refresher.needsCalls[devinExpired.ID] != 0 || refresher.needsCalls[devinMissing.ID] != 0 {
+		t.Fatalf("second pass Devin reached xAI refresher: %#v", refresher.needsCalls)
+	}
+	validAfter2 := reload(devinValid.ID)
+	if !validAfter2.Enabled || validAfter2.Status != "ready" {
+		t.Fatalf("valid Devin after second pass = %+v; want enabled/ready", validAfter2)
 	}
 }

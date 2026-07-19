@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"byos/internal/provider"
+	"byos/internal/store"
 )
 
 type workerCapabilityRegistry struct {
@@ -318,5 +319,85 @@ func TestUsageWorkerAppliesTimeoutFailureWithLivePersistenceContext(t *testing.T
 	}
 	if applier.calls.Load() != 1 || applier.appliedContextError() != nil {
 		t.Fatalf("apply calls=%d context error=%v", applier.calls.Load(), applier.appliedContextError())
+	}
+}
+
+func TestUsageWorkerDevinAbsentCapabilityIsNoOpAndLocalCountersRemainAvailable(t *testing.T) {
+	// C8.4: Devin has no UsageFetcher registered. The worker must treat the
+	// absent capability as a clean no-op: no credential, fetch, or apply calls,
+	// no status mutation, no error. Upstream quota is unavailable
+	// (Monthly/Weekly nil, Unknown=true) while local counters remain available.
+	snapshots := &memorySnapshots{values: map[string][]store.UsageSnapshot{}}
+	counters := &memoryCounters{values: map[string]store.LocalUsageCounters{}}
+	service := NewService(snapshots, counters)
+	if err := service.Record(context.Background(), "devin", Delta{Requests: 4, Failures: 1, InputTokens: 7, OutputTokens: 9}); err != nil {
+		t.Fatal(err)
+	}
+	xaiCredentials := &workerCredentials{token: "xai-secret"}
+	xaiFetcher := &workerUsageFetcher{snapshot: provider.UsageSnapshot{FetchedAt: time.Now().UTC()}}
+	devinCredentials := &workerCredentials{token: "devin-secret"}
+	registry := workerCapabilityRegistry{entries: map[provider.Kind]provider.Capabilities{
+		provider.XAI:   {Credentials: xaiCredentials, UsageFetcher: xaiFetcher},
+		provider.Devin: {Credentials: devinCredentials},
+	}}
+	applier := &recordingUsageApplier{}
+	worker := NewWorker(usageAccounts{}, registry, applier, time.Hour, time.Second, 1)
+	if err := worker.RefreshAccount(context.Background(), Account{ID: "devin", Provider: provider.Devin, Enabled: true}); err != nil {
+		t.Fatalf("Devin refresh error = %v", err)
+	}
+	if got := worker.Status("devin"); got != (RefreshStatus{}) {
+		t.Fatalf("Devin status mutated: %+v", got)
+	}
+	if xaiCredentials.calls.Load() != 0 || devinCredentials.calls.Load() != 0 || xaiFetcher.calls.Load() != 0 || applier.calls.Load() != 0 {
+		t.Fatalf("unexpected calls xaiCred=%d devinCred=%d xaiFetch=%d apply=%d", xaiCredentials.calls.Load(), devinCredentials.calls.Load(), xaiFetcher.calls.Load(), applier.calls.Load())
+	}
+	// Upstream quota is unavailable: Monthly/Weekly nil, Unknown=true, but
+	// local counters remain available through the service.
+	persisted, err := service.Latest(context.Background(), "devin")
+	if err != nil || !persisted.Unknown || persisted.Monthly != nil || persisted.Weekly != nil || persisted.Local.Requests != 4 || persisted.Local.Failures != 1 || persisted.Local.InputTokens != 7 || persisted.Local.OutputTokens != 9 {
+		t.Fatalf("Devin persisted = %+v, err = %v", persisted, err)
+	}
+}
+
+func TestUsageServiceSanitizesArbitrarySecretBearingFetchErrors(t *testing.T) {
+	// C8.4: persisted fetch errors must not store raw error.Error() text from
+	// arbitrary secret-bearing provider errors. Only context errors and the
+	// sanitized provider.UpstreamError projection are retained verbatim;
+	// everything else becomes a generic provider-neutral message.
+	const secret = "super-secret-billing-body-credential-leak"
+	snapshots := &memorySnapshots{values: map[string][]store.UsageSnapshot{}}
+	counters := &memoryCounters{values: map[string]store.LocalUsageCounters{}}
+	service := NewService(snapshots, counters)
+	// Arbitrary error carrying a secret: must be replaced.
+	arbitraryErr := errors.New(secret)
+	unknown, err := service.ApplyUsage(context.Background(), "leak", provider.UsageSnapshot{FetchedAt: time.Now().UTC()}, arbitraryErr)
+	if err == nil || !unknown.Unknown || !unknown.Stale || unknown.Error != "usage refresh failed" {
+		t.Fatalf("unknown = %+v, err = %v", unknown, err)
+	}
+	if strings.Contains(unknown.Error, secret) {
+		t.Fatalf("arbitrary error leaked secret: %q", unknown.Error)
+	}
+	stored, storedErr := snapshots.Latest(context.Background(), "leak")
+	if storedErr != nil || !stored.Stale || stored.Error != "usage refresh failed" || strings.Contains(stored.Error, secret) {
+		t.Fatalf("stored = %+v, err = %v", stored, storedErr)
+	}
+	// Context errors are retained verbatim.
+	ctxSnapshots := &memorySnapshots{values: map[string][]store.UsageSnapshot{}}
+	ctxCounters := &memoryCounters{values: map[string]store.LocalUsageCounters{}}
+	ctxService := NewService(ctxSnapshots, ctxCounters)
+	_, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctxUnknown, err := ctxService.ApplyUsage(context.Background(), "ctx", provider.UsageSnapshot{FetchedAt: time.Now().UTC()}, context.Canceled)
+	if err == nil || ctxUnknown.Error != context.Canceled.Error() {
+		t.Fatalf("context error persisted = %+v, err = %v", ctxUnknown, err)
+	}
+	// Sanitized UpstreamError is retained via its own Error() method.
+	upstreamSnapshots := &memorySnapshots{values: map[string][]store.UsageSnapshot{}}
+	upstreamCounters := &memoryCounters{values: map[string]store.LocalUsageCounters{}}
+	upstreamService := NewService(upstreamSnapshots, upstreamCounters)
+	upstreamErr := &provider.UpstreamError{Provider: provider.XAI, Status: 429}
+	upstreamUnknown, err := upstreamService.ApplyUsage(context.Background(), "upstream", provider.UsageSnapshot{FetchedAt: time.Now().UTC()}, upstreamErr)
+	if err == nil || upstreamUnknown.Error != "xai upstream returned HTTP 429" {
+		t.Fatalf("upstream error persisted = %+v, err = %v", upstreamUnknown, err)
 	}
 }

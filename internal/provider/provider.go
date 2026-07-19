@@ -148,6 +148,17 @@ type CredentialUsability interface {
 	CredentialUsable(context.Context, string) (bool, error)
 }
 
+// CredentialUsabilityRegistry resolves provider-bound CredentialUsability
+// projections for maintenance workers that must observe credential usability
+// without performing refresh or acquiring credential material. It is distinct
+// from CapabilityRegistry so providers whose runtime registration is
+// lifecycle-only (e.g. Devin until full generation composition) still project
+// usability to the refresh worker without registering placeholder generation
+// capabilities or violating CapabilityRegistry's all-or-none generation trio.
+type CredentialUsabilityRegistry interface {
+	CredentialUsability(Kind) (CredentialUsability, bool)
+}
+
 // CredentialRefresher exposes explicit provider-bound refresh operations without
 // returning credential material or expiry metadata to shared callers.
 type CredentialRefresher interface {

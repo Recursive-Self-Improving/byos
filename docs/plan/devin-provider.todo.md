@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–7 complete; C8.1 is current**. Chunk 7 bounded Connect framing, neutral stream mapping, one-stream buffered/streaming generation, commitment behavior, monotonic response sequencing, and exact once-only Devin usage accounting are complete; the sequential commit has not been created.
+> Status: **Chunks 1–8 complete; C9.1 is current**. Chunk 8 provider-aware refresh, model, and usage workers are complete with exact xAI parity, Devin usability-only maintenance, the C8.3 omission disposition, sanitized persisted usage errors, and the final review/fix record (typed-nil usability-registry validation and a corrected model-restart proof); the sequential commit has not been created.
 >
-> Current next item: **C8.1 — Make credential refresh workers provider-aware**.
+> Current next item: **C9.1 — Compose the immutable two-provider runtime capability registry**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -53,6 +53,12 @@
 > Chunk 7 status/error, commitment, and accounting record (2026-07-19): Devin status classification now covers 400/404 as validation; 401/403 as unauthorized with `RetryNext`, `RefreshSame`, account disable/relogin-required, and account-scoped cooldown; 408 and 500/502/503/504 as transient retry with model-scoped cooldown; 429 as rate limit with bounded delta-seconds or HTTP-date `Retry-After`; and all other statuses as sanitized upstream failures. One upstream stream backs both streaming and bounded non-stream output, so non-stream makes no second call. Pre-first-event failures remain eligible for provider-local failover, while post-commit failures never replay: OpenAI Responses emits exactly one sanitized error event with the next observed sequence number, Anthropic emits exactly one sanitized `api_error`, and classified/request cancellation emits no synthetic error. Terminal Devin usage maps input, output, cache-read, and total=`input+output` exactly once to the selected account through existing detached accounting; repeated/close paths do not double-count, actual model remains separate, and no cache-write, credit, ACU, quota, pricing, analytics, discovery, capacity, or usage-submission RPC work was added.
 >
 > Chunk 7 final review, gate, and scope evidence (2026-07-19): independent mapper-sequence re-review was **CLEAN** after native Devin Responses events were proven to emit contiguous monotonic `sequence_number` values `0..N` and a post-commit sanitized error to emit exactly the next value `N+1`. `go test -count=1 ./internal/devin ./internal/routing ./internal/provider ./internal/usage ./internal/api/openai ./internal/api/anthropic`; `go test -race -count=1 ./internal/devin ./internal/routing ./internal/usage`; and `git diff --check` passed. The first `go test -count=1 ./...` run hit the known isolated xAI `TestIdentityVerifierAndKeyRotation` flake; `go test -count=1 ./internal/oauth/xai -run '^TestIdentityVerifierAndKeyRotation$'` passed on isolated rerun, and a subsequent `go test -count=1 ./...` passed. Independent commit-scope accounting was **CLEAN/C7-only**: the delta is confined to Devin Connect framing, mapping, generation, client limits/status classification, their tests, and the C7.3-required OpenAI Responses/Anthropic post-commit SSE bridges and tests; no account/model/usage worker, runtime composition, optional discovery/statistics/quota, C8, or C9 work is included. This tracker-only closure did not rerun gates or create the sequential commit.
+>
+> Chunk 8 implementation record (2026-07-19): C8.1–C8.4 are complete. A purpose-specific `internal/provider/credential_usability_registry.go` wires the real Devin `CredentialManager` through `provider.CredentialUsability` without registering the generation capability trio (`Policy` + `Generation` + `Credentials` all-or-none), so the refresh worker dispatches xAI through the exact `CredentialRefresher` while providers without a refresher evaluate usability only: expired/missing Devin credentials durably transition the account to disabled/relogin-required and valid Devin credentials are a no-op that returns no token and performs no refresh or network call. xAI refresh parity, singleflight, rotation, and hooks are unchanged and no Devin token reaches an xAI endpoint. Model and usage workers retain exact optional discoverer/usage dispatch and add bounded periodic `Run` cancellation/restart proof; absence of Devin discovery and quota is a supported no-op capability state, not a worker error, and no provider credential reaches another provider endpoint. C8.3 is the omission disposition: no Devin discoverer or no-op stub is registered, and the absent-capability path passes while the fixed static three-model catalog remains routable through unknown-capability fallback. C8.4 represents upstream Devin quota as `unavailable` (`Monthly`/`Weekly` nil, `Unknown=true`) while local counters remain available, and persisted usage fetch errors are sanitized through the existing convention (context errors and `*provider.UpstreamError` pass through; all other errors become a generic `usage refresh failed` message) so arbitrary secret-bearing provider errors are not stored.
+>
+> Chunk 8 parent gate evidence (2026-07-19): `go test -timeout=5m -count=1 ./internal/provider ./internal/accounts ./internal/models ./internal/usage ./internal/app ./internal/oauth/xai ./internal/oauth/devin` — 7 packages ok; `go test -timeout=10m -race -count=1 ./internal/accounts ./internal/models ./internal/usage` — 3 packages ok; `go test -run '^$' ./...` — 31 packages ok, 2 no tests (compile-only gate); `git status --short && git diff --check` — clean (9 modified, 2 new files, no whitespace errors). This tracker-only closure did not rerun gates or create the sequential commit.
+>
+> Chunk 8 final review/fix record and certifications (2026-07-19): the purpose-specific usability registry (`internal/provider/credential_usability_registry.go`) gained typed-nil validation so a nil Devin `CredentialManager` usability entry cannot be dereferenced; C8.3 remains the recorded OMIT disposition (no Devin discoverer or stub registered, absent-capability path passes). Formal review found a false-positive model-restart proof: the bounded periodic `Run` test did not actually exercise restart synchronization. The fix bounded both `Run` phases and now proves concurrency-1 limiter release/reacquisition through the second account apply, a successful status pass, and context-canceled exits. Final security, isolation, and accounting certifications are **CLEAN**.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -376,7 +382,7 @@
   - Observable DoD: transport limits, event order, commitment, usage, and secret-free failures are proven; no optional discovery/statistics work is included.
   - Sequential commit: `feat(devin): add connect streaming and usage mapping`.
 
-- [ ] **C8.1 — Make credential refresh workers provider-aware**
+- [x] **C8.1 — Make credential refresh workers provider-aware**
   - Chunk owner: **Chunk 8 — Provider-aware refresh, discovery, and usage workers**.
   - Depends on: C7.5.
   - Files: `internal/accounts/refresh_worker.go`, account projections, tests.
@@ -384,7 +390,7 @@
   - Observable DoD: no Devin token reaches an xAI refresh endpoint; concurrent Devin requests do not fabricate refresh; xAI rotation/hooks remain unchanged.
   - Verification: mixed-account worker fixture with endpoint call counters and expiry transitions.
 
-- [ ] **C8.2 — Make model workers provider-aware**
+- [x] **C8.2 — Make model workers provider-aware**
   - Chunk owner: **Chunk 8**.
   - Depends on: C8.1.
   - Files: `internal/models/worker.go`, upstream/discovery adapters, tests.
@@ -392,7 +398,7 @@
   - Observable DoD: absence of Devin discovery is a supported no-op capability state, not a worker error; no provider credential reaches another provider endpoint; worker bounds/cancellation/restart remain intact.
   - Verification: mixed-provider worker tests with absent capability and endpoint isolation.
 
-- [ ] **C8.3 — Optionally implement safely bounded Devin model discovery**
+- [x] **C8.3 — Optionally implement safely bounded Devin model discovery**
   - Chunk owner: **Chunk 8**.
   - Depends on: C8.2.
   - Files: Devin optional discoverer and tests if retained; implementation-review disposition and absent-capability registration/worker tests if omitted.
@@ -400,7 +406,7 @@
   - Observable DoD: **implemented path:** bounded discovery fixtures prove only the three fixed models can become supported/unsupported/unknown, no fourth public/routable model or ownership change is possible, and sanitized failure/stale state does not unexpectedly disable static unknown-capability fallback. **Omission path:** the recorded decision, registry/composition proof that no Devin discoverer or stub is registered, and passing absent-capability worker/runtime behavior prove static routing and unknown-capability fallback remain available without discovery.
   - Verification: for the implemented path, disabled/empty/duplicate/oversized/incidental-model/failure fixtures; for the omission path, implementation-review record, registry assertion for absent Devin discovery, no discoverer/stub inventory result, and C8.2 absent-capability tests.
 
-- [ ] **C8.4 — Make usage workers and projections provider-aware**
+- [x] **C8.4 — Make usage workers and projections provider-aware**
   - Chunk owner: **Chunk 8**.
   - Depends on: C8.3.
   - Files: `internal/usage/worker.go`, `service.go`, xAI billing adapter, tests.
@@ -408,7 +414,7 @@
   - Observable DoD: xAI billing never receives Devin credentials; Devin does not fabricate zero/monthly/weekly quota; optional fetch failure never blocks inference; stale/error strings are sanitized.
   - Verification: mixed-provider usage worker tests and explicit xAI endpoint non-call assertion for Devin.
 
-- [ ] **C8.5 — Review and commit Chunk 8**
+- [x] **C8.5 — Review and commit Chunk 8**
   - Chunk owner: **Chunk 8**.
   - Depends on: C8.4.
   - Observable DoD: all workers dispatch by provider, remain bounded/restart-safe, and optional capabilities are truly optional; required routing does not depend on discovery or quota.

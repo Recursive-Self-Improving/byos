@@ -37,7 +37,7 @@ func (s *Service) ApplyUsage(ctx context.Context, accountID string, observation 
 		previous, previousErr := s.Latest(ctx, accountID)
 		if previousErr == nil && !previous.Unknown {
 			previous.Stale = true
-			previous.Error = fetchErr.Error()
+			previous.Error = sanitizeFetchError(fetchErr)
 			normalized, marshalErr := marshalNormalized(previous)
 			if marshalErr != nil {
 				return previous, errors.Join(fetchErr, marshalErr)
@@ -58,7 +58,7 @@ func (s *Service) ApplyUsage(ctx context.Context, accountID string, observation 
 		if fetchedAt.IsZero() {
 			fetchedAt = time.Now().UTC()
 		}
-		unknown := Snapshot{AccountID: accountID, Local: previous.Local, FetchedAt: fetchedAt, Stale: true, Unknown: true, Error: fetchErr.Error()}
+		unknown := Snapshot{AccountID: accountID, Local: previous.Local, FetchedAt: fetchedAt, Stale: true, Unknown: true, Error: sanitizeFetchError(fetchErr)}
 		normalized, marshalErr := marshalNormalized(unknown)
 		if marshalErr != nil {
 			return unknown, errors.Join(fetchErr, marshalErr)
@@ -137,4 +137,27 @@ func marshalNormalized(snapshot Snapshot) ([]byte, error) {
 		Weekly  *Weekly  `json:"weekly"`
 		Unknown bool     `json:"unknown,omitempty"`
 	}{snapshot.Monthly, snapshot.Weekly, snapshot.Unknown})
+}
+
+// sanitizeFetchError projects a fetch error into a stable, secret-free string
+// for persisted snapshots. Raw error text may carry upstream bodies, URLs, or
+// credential-bearing headers; only context errors and the sanitized
+// provider.UpstreamError projection are retained verbatim. Everything else is
+// replaced with a generic provider-neutral message, matching the sanitization
+// convention used by the xAI usage and discovery adapters.
+func sanitizeFetchError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled.Error()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded.Error()
+	}
+	var upstream *provider.UpstreamError
+	if errors.As(err, &upstream) {
+		return upstream.Error()
+	}
+	return "usage refresh failed"
 }
