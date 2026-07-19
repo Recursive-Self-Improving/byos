@@ -331,11 +331,11 @@ func projectWebAPIKey(value store.APIKey) web.APIKey {
 }
 
 type webOAuthAccountManager interface {
-	StartLogin(context.Context) (provider.Authorization, error)
-	LoginStatus(context.Context, string) (provider.AuthorizationSession, error)
-	CompleteLogin(context.Context, string) (store.Account, error)
-	CancelLogin(context.Context, string) error
-	ResumeLogins(context.Context) ([]provider.AuthorizationSession, error)
+	StartLogin(context.Context, provider.Kind) (provider.Authorization, error)
+	LoginStatus(context.Context, provider.Kind, string) (provider.AuthorizationSession, error)
+	CompleteLogin(context.Context, provider.Kind, string, provider.AuthorizationCompletion) (store.Account, error)
+	CancelLogin(context.Context, provider.Kind, string) error
+	ResumeLogins(context.Context, provider.Kind) ([]provider.AuthorizationSession, error)
 }
 
 type activeOAuthCompletion struct {
@@ -358,7 +358,7 @@ func newWebOAuthAdapter(ctx context.Context, accountService webOAuthAccountManag
 }
 
 func (a *webOAuthAdapter) Start(ctx context.Context) (web.OAuthFlow, error) {
-	value, err := a.accounts.StartLogin(ctx)
+	value, err := a.accounts.StartLogin(ctx, provider.XAI)
 	if err != nil {
 		return web.OAuthFlow{}, err
 	}
@@ -367,7 +367,7 @@ func (a *webOAuthAdapter) Start(ctx context.Context) (web.OAuthFlow, error) {
 }
 
 func (a *webOAuthAdapter) Get(ctx context.Context, state string) (web.OAuthFlow, error) {
-	value, err := a.accounts.LoginStatus(ctx, state)
+	value, err := a.accounts.LoginStatus(ctx, provider.XAI, state)
 	if err != nil {
 		return web.OAuthFlow{}, err
 	}
@@ -384,11 +384,11 @@ func (a *webOAuthAdapter) Cancel(ctx context.Context, state string) error {
 	if active != nil {
 		active.cancel()
 	}
-	return a.accounts.CancelLogin(ctx, state)
+	return a.accounts.CancelLogin(ctx, provider.XAI, state)
 }
 
 func (a *webOAuthAdapter) Run(ctx context.Context) error {
-	values, err := a.accounts.ResumeLogins(ctx)
+	values, err := a.accounts.ResumeLogins(ctx, provider.XAI)
 	if err == nil {
 		for _, value := range values {
 			a.resume(value.Ref.State)
@@ -443,7 +443,7 @@ func (a *webOAuthAdapter) resume(state string) {
 			close(completion.done)
 			a.mu.Unlock()
 		}()
-		_, _ = a.accounts.CompleteLogin(ctx, state)
+		_, _ = a.accounts.CompleteLogin(ctx, provider.XAI, state, provider.AuthorizationCompletion{})
 	}()
 }
 

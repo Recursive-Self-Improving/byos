@@ -371,6 +371,62 @@ func (r *OAuthSessionRepository) ListResumable(ctx context.Context, kind provide
 	return r.list(ctx, oauthSessionSelect+` WHERE provider=? AND flow_type=? AND ((status='pending' AND expires_at>?) OR status='consumed') ORDER BY created_at`, kind, flow, now.Unix())
 }
 
+// ExpirePendingBefore atomically expires elapsed pending sessions for one
+// provider and flow while replacing their encrypted payloads with secret-free
+// terminal payloads.
+func (r *OAuthSessionRepository) ExpirePendingBefore(ctx context.Context, kind provider.Kind, flow OAuthFlowType, now time.Time) (int64, error) {
+	if !kind.Valid() || !flow.Valid() {
+		return 0, errors.New("valid oauth provider and flow type are required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, oauthSessionSelect+` WHERE provider=? AND flow_type=? AND status='pending' AND expires_at<=?`, kind, flow, now.UTC().Unix())
+	if err != nil {
+		return 0, err
+	}
+	var elapsed []OAuthSession
+	for rows.Next() {
+		value, scanErr := r.scan(rows)
+		if scanErr != nil {
+			rows.Close()
+			return 0, scanErr
+		}
+		elapsed = append(elapsed, value)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for i := range elapsed {
+		value := &elapsed[i]
+		value.Status = "expired"
+		value.SanitizedError = "Devin authorization expired."
+		value.AccountID = ""
+		value.UpdatedAt = now.UTC()
+		disposeOAuthSecrets(value)
+		encrypted, err := r.encrypt(*value)
+		if err != nil {
+			return 0, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE oauth_sessions SET payload_encrypted=?,status='expired',updated_at=?,sanitized_error=? WHERE state_hash=? AND provider=? AND flow_type=? AND status='pending' AND expires_at<=?`, encrypted, value.UpdatedAt.Unix(), value.SanitizedError, value.StateHash, kind, flow, now.UTC().Unix())
+		if err != nil {
+			return 0, err
+		}
+		if err := requireAffected(result); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int64(len(elapsed)), nil
+}
+
 func (r *OAuthSessionRepository) Authorize(ctx context.Context, kind provider.Kind, flow OAuthFlowType, state string, authorization OAuthAuthorization, now time.Time) error {
 	if flow != OAuthFlowDevice {
 		return sql.ErrNoRows
@@ -427,6 +483,39 @@ func (r *OAuthSessionRepository) Complete(ctx context.Context, kind provider.Kin
 		disposeOAuthSecrets(value)
 		return nil
 	})
+}
+
+type oauthTransactionDBTX interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (r *OAuthSessionRepository) completeConsumedDevin(ctx context.Context, tx oauthTransactionDBTX, state, accountID string, now time.Time) error {
+	if state == "" || accountID == "" {
+		return sql.ErrNoRows
+	}
+	hash := stateHash(state)
+	value, err := r.scan(tx.QueryRowContext(ctx, oauthSessionSelect+` WHERE state_hash=? AND provider=? AND flow_type=?`, hash[:], provider.Devin, OAuthFlowCallbackPKCE))
+	if err != nil {
+		return err
+	}
+	if value.Status != "consumed" {
+		return sql.ErrNoRows
+	}
+	value.Status = "completed"
+	value.SanitizedError = ""
+	value.AccountID = accountID
+	value.UpdatedAt = now.UTC()
+	disposeOAuthSecrets(&value)
+	encrypted, err := r.encrypt(value)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE oauth_sessions SET payload_encrypted=?,status='completed',updated_at=?,sanitized_error=NULL WHERE state_hash=? AND provider=? AND flow_type=? AND status='consumed'`, encrypted, value.UpdatedAt.Unix(), hash[:], provider.Devin, OAuthFlowCallbackPKCE)
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
 }
 
 func (r *OAuthSessionRepository) Fail(ctx context.Context, kind provider.Kind, flow OAuthFlowType, state, sanitized string, now time.Time) error {

@@ -187,7 +187,7 @@ type adapterOAuthAccounts struct {
 	cancels  atomic.Int32
 }
 
-func (a *adapterOAuthAccounts) LoginStatus(_ context.Context, state string) (provider.AuthorizationSession, error) {
+func (a *adapterOAuthAccounts) LoginStatus(_ context.Context, _ provider.Kind, state string) (provider.AuthorizationSession, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	value, ok := a.sessions[state]
@@ -196,7 +196,7 @@ func (a *adapterOAuthAccounts) LoginStatus(_ context.Context, state string) (pro
 	}
 	return value, nil
 }
-func (a *adapterOAuthAccounts) ResumeLogins(context.Context) ([]provider.AuthorizationSession, error) {
+func (a *adapterOAuthAccounts) ResumeLogins(context.Context, provider.Kind) ([]provider.AuthorizationSession, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	result := make([]provider.AuthorizationSession, 0, len(a.sessions))
@@ -207,7 +207,7 @@ func (a *adapterOAuthAccounts) ResumeLogins(context.Context) ([]provider.Authori
 	}
 	return result, nil
 }
-func (a *adapterOAuthAccounts) CancelLogin(_ context.Context, state string) error {
+func (a *adapterOAuthAccounts) CancelLogin(_ context.Context, _ provider.Kind, state string) error {
 	a.cancels.Add(1)
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -219,11 +219,11 @@ func (a *adapterOAuthAccounts) CancelLogin(_ context.Context, state string) erro
 	a.sessions[state] = value
 	return nil
 }
-func (a *adapterOAuthAccounts) StartLogin(context.Context) (provider.Authorization, error) {
-	value, _ := a.LoginStatus(context.Background(), "state_adapter")
+func (a *adapterOAuthAccounts) StartLogin(context.Context, provider.Kind) (provider.Authorization, error) {
+	value, _ := a.LoginStatus(context.Background(), provider.XAI, "state_adapter")
 	return value.Authorization, nil
 }
-func (a *adapterOAuthAccounts) CompleteLogin(ctx context.Context, state string) (store.Account, error) {
+func (a *adapterOAuthAccounts) CompleteLogin(ctx context.Context, _ provider.Kind, state string, _ provider.AuthorizationCompletion) (store.Account, error) {
 	a.calls.Add(1)
 	a.once.Do(func() { close(a.started) })
 	select {
@@ -283,7 +283,7 @@ func TestWebOAuthStartAndGetShareOneCompletion(t *testing.T) {
 type adminOAuthAccounts struct{ *adapterOAuthAccounts }
 
 func (a *adminOAuthAccounts) List(context.Context) ([]store.Account, error) {
-	value, err := a.LoginStatus(context.Background(), "state_adapter")
+	value, err := a.LoginStatus(context.Background(), provider.XAI, "state_adapter")
 	if err != nil || value.AccountID == "" {
 		return nil, err
 	}
@@ -371,7 +371,7 @@ func TestWebOAuthRunResumesPersistedSession(t *testing.T) {
 	close(accountsService.release)
 	deadline := time.Now().Add(time.Second)
 	for {
-		value, _ := accountsService.LoginStatus(context.Background(), "restart_state")
+		value, _ := accountsService.LoginStatus(context.Background(), provider.XAI, "restart_state")
 		if value.Status == provider.AuthorizationCompleted {
 			break
 		}
@@ -403,7 +403,7 @@ func TestWebOAuthRunShutdownDoesNotPersistCancellation(t *testing.T) {
 	if accountsService.cancels.Load() != 0 {
 		t.Fatalf("shutdown persisted %d cancellations", accountsService.cancels.Load())
 	}
-	value, err := accountsService.LoginStatus(context.Background(), "shutdown_state")
+	value, err := accountsService.LoginStatus(context.Background(), provider.XAI, "shutdown_state")
 	if err != nil || value.Status != provider.AuthorizationAuthorized {
 		t.Fatalf("shutdown session = %+v, %v", value, err)
 	}

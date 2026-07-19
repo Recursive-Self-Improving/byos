@@ -209,6 +209,12 @@ type AuthorizationSession struct {
 	SanitizedMessage string
 }
 
+// AuthorizationCompletion carries provider-specific callback input without
+// exposing it through persisted authorization state or public results.
+type AuthorizationCompletion struct {
+	Code string
+}
+
 // AccountResult identifies the account produced by successful authorization.
 // Account credentials and verified identity claims deliberately remain absent.
 type AccountResult struct {
@@ -221,7 +227,7 @@ type AccountResult struct {
 type AccountLifecycle interface {
 	Start(context.Context) (Authorization, error)
 	Status(context.Context, AuthorizationRef) (AuthorizationSession, error)
-	Complete(context.Context, AuthorizationRef) (AccountResult, error)
+	Complete(context.Context, AuthorizationRef, AuthorizationCompletion) (AccountResult, error)
 	Cancel(context.Context, AuthorizationRef) error
 	Resume(context.Context) ([]AuthorizationSession, error)
 }

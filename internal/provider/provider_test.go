@@ -173,7 +173,7 @@ func (fakeLifecycle) Start(context.Context) (Authorization, error) {
 func (fakeLifecycle) Status(context.Context, AuthorizationRef) (AuthorizationSession, error) {
 	return AuthorizationSession{}, nil
 }
-func (fakeLifecycle) Complete(context.Context, AuthorizationRef) (AccountResult, error) {
+func (fakeLifecycle) Complete(context.Context, AuthorizationRef, AuthorizationCompletion) (AccountResult, error) {
 	return AccountResult{Provider: XAI}, nil
 }
 func (fakeLifecycle) Cancel(context.Context, AuthorizationRef) error         { return nil }

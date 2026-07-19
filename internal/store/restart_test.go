@@ -154,6 +154,66 @@ func TestOAuthConsumedCallbackFinalizesAfterRestartByHashOnly(t *testing.T) {
 	}
 }
 
+func TestOAuthElapsedPendingBatchExpiryAfterRestartDisposesSecrets(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{12}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 19, 20, 0, 0, 0, time.UTC)
+	const (
+		state    = "RESTART-ELAPSED-STATE-4d82c1"
+		verifier = "RESTART-ELAPSED-VERIFIER-b9e30a"
+		redirect = "https://restart-elapsed.example.test/callback/7a4f"
+	)
+	first, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewOAuthSessionRepository(first.DB, keys)
+	if err := repo.Create(ctx, OAuthSession{Provider: provider.Devin, FlowType: OAuthFlowCallbackPKCE, State: state, Pending: &OAuthPendingPayload{Verifier: verifier, RedirectURI: redirect, ExpiresAt: now}, ExpiresAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo = NewOAuthSessionRepository(second.DB, keys)
+	if count, err := repo.ExpirePendingBefore(ctx, provider.Devin, OAuthFlowCallbackPKCE, now); err != nil || count != 1 {
+		t.Fatalf("expired count = %d, %v", count, err)
+	}
+	if values, err := repo.ListResumable(ctx, provider.Devin, OAuthFlowCallbackPKCE, now); err != nil || len(values) != 0 {
+		t.Fatalf("elapsed session remained resumable = %+v, %v", values, err)
+	}
+	got, err := repo.Get(ctx, provider.Devin, OAuthFlowCallbackPKCE, state)
+	if err != nil || got.Status != "expired" || got.Pending != nil {
+		t.Fatalf("expired restart session = %+v, %v", got, err)
+	}
+	assertOAuthFilesExclude(t, second.Path(), state, verifier, redirect)
+	if err := second.Checkpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertOAuthFilesExclude(t, second.Path(), state, verifier, redirect)
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertOAuthFilesExclude(t, second.Path(), state, verifier, redirect)
+	third, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.Close()
+	assertOAuthFilesExclude(t, third.Path(), state, verifier, redirect)
+	got, err = NewOAuthSessionRepository(third.DB, keys).Get(ctx, provider.Devin, OAuthFlowCallbackPKCE, state)
+	if err != nil || got.Status != "expired" || got.Pending != nil {
+		t.Fatalf("reopened expired session = %+v, %v", got, err)
+	}
+}
+
 func TestUsageAndResponsesSurviveRestartAndPreserveBrokenChain(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

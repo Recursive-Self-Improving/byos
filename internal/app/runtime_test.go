@@ -63,7 +63,7 @@ func TestRuntimeHealthAndReadinessWithoutAccounts(t *testing.T) {
 	}
 }
 
-func TestRuntimeRegistersSingleCompleteXAIImplementation(t *testing.T) {
+func TestRuntimeRegistersCompleteXAIAndLifecycleOnlyDevin(t *testing.T) {
 	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
 	t.Setenv("BYOS_ADMIN_PASSWORD", "password")
 	t.Setenv("BYOS_ADMIN_API_KEY", "admin-key")
@@ -79,17 +79,24 @@ func TestRuntimeRegistersSingleCompleteXAIImplementation(t *testing.T) {
 	}
 	defer runtime.Close()
 
-	capabilities, ok := runtime.capabilityRegistry.Capabilities(provider.XAI, "xai")
+	xaiCapabilities, ok := runtime.capabilityRegistry.Capabilities(provider.XAI, "xai")
 	if !ok {
 		t.Fatal("xAI capability registration is missing")
 	}
-	if capabilities.Policy == nil || capabilities.Generation == nil || capabilities.Credentials == nil || capabilities.CredentialRefresher == nil || capabilities.Lifecycle == nil || capabilities.ModelDiscoverer == nil || capabilities.UsageFetcher == nil {
-		t.Fatalf("incomplete xAI capabilities: %+v", capabilities)
+	if xaiCapabilities.Policy == nil || xaiCapabilities.Generation == nil || xaiCapabilities.Credentials == nil || xaiCapabilities.CredentialRefresher == nil || xaiCapabilities.Lifecycle == nil || xaiCapabilities.ModelDiscoverer == nil || xaiCapabilities.UsageFetcher == nil {
+		t.Fatalf("incomplete xAI capabilities: %+v", xaiCapabilities)
+	}
+	devinCapabilities, ok := runtime.capabilityRegistry.Capabilities(provider.Devin, "devin")
+	if !ok {
+		t.Fatal("Devin lifecycle registration is missing")
+	}
+	if devinCapabilities.Lifecycle == nil || devinCapabilities.Policy != nil || devinCapabilities.Generation != nil || devinCapabilities.Credentials != nil || devinCapabilities.CredentialRefresher != nil || devinCapabilities.ModelDiscoverer != nil || devinCapabilities.UsageFetcher != nil {
+		t.Fatalf("Devin registration is not lifecycle-only: %+v", devinCapabilities)
 	}
 	for _, lookup := range []struct {
 		provider provider.Kind
 		policy   string
-	}{{provider.XAI, "devin"}, {provider.Devin, "xai"}, {provider.Devin, "devin"}} {
+	}{{provider.XAI, "devin"}, {provider.Devin, "xai"}} {
 		if _, registered := runtime.capabilityRegistry.Capabilities(lookup.provider, lookup.policy); registered {
 			t.Fatalf("unexpected runtime registration for provider=%q policy=%q", lookup.provider, lookup.policy)
 		}

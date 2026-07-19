@@ -68,6 +68,76 @@ func TestOAuthProviderFlowIsolationAndRestartDispatch(t *testing.T) {
 	}
 }
 
+func TestOAuthExpirePendingBeforeBoundariesIsolationAndTerminalImmutability(t *testing.T) {
+	ctx := context.Background()
+	database, keys := openRepositories(t)
+	defer database.Close()
+	repo := NewOAuthSessionRepository(database.DB, keys)
+	now := time.Date(2026, 7, 19, 19, 0, 0, 0, time.UTC)
+	type callbackFixture struct {
+		state, verifier, redirect string
+		expires                   time.Time
+	}
+	fixtures := []callbackFixture{
+		{state: "batch-before", verifier: "batch-before-verifier", redirect: "https://before.example/callback", expires: now.Add(-time.Second)},
+		{state: "batch-equal", verifier: "batch-equal-verifier", redirect: "https://equal.example/callback", expires: now},
+		{state: "batch-after", verifier: "batch-after-verifier", redirect: "https://after.example/callback", expires: now.Add(time.Second)},
+		{state: "batch-terminal", verifier: "batch-terminal-verifier", redirect: "https://terminal.example/callback", expires: now.Add(-time.Second)},
+	}
+	for _, fixture := range fixtures {
+		if err := repo.Create(ctx, OAuthSession{Provider: provider.Devin, FlowType: OAuthFlowCallbackPKCE, State: fixture.state, Pending: &OAuthPendingPayload{Verifier: fixture.verifier, RedirectURI: fixture.redirect, ExpiresAt: fixture.expires}, ExpiresAt: fixture.expires}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.Cancel(ctx, provider.Devin, OAuthFlowCallbackPKCE, "batch-terminal", "already terminal", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Create(ctx, OAuthSession{Provider: provider.XAI, FlowType: OAuthFlowCallbackPKCE, State: "batch-wrong-provider", Pending: &OAuthPendingPayload{Verifier: "wrong-provider-verifier", RedirectURI: "https://wrong-provider.example/callback", ExpiresAt: now}, ExpiresAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Create(ctx, OAuthSession{Provider: provider.Devin, FlowType: OAuthFlowDevice, State: "batch-wrong-flow", DeviceCode: "wrong-flow-device", UserCode: "WRONG", TokenEndpoint: "https://example.test/token", ExpiresAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := repo.ExpirePendingBefore(ctx, provider.Devin, OAuthFlowCallbackPKCE, now)
+	if err != nil || count != 2 {
+		t.Fatalf("expired count = %d, err = %v", count, err)
+	}
+	for _, fixture := range fixtures[:2] {
+		got, err := repo.Get(ctx, provider.Devin, OAuthFlowCallbackPKCE, fixture.state)
+		if err != nil || got.Status != "expired" || got.Pending != nil || got.SanitizedError != "Devin authorization expired." {
+			t.Fatalf("expired %s = %+v, %v", fixture.state, got, err)
+		}
+		envelope, _, _ := oauthStoredRow(t, database.DB, fixture.state)
+		plain, err := appcrypto.Decrypt(keys.OAuth(), envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(plain, []byte(fixture.verifier)) || bytes.Contains(plain, []byte(fixture.redirect)) {
+			t.Fatalf("expired payload retained secrets: %s", plain)
+		}
+	}
+	for _, key := range []struct {
+		kind  provider.Kind
+		flow  OAuthFlowType
+		state string
+		want  string
+	}{
+		{provider.Devin, OAuthFlowCallbackPKCE, "batch-after", "pending"},
+		{provider.XAI, OAuthFlowCallbackPKCE, "batch-wrong-provider", "pending"},
+		{provider.Devin, OAuthFlowDevice, "batch-wrong-flow", "pending"},
+		{provider.Devin, OAuthFlowCallbackPKCE, "batch-terminal", "cancelled"},
+	} {
+		got, err := repo.Get(ctx, key.kind, key.flow, key.state)
+		if err != nil || got.Status != key.want {
+			t.Fatalf("isolated %s = %+v, %v", key.state, got, err)
+		}
+	}
+	if count, err := repo.ExpirePendingBefore(ctx, provider.Devin, OAuthFlowCallbackPKCE, now); err != nil || count != 0 {
+		t.Fatalf("repeated expiry = %d, %v", count, err)
+	}
+}
+
 func TestOAuthCallbackConsumeIsAtomicSecretDisposingAndRecoverable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

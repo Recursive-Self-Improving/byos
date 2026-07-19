@@ -36,13 +36,13 @@ type fakeAccounts struct {
 	session      provider.AuthorizationSession
 }
 
-func (f *fakeAccounts) StartLogin(context.Context) (provider.Authorization, error) {
+func (f *fakeAccounts) StartLogin(context.Context, provider.Kind) (provider.Authorization, error) {
 	return f.flow, f.startErr
 }
-func (f *fakeAccounts) CompleteLogin(context.Context, string) (store.Account, error) {
+func (f *fakeAccounts) CompleteLogin(context.Context, provider.Kind, string, provider.AuthorizationCompletion) (store.Account, error) {
 	return f.completed, f.completeErr
 }
-func (f *fakeAccounts) LoginStatus(_ context.Context, state string) (provider.AuthorizationSession, error) {
+func (f *fakeAccounts) LoginStatus(_ context.Context, _ provider.Kind, state string) (provider.AuthorizationSession, error) {
 	if f.loginErr != nil {
 		return provider.AuthorizationSession{}, f.loginErr
 	}
@@ -50,7 +50,7 @@ func (f *fakeAccounts) LoginStatus(_ context.Context, state string) (provider.Au
 	value.Ref.State = state
 	return value, nil
 }
-func (f *fakeAccounts) CancelLogin(_ context.Context, state string) error {
+func (f *fakeAccounts) CancelLogin(_ context.Context, _ provider.Kind, state string) error {
 	f.loginState = state
 	return f.loginErr
 }

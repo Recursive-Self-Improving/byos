@@ -41,7 +41,7 @@ func (registryTestLifecycle) Start(context.Context) (Authorization, error) {
 func (registryTestLifecycle) Status(context.Context, AuthorizationRef) (AuthorizationSession, error) {
 	return AuthorizationSession{}, nil
 }
-func (registryTestLifecycle) Complete(context.Context, AuthorizationRef) (AccountResult, error) {
+func (registryTestLifecycle) Complete(context.Context, AuthorizationRef, AuthorizationCompletion) (AccountResult, error) {
 	return AccountResult{Provider: XAI}, nil
 }
 func (registryTestLifecycle) Cancel(context.Context, AuthorizationRef) error         { return nil }

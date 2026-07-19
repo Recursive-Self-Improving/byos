@@ -104,7 +104,7 @@ func TestProviderLifecycleMismatchRejectedBeforeDependencies(t *testing.T) {
 	if _, err := lifecycle.Status(context.Background(), wrong); !errors.Is(err, provider.ErrProviderMismatch) {
 		t.Fatalf("status error = %v", err)
 	}
-	if _, err := lifecycle.Complete(context.Background(), wrong); !errors.Is(err, provider.ErrProviderMismatch) {
+	if _, err := lifecycle.Complete(context.Background(), wrong, provider.AuthorizationCompletion{}); !errors.Is(err, provider.ErrProviderMismatch) {
 		t.Fatalf("complete error = %v", err)
 	}
 	if err := lifecycle.Cancel(context.Background(), wrong); !errors.Is(err, provider.ErrProviderMismatch) {
@@ -120,6 +120,19 @@ func TestProviderLifecycleMismatchRejectedBeforeDependencies(t *testing.T) {
 		t.Fatalf("identity calls after mismatches = %d", calls)
 	}
 }
+func TestProviderLifecycleRejectsCallbackCodeBeforeDependencies(t *testing.T) {
+	service := &lifecycleServiceFake{}
+	accounts := &lifecycleAccountsFake{}
+	identity := &lifecycleIdentityFake{}
+	lifecycle := NewProviderLifecycle(service, accounts, identity)
+	_, err := lifecycle.Complete(context.Background(), provider.AuthorizationRef{Provider: provider.XAI, State: "state"}, provider.AuthorizationCompletion{Code: "callback-secret"})
+	if err == nil {
+		t.Fatal("completion with callback code succeeded")
+	}
+	if service.calls.Load() != 0 || accounts.calls.Load() != 0 || identity.calls.Load() != 0 {
+		t.Fatalf("dependencies called: service=%d accounts=%d identity=%d", service.calls.Load(), accounts.calls.Load(), identity.calls.Load())
+	}
+}
 
 func TestProviderLifecycleCompleteKeepsCredentialsAndIdentityInternal(t *testing.T) {
 	expires := time.Now().UTC().Add(time.Hour)
@@ -130,7 +143,7 @@ func TestProviderLifecycleCompleteKeepsCredentialsAndIdentityInternal(t *testing
 	accounts := &lifecycleAccountsFake{}
 	identity := &lifecycleIdentityFake{}
 	lifecycle := NewProviderLifecycle(service, accounts, identity)
-	result, err := lifecycle.Complete(context.Background(), provider.AuthorizationRef{Provider: provider.XAI, State: "state"})
+	result, err := lifecycle.Complete(context.Background(), provider.AuthorizationRef{Provider: provider.XAI, State: "state"}, provider.AuthorizationCompletion{})
 	if err != nil {
 		t.Fatal(err)
 	}

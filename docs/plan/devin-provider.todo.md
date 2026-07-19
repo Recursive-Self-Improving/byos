@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–4 complete; Chunk 5 is next**. C4.1–C4.3 have verified implementation, evidence, and clean independent review; the sequential commit has not been created.
+> Status: **Chunks 1–5 complete; C6.1 is current**. Chunk 5 implementation, focused, race, full-suite, diff, and final independent-review/arbitration gates passed; the sequential commit has not been created.
 >
-> Current next item: **C5.1 — Add Devin OAuth configuration and PKCE primitives**.
+> Current next item: **C6.1 — Verify provenance and add only required Devin protocol definitions**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -28,9 +28,17 @@
 >
 > Chunk 4 discovery/usage, isolation, and persistence evidence (2026-07-19): model workers dispatch exact registry selection → credential → `ModelDiscoverer.Discover` → `Catalog.ApplyDiscovery`; usage workers dispatch exact registry selection → credential → `UsageFetcher.FetchUsage` → `Service.ApplyUsage`. Admin worker projections carry only account ID, provider, and enabled state. The direct runtime `NewUpstream`, `BillingFetcher`/xAI fetch compatibility, and raw-token worker paths are removed. The stored mixed-provider sentinel proves Devin causes zero credential calls, xAI control-plane endpoint calls, model/usage writes, refresh-status changes, or account mutation; the xAI positive control proves actual models-v2/models fallback and monthly/weekly billing capability dispatch. Credential and lifecycle errors crossing shared/Admin boundaries are sanitized; stale and unknown usage state survives restart; model and usage persistence run under fresh bounded contexts after fetch cancellation so blocked persistence cannot retain limiter or singleflight ownership indefinitely.
 >
-> Chunk 4 final independent certifications (2026-07-19): lifecycle/Admin/refresh review **CLEAN** after runtime-root completion coordination, complete runtime registration, exact capability dispatch, mismatch guards, once-only hooks, and boundary sanitization; discovery/usage review **CLEAN** after actual capability dispatch, the mixed-provider sentinel, sanitized errors, stale/unknown restart persistence, and fresh bounded model/usage persistence contexts. No second catalog, registry, mutation, marshal, transport, compatibility, or direct provider path remains, and Devin registration has not started.
+> Chunk 4 final independent certifications (2026-07-19): lifecycle/Admin/refresh review **CLEAN** after runtime-root completion coordination, complete runtime registration, exact capability dispatch, mismatch guards, once-only hooks, and boundary sanitization; discovery/usage review **CLEAN** after actual capability dispatch, the mixed-provider sentinel, sanitized errors, stale/unknown restart persistence, and fresh bounded model/usage persistence contexts; final commit-scope/accounting review **CLEAN**, with all implementation paths confined to Chunk 4 lifecycle, refresh, discovery, usage, Admin/runtime composition, and tests, no C3 generation-path production change, and no C5/Devin implementation. No second catalog, registry, mutation, marshal, transport, compatibility, or direct provider path remains, and Devin registration has not started.
 >
 > Chunk 4 final gate evidence (2026-07-19): `go test -count=1 ./internal/provider ./internal/oauth/xai ./internal/accounts ./internal/models ./internal/usage ./internal/api/admin ./internal/app ./cmd/byos`; `go test -race -count=1 ./internal/models ./internal/usage`; `go test -count=1 ./...`; `git diff --check` — all passed after the final fixes. The earlier explicit C3 generation-parity gate, `go test -count=1 ./internal/xai ./internal/routing ./internal/api/openai ./internal/api/anthropic ./internal/api`, also passed and is covered again by the full suite. This tracker-only closure did not rerun gates or create the sequential commit.
+>
+> Chunk 5 implementation record (2026-07-19): C5.1–C5.5 are complete. Devin uses the exact callback-PKCE protocol: 96 random verifier bytes, S256, 32 random state bytes, five-minute pending TTL, the required authorization query only, and a redirect-refusing bounded JSON exchange with exact `{code,code_verifier}` wire shape. C5.4 evidence covers HMAC identity over provider plus opaque token rather than JWT claims, JWT `exp` solely as the `exp-5m` expiry hint with the one-year fallback, expiry-at-login disabling, atomic credential/session persistence, and a provider-bound Devin `CredentialManager`: valid credentials are returned without refresh, expired credentials require relogin, and upstream 401/403 mark the account relogin-required without invoking any refresh path.
+>
+> Chunk 5 transaction/lifecycle/runtime evidence (2026-07-19): callback state is provider- and flow-bound, consumed atomically before exchange, and single-use across replay and races. The real account-plus-completed-session transaction provides all-or-nothing success visibility; injected account-write, session-completion, commit, and finalization failures preserve existing deduplicated accounts, expose no new usable credential, and leave only failed or restart-recoverable consumed state without re-exchange. Pending sessions and persisted expiry survive Resume/restart; expired pending sessions become immutable expired, while interrupted consumed sessions recover only to failed. Generic account orchestration preserves distinct xAI polling and Devin callback protocols, provider-correct hooks, mismatch isolation, and runtime lifecycle-only Devin registration without C6 generation/discovery/usage capabilities or public routes.
+>
+> Chunk 5 secret/replay evidence and final gates (2026-07-19): persistence matrices and raw DB/WAL/SHM scans prove raw state, callback code, plaintext token, and returned verifier are not durable; pending verifier/redirect material is encrypted, consume returns the verifier only in memory and disposes pending-secret access, and terminal sessions are secret-free and immutable. Wrong provider/flow, unknown, expired, cancelled, replayed, completed, failed, and missing-verifier attempts make zero exchange calls. CredentialManager tests prove valid Devin credentials are returned with zero refresh calls, naturally expired credentials durably transition the account to disabled/relogin-required, and upstream 401/403 mark relogin-required with zero refresh calls. Final gates passed: `go test -count=1 ./internal/oauth/devin ./internal/store ./internal/provider ./internal/accounts ./internal/oauth/xai ./internal/app ./internal/api/admin ./cmd/byos`; `go test -race -count=1 ./internal/oauth/devin ./internal/store ./internal/accounts`; `go test -count=1 ./...`; `git diff --check`. This tracker-only closure did not rerun gates or create the sequential commit.
+>
+> Chunk 5 final independent certification and arbitration (2026-07-19): atomic-store review **CLEAN**; composition/accounting review **CLEAN**; OAuth implementation review was **CLEAN** except for a proposed production registration of the implemented and tested Devin `CredentialManager`. Two independent arbiters discarded that finding as premature: C5 authoritatively requires lifecycle-only Devin runtime registration, the registry requires the generation capability trio `Policy` + `Generation` + `Credentials` all-or-none, and registering Credentials alone would invalidate startup while placeholder generation capabilities would violate chunk boundaries. The manager therefore remains intentionally unregistered for later composition with the real trio under C9; C5.1–C5.6 are complete.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -216,7 +224,7 @@
   - Observable DoD: xAI is the only registered runtime implementation; its real policy and generation transport already work from Chunk 3; OAuth/refresh/discovery/billing now use capabilities; Devin registration has not started; no second catalog, registry, mutation, marshal, or transport path exists.
   - Sequential commit: `refactor(xai): move oauth refresh discovery and billing behind capabilities`.
 
-- [ ] **C5.1 — Add Devin OAuth configuration and PKCE primitives**
+- [x] **C5.1 — Add Devin OAuth configuration and PKCE primitives**
   - Chunk owner: **Chunk 5 — Devin OAuth callback, PKCE, and encrypted lifecycle**.
   - Depends on: C4.3.
   - Files: create `internal/oauth/devin`; config integration/tests.
@@ -224,7 +232,7 @@
   - Observable DoD: concurrent starts produce distinct raw state/verifier values; only a hash of state and encrypted verifier/redirect/expiry payload persist while pending; raw state is absent from rows and DB/WAL/SHM; no invented scope/client-secret/refresh parameters are sent.
   - Verification: deterministic challenge/authorization-query tests, raw-state absence scan, and pending-versus-terminal payload inventory based on source fixtures.
 
-- [ ] **C5.2 — Implement persisted provider-bound start/consume lifecycle**
+- [x] **C5.2 — Implement persisted provider-bound start/consume lifecycle**
   - Chunk owner: **Chunk 5**.
   - Depends on: C5.1.
   - Files: Devin OAuth service, shared account service, OAuth session store integration/tests.
@@ -232,7 +240,7 @@
   - Observable DoD: a pending attempt survives restart and can be consumed exactly once; every rejected callback makes zero exchange calls; consume returns the verifier only in memory and leaves no decryptable pending secret; replay or failure never restores pending; exchange failure and interrupted-consumed restart finalize failed without another exchange; no path persists raw state, account token, authorization code, or decryptable final-state pending secret.
   - Verification: positive, negative, replay, cancellation, race, restart, verifier-memory-only, consume-disposal, exclusive `consumed -> completed|failed`, immutable completed/failed/expired/cancelled, and unique raw-state/callback-code absence matrix.
 
-- [ ] **C5.3 — Implement bounded redirect-refusing token exchange**
+- [x] **C5.3 — Implement bounded redirect-refusing token exchange**
   - Chunk owner: **Chunk 5**.
   - Depends on: C5.2.
   - Files: `internal/oauth/devin` exchange client/tests.
@@ -240,7 +248,7 @@
   - Observable DoD: redirect, non-HTTPS/invalid host, empty token, malformed/oversized response, cancellation, timeout, and upstream error all fail without logging or persisting code/verifier/body/token.
   - Verification: local HTTP fixtures assert method/path/headers/body and secret-free errors; a unique code is absent from session/account rows and DB/WAL/SHM after every exchange outcome.
 
-- [ ] **C5.4 — Persist Devin account credentials with explicit no-refresh semantics**
+- [x] **C5.4 — Persist Devin account credentials with explicit no-refresh semantics**
   - Chunk owner: **Chunk 5**.
   - Depends on: C5.3.
   - Files: shared account service/types, Devin credential manager, OAuth-session/account store transaction, store tests.
@@ -248,7 +256,7 @@
   - Observable DoD: every exchange or post-exchange failure ends in failed or, if finalization itself is interrupted, a consumed state that restart recovery changes only to failed without exchange; no failure leaves a newly persisted usable token/account or retryable attempt. Success exposes account and completed session together only after the atomic commit; expired credentials and upstream 401/403 become relogin-required; no Devin refresh exists.
   - Verification: expiry/malformed-token/dedup/new-token tests plus injected exchange, account-write, session-completion, commit, and failure-finalization interruptions and restart at each boundary; assert transaction rollback, consumed-to-failed recovery without re-exchange, pre-existing-account preservation, atomic success visibility, immutable final states, and unique code/token plaintext absence in rows and DB/WAL/SHM.
 
-- [ ] **C5.5 — Generalize account login orchestration by provider**
+- [x] **C5.5 — Generalize account login orchestration by provider**
   - Chunk owner: **Chunk 5**.
   - Depends on: C5.4.
   - Files: `internal/accounts/service.go`, service tests/fakes.
@@ -256,7 +264,7 @@
   - Observable DoD: no type switch leaks xAI device types into generic callers; concurrent completion remains singleflight where applicable; provider mismatch never invokes another provider's OAuth service.
   - Verification: account service tests for both providers, cancellation, concurrent observation, and hook dispatch.
 
-- [ ] **C5.6 — Review and commit Chunk 5**
+- [x] **C5.6 — Review and commit Chunk 5**
   - Chunk owner: **Chunk 5**.
   - Depends on: C5.5.
   - Observable DoD: Devin OAuth service is fully testable but not yet exposed by runtime routes; callback origin/path, exchange policy, code non-persistence, atomic in-memory-verifier consume, exclusive consumed finalization, immutable final states, and atomic account-plus-completion commit with failure-to-failed behavior are explicit; no plaintext file store or refresh fiction exists.

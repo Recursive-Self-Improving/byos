@@ -20,9 +20,9 @@ import (
 const basePath = "/admin/api/v1"
 
 type AccountManager interface {
-	StartLogin(context.Context) (provider.Authorization, error)
-	LoginStatus(context.Context, string) (provider.AuthorizationSession, error)
-	CancelLogin(context.Context, string) error
+	StartLogin(context.Context, provider.Kind) (provider.Authorization, error)
+	LoginStatus(context.Context, provider.Kind, string) (provider.AuthorizationSession, error)
+	CancelLogin(context.Context, provider.Kind, string) error
 	List(context.Context) ([]store.Account, error)
 	Update(context.Context, string, string, bool) error
 	Delete(context.Context, string) error
@@ -156,7 +156,7 @@ func (h *handler) startDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, deviceView{Status: "failed", Error: "device authorization failed"})
 		return
 	}
-	flow, err := h.services.Accounts.StartLogin(r.Context())
+	flow, err := h.services.Accounts.StartLogin(r.Context(), provider.XAI)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, deviceView{Status: "failed", Error: "device authorization failed"})
 		return
@@ -177,7 +177,7 @@ func (h *handler) pollDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := r.PathValue("state")
-	session, err := h.services.Accounts.LoginStatus(r.Context(), state)
+	session, err := h.services.Accounts.LoginStatus(r.Context(), provider.XAI, state)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, deviceView{State: state, Status: "failed", Error: "device authorization not found"})
@@ -222,7 +222,7 @@ func (h *handler) cancelDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, deviceView{State: state, Status: "failed", Error: "device authorization cancellation failed"})
 		return
 	}
-	if err := h.services.Accounts.CancelLogin(r.Context(), state); err != nil {
+	if err := h.services.Accounts.CancelLogin(r.Context(), provider.XAI, state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, deviceView{State: state, Status: "failed", Error: "device authorization not found"})
 		} else {

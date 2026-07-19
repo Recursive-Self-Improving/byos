@@ -23,6 +23,7 @@ import (
 	"byos/internal/config"
 	appcrypto "byos/internal/crypto"
 	"byos/internal/models"
+	oauthdevin "byos/internal/oauth/devin"
 	oauthxai "byos/internal/oauth/xai"
 	"byos/internal/provider"
 	"byos/internal/requestsource"
@@ -258,20 +259,41 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	identity := &lazyIdentity{discovery: discovery, clientID: oauthOptions.ClientID}
 	cooldowns := routing.NewCooldownManager(cooldownRepo, accountRepo)
 	credentialManager := oauthxai.NewProviderCredentialManager(accountRepo, refreshService)
-	lifecycle := oauthxai.NewProviderLifecycle(oauthService, accountRepo, identity)
-	capabilityRegistry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{
-		Provider:  provider.XAI,
-		PolicyKey: "xai",
-		Capabilities: provider.Capabilities{
-			Policy:              xai.RequestPolicy{},
-			Generation:          xai.NewProviderClient(upstream),
-			Credentials:         credentialManager,
-			CredentialRefresher: credentialManager,
-			Lifecycle:           lifecycle,
-			ModelDiscoverer:     modelProvider,
-			UsageFetcher:        usageProvider,
+	xaiLifecycle := oauthxai.NewProviderLifecycle(oauthService, accountRepo, identity)
+	devinClient, err := oauthdevin.NewClient(oauthdevin.ClientConfig{
+		Timeout:              cfg.Devin.Runtime.UnaryTimeout.Duration(),
+		MaxCompressedBytes:   cfg.Devin.Runtime.MaxUnaryCompressedBytes,
+		MaxDecompressedBytes: cfg.Devin.Runtime.MaxUnaryDecompressedBytes,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	devinLifecycle := oauthdevin.NewProviderLifecycle(oauthRepo, devinClient, store.NewDevinOAuthTransaction(database.DB, keys), oauthdevin.OAuthConfig{
+		CallbackOrigin: cfg.Devin.OAuth.CallbackOrigin,
+		CallbackPath:   cfg.Devin.OAuth.CallbackPath,
+	})
+	capabilityRegistry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{
+		{
+			Provider:  provider.XAI,
+			PolicyKey: "xai",
+			Capabilities: provider.Capabilities{
+				Policy:              xai.RequestPolicy{},
+				Generation:          xai.NewProviderClient(upstream),
+				Credentials:         credentialManager,
+				CredentialRefresher: credentialManager,
+				Lifecycle:           xaiLifecycle,
+				ModelDiscoverer:     modelProvider,
+				UsageFetcher:        usageProvider,
+			},
 		},
-	}})
+		{
+			Provider:  provider.Devin,
+			PolicyKey: "devin",
+			Capabilities: provider.Capabilities{
+				Lifecycle: devinLifecycle,
+			},
+		},
+	})
 	if err != nil {
 		return fail(err)
 	}

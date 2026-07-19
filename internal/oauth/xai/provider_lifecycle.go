@@ -69,9 +69,12 @@ func (l *ProviderLifecycle) Status(ctx context.Context, ref provider.Authorizati
 	return sessionProjection(session)
 }
 
-func (l *ProviderLifecycle) Complete(ctx context.Context, ref provider.AuthorizationRef) (provider.AccountResult, error) {
+func (l *ProviderLifecycle) Complete(ctx context.Context, ref provider.AuthorizationRef, completion provider.AuthorizationCompletion) (provider.AccountResult, error) {
 	if err := requireXAIRef(ref); err != nil {
 		return provider.AccountResult{}, err
+	}
+	if completion.Code != "" {
+		return provider.AccountResult{}, errors.New("xAI authorization does not accept a callback code")
 	}
 	result := l.completions.DoChan(ref.State, func() (any, error) {
 		return l.complete(ctx, ref.State)

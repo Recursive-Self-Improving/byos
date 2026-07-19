@@ -12,8 +12,6 @@ import (
 	"byos/internal/store"
 )
 
-const xaiPolicyKey = "xai"
-
 var ErrAccountLifecycleUnavailable = errors.New("account lifecycle unavailable")
 var ErrCredentialRefreshUnavailable = errors.New("credential refresh unavailable")
 
@@ -38,13 +36,14 @@ func NewService(accounts *store.AccountRepository, registry provider.CapabilityR
 	return &Service{accounts: accounts, registry: registry, capabilities: capabilities, usage: usage, now: func() time.Time { return time.Now().UTC() }}
 }
 
-func (s *Service) lifecycle() (provider.AccountLifecycle, error) {
+func (s *Service) lifecycle(kind provider.Kind) (provider.AccountLifecycle, error) {
+	policyKey := string(kind)
 	if s.registry == nil {
-		return nil, fmt.Errorf("%w: provider=%s policy=%s", ErrAccountLifecycleUnavailable, provider.XAI, xaiPolicyKey)
+		return nil, fmt.Errorf("%w: provider=%s policy=%s", ErrAccountLifecycleUnavailable, kind, policyKey)
 	}
-	capabilities, ok := s.registry.Capabilities(provider.XAI, xaiPolicyKey)
+	capabilities, ok := s.registry.Capabilities(kind, policyKey)
 	if !ok || capabilities.Lifecycle == nil {
-		return nil, fmt.Errorf("%w: provider=%s policy=%s", ErrAccountLifecycleUnavailable, provider.XAI, xaiPolicyKey)
+		return nil, fmt.Errorf("%w: provider=%s policy=%s", ErrAccountLifecycleUnavailable, kind, policyKey)
 	}
 	return capabilities.Lifecycle, nil
 }
@@ -57,8 +56,8 @@ func (s *Service) optionalCapabilities(account store.Account) provider.Capabilit
 	return capabilities
 }
 
-func (s *Service) StartLogin(ctx context.Context) (provider.Authorization, error) {
-	lifecycle, err := s.lifecycle()
+func (s *Service) StartLogin(ctx context.Context, kind provider.Kind) (provider.Authorization, error) {
+	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return provider.Authorization{}, err
 	}
@@ -66,30 +65,34 @@ func (s *Service) StartLogin(ctx context.Context) (provider.Authorization, error
 	if err != nil {
 		return provider.Authorization{}, err
 	}
-	if authorization.Ref.Provider != provider.XAI {
-		return provider.Authorization{}, fmt.Errorf("account lifecycle returned provider %q, want %q", authorization.Ref.Provider, provider.XAI)
+	if authorization.Ref.Provider != kind {
+		return provider.Authorization{}, fmt.Errorf("account lifecycle returned provider %q, want %q", authorization.Ref.Provider, kind)
 	}
 	return authorization, nil
 }
 
-func (s *Service) LoginStatus(ctx context.Context, state string) (provider.AuthorizationSession, error) {
-	lifecycle, err := s.lifecycle()
+func (s *Service) LoginStatus(ctx context.Context, kind provider.Kind, state string) (provider.AuthorizationSession, error) {
+	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return provider.AuthorizationSession{}, err
 	}
-	session, err := lifecycle.Status(ctx, provider.AuthorizationRef{Provider: provider.XAI, State: state})
+	session, err := lifecycle.Status(ctx, provider.AuthorizationRef{Provider: kind, State: state})
 	if err != nil {
 		return provider.AuthorizationSession{}, err
 	}
-	if session.Ref.Provider != provider.XAI {
-		return provider.AuthorizationSession{}, fmt.Errorf("account lifecycle returned provider %q, want %q", session.Ref.Provider, provider.XAI)
+	if session.Ref.Provider != kind {
+		return provider.AuthorizationSession{}, fmt.Errorf("account lifecycle returned provider %q, want %q", session.Ref.Provider, kind)
 	}
 	return session, nil
 }
 
-func (s *Service) CompleteLogin(ctx context.Context, state string) (store.Account, error) {
-	result := s.completions.DoChan(state, func() (any, error) {
-		return s.completeLogin(ctx, state)
+func (s *Service) CompleteLogin(ctx context.Context, kind provider.Kind, state string, completion provider.AuthorizationCompletion) (store.Account, error) {
+	if kind != provider.XAI {
+		return s.completeLogin(ctx, kind, state, completion)
+	}
+	key := string(kind) + "\x00" + state
+	result := s.completions.DoChan(key, func() (any, error) {
+		return s.completeLogin(ctx, kind, state, completion)
 	})
 	select {
 	case <-ctx.Done():
@@ -102,36 +105,36 @@ func (s *Service) CompleteLogin(ctx context.Context, state string) (store.Accoun
 	}
 }
 
-func (s *Service) completeLogin(ctx context.Context, state string) (store.Account, error) {
-	lifecycle, err := s.lifecycle()
+func (s *Service) completeLogin(ctx context.Context, kind provider.Kind, state string, completion provider.AuthorizationCompletion) (store.Account, error) {
+	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return store.Account{}, err
 	}
-	ref := provider.AuthorizationRef{Provider: provider.XAI, State: state}
+	ref := provider.AuthorizationRef{Provider: kind, State: state}
 	session, err := lifecycle.Status(ctx, ref)
 	if err != nil {
 		return store.Account{}, err
 	}
-	if session.Status == provider.AuthorizationCompleted {
-		if session.Ref.Provider != provider.XAI {
-			return store.Account{}, fmt.Errorf("account lifecycle returned provider %q, want %q", session.Ref.Provider, provider.XAI)
+	if kind == provider.XAI && session.Status == provider.AuthorizationCompleted {
+		if session.Ref.Provider != kind {
+			return store.Account{}, fmt.Errorf("account lifecycle returned provider %q, want %q", session.Ref.Provider, kind)
 		}
 		if session.AccountID == "" {
 			return store.Account{}, errors.New("completed account lifecycle returned an empty account id")
 		}
-		return s.account(ctx, session.AccountID)
+		return s.account(ctx, kind, session.AccountID)
 	}
-	result, err := lifecycle.Complete(ctx, ref)
+	result, err := lifecycle.Complete(ctx, ref, completion)
 	if err != nil {
 		return store.Account{}, err
 	}
-	if result.Provider != provider.XAI {
-		return store.Account{}, fmt.Errorf("account lifecycle returned provider %q, want %q", result.Provider, provider.XAI)
+	if result.Provider != kind {
+		return store.Account{}, fmt.Errorf("account lifecycle returned provider %q, want %q", result.Provider, kind)
 	}
 	if result.AccountID == "" {
 		return store.Account{}, errors.New("account lifecycle returned an empty account id")
 	}
-	account, err := s.account(ctx, result.AccountID)
+	account, err := s.account(ctx, kind, result.AccountID)
 	if err != nil {
 		return store.Account{}, err
 	}
@@ -145,27 +148,27 @@ func (s *Service) completeLogin(ctx context.Context, state string) (store.Accoun
 	return account, nil
 }
 
-func (s *Service) account(ctx context.Context, accountID string) (store.Account, error) {
+func (s *Service) account(ctx context.Context, kind provider.Kind, accountID string) (store.Account, error) {
 	account, err := s.accounts.Get(ctx, accountID)
 	if err != nil {
 		return store.Account{}, err
 	}
-	if account.Provider != provider.XAI {
-		return store.Account{}, fmt.Errorf("account %q belongs to provider %q, want %q", account.ID, account.Provider, provider.XAI)
+	if account.Provider != kind {
+		return store.Account{}, fmt.Errorf("account %q belongs to provider %q, want %q", account.ID, account.Provider, kind)
 	}
 	return account, nil
 }
 
-func (s *Service) CancelLogin(ctx context.Context, state string) error {
-	lifecycle, err := s.lifecycle()
+func (s *Service) CancelLogin(ctx context.Context, kind provider.Kind, state string) error {
+	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return err
 	}
-	return lifecycle.Cancel(ctx, provider.AuthorizationRef{Provider: provider.XAI, State: state})
+	return lifecycle.Cancel(ctx, provider.AuthorizationRef{Provider: kind, State: state})
 }
 
-func (s *Service) ResumeLogins(ctx context.Context) ([]provider.AuthorizationSession, error) {
-	lifecycle, err := s.lifecycle()
+func (s *Service) ResumeLogins(ctx context.Context, kind provider.Kind) ([]provider.AuthorizationSession, error) {
+	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return nil, err
 	}
@@ -174,8 +177,8 @@ func (s *Service) ResumeLogins(ctx context.Context) ([]provider.AuthorizationSes
 		return nil, err
 	}
 	for _, session := range sessions {
-		if session.Ref.Provider != provider.XAI {
-			return nil, fmt.Errorf("account lifecycle returned provider %q, want %q", session.Ref.Provider, provider.XAI)
+		if session.Ref.Provider != kind {
+			return nil, fmt.Errorf("account lifecycle returned provider %q, want %q", session.Ref.Provider, kind)
 		}
 	}
 	return sessions, nil

@@ -89,12 +89,12 @@ func runWith(parent context.Context, args []string, deps dependencies) error {
 	}
 }
 func login(ctx context.Context, runtime *app.Runtime, output io.Writer) error {
-	authorization, err := runtime.Accounts.StartLogin(ctx)
+	authorization, err := runtime.Accounts.StartLogin(ctx, provider.XAI)
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(output, "Open %s\nCode: %s\nWaiting for authorization...\n", verificationURL(authorization), authorization.UserCode)
-	account, err := runtime.Accounts.CompleteLogin(ctx, authorization.Ref.State)
+	account, err := runtime.Accounts.CompleteLogin(ctx, provider.XAI, authorization.Ref.State, provider.AuthorizationCompletion{})
 	if err != nil {
 		return err
 	}

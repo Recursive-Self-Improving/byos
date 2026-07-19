@@ -51,6 +51,11 @@ type Account struct {
 	UpdatedAt     time.Time
 }
 
+type accountDBTX interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 type AccountRepository struct {
 	db   *sql.DB
 	keys appcrypto.Keys
@@ -61,6 +66,10 @@ func NewAccountRepository(db *sql.DB, keys appcrypto.Keys) *AccountRepository {
 }
 
 func (r *AccountRepository) UpsertLogin(ctx context.Context, account Account) (Account, error) {
+	return r.upsertLogin(ctx, r.db, account, time.Now().UTC())
+}
+
+func (r *AccountRepository) upsertLogin(ctx context.Context, db accountDBTX, account Account, now time.Time) (Account, error) {
 	if !account.Provider.Valid() {
 		return Account{}, fmt.Errorf("account provider: %w", provider.ErrInvalidKind)
 	}
@@ -78,7 +87,6 @@ func (r *AccountRepository) UpsertLogin(ctx context.Context, account Account) (A
 	if err != nil {
 		return Account{}, err
 	}
-	now := time.Now().UTC()
 	id, err := randomID("acct_")
 	if err != nil {
 		return Account{}, err
@@ -87,22 +95,29 @@ func (r *AccountRepository) UpsertLogin(ctx context.Context, account Account) (A
 	if status == "" {
 		status = "ready"
 	}
+	enabled := account.Enabled
+	if account.ID == "" && account.Provider == provider.XAI {
+		enabled = true
+	}
+	if account.ID == "" && account.Provider == provider.Devin && status == "ready" {
+		enabled = true
+	}
 	var expires any
 	if account.ExpiresAt != nil {
 		expires = account.ExpiresAt.Unix()
 	}
-	result, err := r.db.ExecContext(ctx, `INSERT INTO accounts(id, provider, identity_fingerprint, label, enabled, status, credentials_encrypted, expires_at, last_refresh_at, last_error, created_at, updated_at)
+	result, err := db.ExecContext(ctx, `INSERT INTO accounts(id, provider, identity_fingerprint, label, enabled, status, credentials_encrypted, expires_at, last_refresh_at, last_error, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(identity_fingerprint) DO UPDATE SET credentials_encrypted=excluded.credentials_encrypted, status=excluded.status, expires_at=excluded.expires_at, last_refresh_at=excluded.last_refresh_at, last_error=excluded.last_error, updated_at=excluded.updated_at
+		ON CONFLICT(identity_fingerprint) DO UPDATE SET credentials_encrypted=excluded.credentials_encrypted, enabled=CASE WHEN excluded.provider='devin' THEN excluded.enabled ELSE accounts.enabled END, status=excluded.status, expires_at=excluded.expires_at, last_refresh_at=excluded.last_refresh_at, last_error=excluded.last_error, updated_at=excluded.updated_at
 		WHERE accounts.provider=excluded.provider`,
-		id, account.Provider, fingerprint[:], account.Label, boolInt(defaultTrue(account.Enabled, account.ID == "")), status, encrypted, expires, nullableUnix(account.LastRefreshAt), nullString(account.LastError), now.Unix(), now.Unix())
+		id, account.Provider, fingerprint[:], account.Label, boolInt(enabled), status, encrypted, expires, nullableUnix(account.LastRefreshAt), nullString(account.LastError), now.Unix(), now.Unix())
 	if err != nil {
 		return Account{}, fmt.Errorf("upsert account: %w", err)
 	}
 	if err := requireAffected(result); err != nil {
 		return Account{}, err
 	}
-	return r.GetByFingerprint(ctx, fingerprint)
+	return r.scan(db.QueryRowContext(ctx, accountSelect+" WHERE identity_fingerprint=?", fingerprint[:]))
 }
 
 // IdentityFingerprint derives a stable provider-scoped account identity. The
@@ -216,7 +231,7 @@ func boolInt(value bool) int {
 	}
 	return 0
 }
-func defaultTrue(value, fresh bool) bool { return value || fresh }
+
 func nullableUnix(value *time.Time) any {
 	if value == nil {
 		return nil

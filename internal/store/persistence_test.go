@@ -200,3 +200,53 @@ func TestEncryptedOAuthUsageAndResponseRepositories(t *testing.T) {
 		t.Fatalf("oauth cleanup = %d, %v", count, err)
 	}
 }
+
+func TestDevinOAuthTransactionDurablePayloadInventory(t *testing.T) {
+	ctx := context.Background()
+	database, keys := openRepositories(t)
+	defer database.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	state := "inventory-raw-state"
+	verifier := "inventory-pkce-verifier"
+	redirectURI := "https://inventory.example.test/oauth/callback"
+	token := "inventory-opaque-token"
+	createConsumedDevinSession(t, database.DB, keys, state, verifier, redirectURI, now)
+	created, err := NewDevinOAuthTransaction(database.DB, keys).Complete(ctx, state, devinAccount(token, now.Add(time.Hour)), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accountEnvelope, oauthEnvelope string
+	if err := database.DB.QueryRowContext(ctx, `SELECT credentials_encrypted FROM accounts WHERE id=?`, created.ID).Scan(&accountEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	hash := stateHash(state)
+	if err := database.DB.QueryRowContext(ctx, `SELECT payload_encrypted FROM oauth_sessions WHERE state_hash=?`, hash[:]).Scan(&oauthEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	accountPlain, err := appcrypto.Decrypt(keys.OAuth(), accountEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthPlain, err := appcrypto.Decrypt(keys.OAuth(), oauthEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accountPayload, oauthPayload map[string]json.RawMessage
+	if err := json.Unmarshal(accountPlain, &accountPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(oauthPlain, &oauthPayload); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"code", "state", "user_jwt", "raw_state", "authorization_code"} {
+		if _, ok := accountPayload[forbidden]; ok {
+			t.Fatalf("account payload contains forbidden field %q", forbidden)
+		}
+		if _, ok := oauthPayload[forbidden]; ok {
+			t.Fatalf("oauth payload contains forbidden field %q", forbidden)
+		}
+	}
+	if len(oauthPayload) != 1 || string(oauthPayload["account_id"]) != `"`+created.ID+`"` {
+		t.Fatalf("completed oauth payload = %s", oauthPlain)
+	}
+}

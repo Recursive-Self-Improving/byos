@@ -78,16 +78,16 @@ func TestCompleteLoginRejectsUnverifiedIdentityBeforePersistence(t *testing.T) {
 	oauthService := oauthxai.NewService(oauthxai.NewDiscoveryClient(client, oauthxai.DiscoveryURL), client, oauthRepo, oauthxai.DefaultOptions())
 	identity := oauthxai.NewIdentityVerifier(ctx, oauthxai.Issuer, oauthxai.Issuer+"/jwks", oauthxai.DefaultClientID, []string{oidc.RS256})
 	lifecycle := oauthxai.NewProviderLifecycle(oauthService, accountsRepo, identity)
-	registry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{Provider: provider.XAI, PolicyKey: xaiPolicyKey, Capabilities: provider.Capabilities{Lifecycle: lifecycle}}})
+	registry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{Provider: provider.XAI, PolicyKey: "xai", Capabilities: provider.Capabilities{Lifecycle: lifecycle}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(accountsRepo, registry, nil, nil)
-	flow, err := service.StartLogin(ctx)
+	flow, err := service.StartLogin(ctx, provider.XAI)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteLogin(ctx, flow.Ref.State); err == nil {
+	if _, err := service.CompleteLogin(ctx, provider.XAI, flow.Ref.State, provider.AuthorizationCompletion{}); err == nil {
 		t.Fatal("wrong-audience identity persisted")
 	}
 	accounts, err := accountsRepo.List(ctx)

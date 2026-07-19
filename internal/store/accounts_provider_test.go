@@ -175,3 +175,64 @@ func TestAccountProviderValidationFingerprintCompatibilityAndBoundMutation(t *te
 		t.Fatalf("collision changed account = %+v", unchanged)
 	}
 }
+
+func TestAccountFreshProviderEnabledDefaultsPreserveExpiredDevin(t *testing.T) {
+	ctx := context.Background()
+	database, keys := openRepositories(t)
+	defer database.Close()
+	repo := NewAccountRepository(database.DB, keys)
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	xai, err := repo.upsertLogin(ctx, database.DB, Account{
+		Provider:    provider.XAI,
+		Credentials: AccountCredentials{Issuer: "issuer", Subject: "fresh-default", AccessToken: "xai-token"},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !xai.Enabled || xai.Status != "ready" {
+		t.Fatalf("fresh xAI default changed = %+v", xai)
+	}
+
+	ready, err := repo.upsertLogin(ctx, database.DB, Account{
+		Provider:    provider.Devin,
+		Credentials: AccountCredentials{OpaqueToken: "fresh-ready-token"},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready.Enabled || ready.Status != "ready" {
+		t.Fatalf("fresh ready Devin default = %+v", ready)
+	}
+
+	expires := now
+	expired, err := repo.upsertLogin(ctx, database.DB, Account{
+		Provider: provider.Devin, Enabled: false, Status: "relogin_required",
+		Credentials: AccountCredentials{OpaqueToken: "fresh-expired-token", OpaqueTokenExpiresAt: &expires},
+		ExpiresAt:   &expires, LastError: "authentication expired; reconnect required",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expired.Enabled || expired.Status != "relogin_required" || expired.LastError != "authentication expired; reconnect required" {
+		t.Fatalf("fresh expired Devin account = %+v", expired)
+	}
+
+	dedupReady, err := repo.upsertLogin(ctx, database.DB, Account{
+		Provider: provider.Devin, Credentials: AccountCredentials{OpaqueToken: "dedup-expired-token"},
+	}, now)
+	if err != nil || !dedupReady.Enabled {
+		t.Fatalf("ready dedup seed = %+v, %v", dedupReady, err)
+	}
+	dedupExpired, err := repo.upsertLogin(ctx, database.DB, Account{
+		Provider: provider.Devin, Status: "relogin_required",
+		Credentials: AccountCredentials{OpaqueToken: "dedup-expired-token", OpaqueTokenExpiresAt: &expires},
+		ExpiresAt:   &expires, LastError: "authentication expired; reconnect required",
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dedupExpired.ID != dedupReady.ID || dedupExpired.Enabled || dedupExpired.Status != "relogin_required" {
+		t.Fatalf("deduplicated expired Devin account = %+v", dedupExpired)
+	}
+}
