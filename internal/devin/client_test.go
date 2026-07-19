@@ -34,6 +34,10 @@ func response(status int, body []byte, encoding string) *http.Response {
 func directClient(rt http.RoundTripper) *Client {
 	return &Client{httpClient: &http.Client{Transport: rt}, allowedHosts: []string{"chat.example.com"}, timeout: time.Second, maxCompressedBytes: 1024, maxDecompressedBytes: 1024}
 }
+func validTestClientConfig() ClientConfig {
+	return ClientConfig{AllowedChatHosts: []string{"chat.example.com"}, UnaryTimeout: time.Second, MaxCompressedBytes: 1 << 10, MaxDecompressedBytes: 1 << 10, StreamIdleTimeout: 5 * time.Second, MaxFrameCompressedBytes: 1 << 10, MaxFrameDecompressedBytes: 1 << 10, MaxStreamBytes: 1 << 20, MaxToolArgumentBytes: 1 << 10, MaxNonStreamBytes: 1 << 20}
+}
+
 func jwtPayload(t *testing.T, jwt, base string) []byte {
 	t.Helper()
 	b, err := (&devinproto.GetUserJWTResponse{UserJWT: jwt, CustomAPIServerURL: base}).Marshal()
@@ -97,20 +101,52 @@ func TestGetUserJWTRawAndGzipResponses(t *testing.T) {
 	}
 }
 
-func TestGetUserJWTStatusEmptyMalformedAndLimits(t *testing.T) {
-	for _, status := range []int{401, 403} {
-		client := directClient(roundTripFunc(func(*http.Request) (*http.Response, error) { return response(status, nil, ""), nil }))
-		_, err := client.GetUserJWT(context.Background(), "secret")
+func TestStatusClassificationAndRetryAfter(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		status           int
+		class            provider.ErrorClass
+		retry            bool
+		scope            provider.CooldownScope
+		disable, relogin bool
+	}{
+		{400, provider.ClassValidation, false, provider.CooldownNone, false, false},
+		{404, provider.ClassValidation, false, provider.CooldownNone, false, false},
+		{401, provider.ClassUnauthorized, true, provider.CooldownAccount, true, true},
+		{403, provider.ClassUnauthorized, true, provider.CooldownAccount, true, true},
+		{408, provider.ClassTransient, true, provider.CooldownModel, false, false},
+		{429, provider.ClassRateLimit, true, provider.CooldownModel, false, false},
+		{500, provider.ClassTransient, true, provider.CooldownModel, false, false},
+		{502, provider.ClassTransient, true, provider.CooldownModel, false, false},
+		{503, provider.ClassTransient, true, provider.CooldownModel, false, false},
+		{504, provider.ClassTransient, true, provider.CooldownModel, false, false},
+		{418, provider.ClassUpstream, false, provider.CooldownNone, false, false},
+	}
+	for _, test := range tests {
 		var upstream *provider.UpstreamError
-		if !errors.As(err, &upstream) || upstream.Status != status || !upstream.Classification.ReloginRequired || !upstream.Classification.DisableAccount {
-			t.Errorf("status %d: %v", status, err)
+		if !errors.As(classifyStatus(test.status, nil, now), &upstream) {
+			t.Fatalf("status %d not classified", test.status)
+		}
+		got := upstream.Classification
+		if got.Class != test.class || got.RetryNext != test.retry || got.CooldownScope != test.scope || got.DisableAccount != test.disable || got.ReloginRequired != test.relogin {
+			t.Fatalf("status %d: %+v", test.status, got)
 		}
 	}
-	client := directClient(roundTripFunc(func(*http.Request) (*http.Response, error) { return response(500, nil, ""), nil }))
-	var statusErr *HTTPStatusError
-	if _, err := client.GetUserJWT(context.Background(), "secret"); !errors.As(err, &statusErr) || statusErr.StatusCode != 500 {
-		t.Errorf("500 = %v", err)
+	for _, value := range []string{"120", now.Add(2 * time.Minute).Format(http.TimeFormat)} {
+		var upstream *provider.UpstreamError
+		errors.As(classifyStatus(429, http.Header{"Retry-After": []string{value}}, now), &upstream)
+		if !upstream.Classification.ExplicitRetryAfter || upstream.Classification.Cooldown != 2*time.Minute || !upstream.Classification.RetryAfter.Equal(now.Add(2*time.Minute)) {
+			t.Fatalf("retry-after %q: %+v", value, upstream.Classification)
+		}
 	}
+	var invalid *provider.UpstreamError
+	errors.As(classifyStatus(429, http.Header{"Retry-After": []string{"secret invalid"}}, now), &invalid)
+	if invalid.Classification.ExplicitRetryAfter || invalid.Classification.Cooldown != 0 {
+		t.Fatalf("invalid retry-after: %+v", invalid.Classification)
+	}
+}
+
+func TestGetUserJWTEmptyMalformedAndLimits(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		body     []byte
@@ -249,7 +285,8 @@ func TestRedirectBlockedBeforeCredentialCanReachDestination(t *testing.T) {
 }
 
 func TestNewClientDisablesProxyAndRejectsUnsafeTransport(t *testing.T) {
-	config := ClientConfig{HTTPClient: &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}, AllowedChatHosts: []string{"chat.example.com"}, UnaryTimeout: time.Second, MaxCompressedBytes: 10, MaxDecompressedBytes: 10}
+	config := validTestClientConfig()
+	config.HTTPClient = &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 	client, err := NewClient(config)
 	if err != nil {
 		t.Fatal(err)
@@ -289,7 +326,9 @@ func TestNewClientRejectsTLSDialHooksBeforeUse(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client, err := NewClient(ClientConfig{HTTPClient: &http.Client{Transport: test.transport}, AllowedChatHosts: []string{"chat.example.com"}, UnaryTimeout: time.Second, MaxCompressedBytes: 10, MaxDecompressedBytes: 10})
+			config := validTestClientConfig()
+			config.HTTPClient = &http.Client{Transport: test.transport}
+			client, err := NewClient(config)
 			if client != nil || !errors.Is(err, ErrUnsafeTLSDialHooks) || err.Error() != ErrUnsafeTLSDialHooks.Error() {
 				t.Fatalf("client=%v error=%v; want deterministic TLS hook rejection", client, err)
 			}
@@ -309,7 +348,9 @@ func TestNewClientRejectsTLSNextProtoBeforeCredentialRequest(t *testing.T) {
 			})
 		},
 	}}
-	client, err := NewClient(ClientConfig{HTTPClient: &http.Client{Transport: transport}, AllowedChatHosts: []string{"chat.example.com"}, UnaryTimeout: time.Second, MaxCompressedBytes: 10, MaxDecompressedBytes: 10})
+	config := validTestClientConfig()
+	config.HTTPClient = &http.Client{Transport: transport}
+	client, err := NewClient(config)
 	if client != nil || !errors.Is(err, ErrUnsafeTLSNextProto) || err.Error() != ErrUnsafeTLSNextProto.Error() {
 		t.Fatalf("client=%v error=%v; want deterministic TLS protocol hook rejection", client, err)
 	}
@@ -343,7 +384,9 @@ func TestNewClientSanitizesTLSClientConfig(t *testing.T) {
 		},
 		KeyLogWriter: io.Discard,
 	}}
-	client, err := NewClient(ClientConfig{HTTPClient: &http.Client{Transport: transport}, AllowedChatHosts: []string{"chat.example.com"}, UnaryTimeout: time.Second, MaxCompressedBytes: 10, MaxDecompressedBytes: 10})
+	config := validTestClientConfig()
+	config.HTTPClient = &http.Client{Transport: transport}
+	client, err := NewClient(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,5 +402,32 @@ func TestNewClientSanitizesTLSClientConfig(t *testing.T) {
 	}
 	if verifyPeerCalls.Load() != 0 || verifyConnectionCalls.Load() != 0 || clientCertificateCalls.Load() != 0 {
 		t.Fatalf("TLS hooks ran during construction: peer=%d connection=%d client-certificate=%d", verifyPeerCalls.Load(), verifyConnectionCalls.Load(), clientCertificateCalls.Load())
+	}
+}
+
+func TestNewClientConfigBoundaries(t *testing.T) {
+	valid := validTestClientConfig()
+	if _, err := NewClient(valid); err != nil {
+		t.Fatalf("valid minimum config: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*ClientConfig)
+	}{
+		{"unary-low", func(c *ClientConfig) { c.UnaryTimeout = time.Second - time.Nanosecond }}, {"unary-high", func(c *ClientConfig) { c.UnaryTimeout = time.Minute + time.Nanosecond }},
+		{"idle-low", func(c *ClientConfig) { c.StreamIdleTimeout = 5*time.Second - time.Nanosecond }}, {"idle-high", func(c *ClientConfig) { c.StreamIdleTimeout = 5*time.Minute + time.Nanosecond }},
+		{"deadline-negative", func(c *ClientConfig) { c.StreamDeadline = -time.Nanosecond }}, {"deadline-low", func(c *ClientConfig) { c.StreamDeadline = 30*time.Second - time.Nanosecond }}, {"deadline-high", func(c *ClientConfig) { c.StreamDeadline = 30*time.Minute + time.Nanosecond }},
+		{"unary-compressed-low", func(c *ClientConfig) { c.MaxCompressedBytes = (1 << 10) - 1 }}, {"unary-decompressed-high", func(c *ClientConfig) { c.MaxDecompressedBytes = (32 << 20) + 1 }},
+		{"frame-compressed-high", func(c *ClientConfig) { c.MaxFrameCompressedBytes = (16 << 20) + 1 }}, {"frame-decompressed-low", func(c *ClientConfig) { c.MaxFrameDecompressedBytes = (1 << 10) - 1 }},
+		{"stream-low", func(c *ClientConfig) { c.MaxStreamBytes = (1 << 20) - 1 }}, {"tool-high", func(c *ClientConfig) { c.MaxToolArgumentBytes = (16 << 20) + 1 }}, {"nonstream-high", func(c *ClientConfig) { c.MaxNonStreamBytes = (128 << 20) + 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := valid
+			test.mutate(&config)
+			if _, err := NewClient(config); !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }

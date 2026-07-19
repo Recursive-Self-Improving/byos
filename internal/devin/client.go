@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,22 +37,36 @@ func (e *HTTPStatusError) Error() string {
 }
 
 type ClientConfig struct {
-	HTTPClient           *http.Client
-	Resolver             Resolver
-	Dialer               *net.Dialer
-	AllowedChatHosts     []string
-	UnaryTimeout         time.Duration
-	MaxCompressedBytes   int64
-	MaxDecompressedBytes int64
+	HTTPClient                *http.Client
+	Resolver                  Resolver
+	Dialer                    *net.Dialer
+	AllowedChatHosts          []string
+	UnaryTimeout              time.Duration
+	MaxCompressedBytes        int64
+	MaxDecompressedBytes      int64
+	StreamIdleTimeout         time.Duration
+	StreamDeadline            time.Duration
+	MaxFrameCompressedBytes   int64
+	MaxFrameDecompressedBytes int64
+	MaxStreamBytes            int64
+	MaxToolArgumentBytes      int64
+	MaxNonStreamBytes         int64
 }
 
 type Client struct {
-	httpClient           *http.Client
-	resolver             Resolver
-	allowedHosts         []string
-	timeout              time.Duration
-	maxCompressedBytes   int64
-	maxDecompressedBytes int64
+	httpClient                *http.Client
+	resolver                  Resolver
+	allowedHosts              []string
+	timeout                   time.Duration
+	maxCompressedBytes        int64
+	maxDecompressedBytes      int64
+	streamIdleTimeout         time.Duration
+	streamDeadline            time.Duration
+	maxFrameCompressedBytes   int64
+	maxFrameDecompressedBytes int64
+	maxStreamBytes            int64
+	maxToolArgumentBytes      int64
+	maxNonStreamBytes         int64
 }
 
 type AuthSession struct {
@@ -60,8 +75,44 @@ type AuthSession struct {
 	SessionToken string
 }
 
+const (
+	minUnaryTimeout                 = time.Second
+	maxUnaryTimeout                 = time.Minute
+	minStreamIdleTimeout            = 5 * time.Second
+	maxStreamIdleTimeout            = 5 * time.Minute
+	minStreamDeadline               = 30 * time.Second
+	maxStreamDeadline               = 30 * time.Minute
+	minUnaryCompressedBytes   int64 = 1 << 10
+	maxUnaryCompressedBytes   int64 = 8 << 20
+	minUnaryDecompressedBytes int64 = 1 << 10
+	maxUnaryDecompressedBytes int64 = 32 << 20
+	minFrameCompressedBytes   int64 = 1 << 10
+	maxFrameCompressedBytes   int64 = 16 << 20
+	minFrameDecompressedBytes int64 = 1 << 10
+	maxFrameDecompressedBytes int64 = 64 << 20
+	minStreamBytes            int64 = 1 << 20
+	maxStreamBytes            int64 = 256 << 20
+	minToolArgumentBytes      int64 = 1 << 10
+	maxToolArgumentBytes      int64 = 16 << 20
+	minNonStreamBytes         int64 = 1 << 20
+	maxNonStreamBytes         int64 = 128 << 20
+)
+
+func validClientConfig(config ClientConfig) bool {
+	return config.UnaryTimeout >= minUnaryTimeout && config.UnaryTimeout <= maxUnaryTimeout &&
+		config.MaxCompressedBytes >= minUnaryCompressedBytes && config.MaxCompressedBytes <= maxUnaryCompressedBytes &&
+		config.MaxDecompressedBytes >= minUnaryDecompressedBytes && config.MaxDecompressedBytes <= maxUnaryDecompressedBytes &&
+		config.StreamIdleTimeout >= minStreamIdleTimeout && config.StreamIdleTimeout <= maxStreamIdleTimeout &&
+		(config.StreamDeadline == 0 || config.StreamDeadline >= minStreamDeadline && config.StreamDeadline <= maxStreamDeadline) &&
+		config.MaxFrameCompressedBytes >= minFrameCompressedBytes && config.MaxFrameCompressedBytes <= maxFrameCompressedBytes &&
+		config.MaxFrameDecompressedBytes >= minFrameDecompressedBytes && config.MaxFrameDecompressedBytes <= maxFrameDecompressedBytes &&
+		config.MaxStreamBytes >= minStreamBytes && config.MaxStreamBytes <= maxStreamBytes &&
+		config.MaxToolArgumentBytes >= minToolArgumentBytes && config.MaxToolArgumentBytes <= maxToolArgumentBytes &&
+		config.MaxNonStreamBytes >= minNonStreamBytes && config.MaxNonStreamBytes <= maxNonStreamBytes
+}
+
 func NewClient(config ClientConfig) (*Client, error) {
-	if config.UnaryTimeout <= 0 || config.MaxCompressedBytes <= 0 || config.MaxDecompressedBytes <= 0 || len(config.AllowedChatHosts) == 0 {
+	if !validClientConfig(config) || len(config.AllowedChatHosts) == 0 {
 		return nil, ErrInvalidClientConfig
 	}
 	allowed := append([]string(nil), config.AllowedChatHosts...)
@@ -115,7 +166,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	copyClient.Transport = transport
 	copyClient.Timeout = 0
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return ErrRedirect }
-	return &Client{httpClient: &copyClient, resolver: resolver, allowedHosts: allowed, timeout: config.UnaryTimeout, maxCompressedBytes: config.MaxCompressedBytes, maxDecompressedBytes: config.MaxDecompressedBytes}, nil
+	return &Client{httpClient: &copyClient, resolver: resolver, allowedHosts: allowed, timeout: config.UnaryTimeout, maxCompressedBytes: config.MaxCompressedBytes, maxDecompressedBytes: config.MaxDecompressedBytes, streamIdleTimeout: config.StreamIdleTimeout, streamDeadline: config.StreamDeadline, maxFrameCompressedBytes: config.MaxFrameCompressedBytes, maxFrameDecompressedBytes: config.MaxFrameDecompressedBytes, maxStreamBytes: config.MaxStreamBytes, maxToolArgumentBytes: config.MaxToolArgumentBytes, maxNonStreamBytes: config.MaxNonStreamBytes}, nil
 }
 
 // GetUserJWT performs a fresh bootstrap on every call. The result is never
@@ -199,7 +250,7 @@ func (c *Client) postUnaryProto(ctx context.Context, endpoint string, payload []
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, classifyStatus(response.StatusCode)
+		return nil, classifyStatus(response.StatusCode, response.Header, time.Now())
 	}
 	compressed, err := readBounded(response.Body, c.maxCompressedBytes)
 	if err != nil {
@@ -208,11 +259,63 @@ func (c *Client) postUnaryProto(ctx context.Context, endpoint string, payload []
 	return decodeUnaryBody(compressed, response.Header.Get("Content-Encoding"), c.maxDecompressedBytes)
 }
 
-func classifyStatus(status int) error {
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return &provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: provider.ErrorClassification{Class: provider.ClassUnauthorized, ReloginRequired: true, DisableAccount: true, PublicStatus: http.StatusUnauthorized, PublicCode: "authentication_required", PublicMessage: "provider authentication is required"}}
+func classifyStatus(status int, headers http.Header, now time.Time) error {
+	classification := provider.ErrorClassification{Class: provider.ClassUpstream, PublicStatus: http.StatusBadGateway, PublicCode: "provider_error", PublicMessage: "upstream provider error"}
+	switch status {
+	case http.StatusBadRequest, http.StatusNotFound:
+		classification.Class = provider.ClassValidation
+		classification.PublicStatus = http.StatusBadRequest
+		classification.PublicCode = "invalid_request_error"
+		classification.PublicMessage = "invalid model or request payload"
+	case http.StatusUnauthorized, http.StatusForbidden:
+		classification.Class = provider.ClassUnauthorized
+		classification.RetryNext = true
+		classification.RefreshSame = true
+		classification.DisableAccount = true
+		classification.ReloginRequired = true
+		classification.CooldownScope = provider.CooldownAccount
+		classification.PublicStatus = http.StatusUnauthorized
+		classification.PublicCode = "provider_authentication_error"
+		classification.PublicMessage = "provider authentication is required"
+	case http.StatusTooManyRequests:
+		classification.Class = provider.ClassRateLimit
+		classification.RetryNext = true
+		classification.CooldownScope = provider.CooldownModel
+		classification.PublicStatus = http.StatusTooManyRequests
+		classification.PublicCode = "rate_limit_exceeded"
+		classification.PublicMessage = "all available accounts are rate limited"
+		if retryAt, ok := parseRetryAfter(headers.Get("Retry-After"), now); ok {
+			classification.ExplicitRetryAfter = true
+			classification.RetryAfter = retryAt
+			classification.Cooldown = retryAt.Sub(now)
+		}
+	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		classification.Class = provider.ClassTransient
+		classification.RetryNext = true
+		classification.CooldownScope = provider.CooldownModel
+		classification.Cooldown = time.Minute
+		classification.PublicStatus = http.StatusServiceUnavailable
+		classification.PublicCode = "provider_unavailable"
 	}
-	return &HTTPStatusError{StatusCode: status}
+	return &provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: classification}
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 31); err == nil {
+		return now.Add(time.Duration(seconds) * time.Second), true
+	}
+	parsed, err := http.ParseTime(value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if parsed.Before(now) {
+		parsed = now
+	}
+	return parsed, true
 }
 
 func readBounded(reader io.Reader, limit int64) ([]byte, error) {

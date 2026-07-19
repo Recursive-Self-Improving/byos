@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -152,6 +153,55 @@ func TestMessagesRealExecutorPreparationErrorsUseExactAnthropicEnvelope(t *testi
 			}
 			if credentials.calls != credentialCalls || client.calls != clientCalls {
 				t.Fatalf("preparation reached credentials/client: credentials %d->%d client %d->%d", credentialCalls, credentials.calls, clientCalls, client.calls)
+			}
+		})
+	}
+}
+
+type anthropicPostCommitFailureStream struct {
+	calls int
+	err   error
+}
+
+func (s *anthropicPostCommitFailureStream) Next(context.Context) (provider.Event, error) {
+	s.calls++
+	if s.calls == 1 {
+		return provider.Event{Data: []byte(`{"type":"response.output_text.delta","delta":"hi"}`)}, nil
+	}
+	return provider.Event{}, s.err
+}
+
+func (*anthropicPostCommitFailureStream) Close() error      { return nil }
+func (*anthropicPostCommitFailureStream) Model() string     { return "grok-4.5" }
+func (*anthropicPostCommitFailureStream) AccountID() string { return "acct" }
+
+func TestMessagesPostCommitStreamFailureContract(t *testing.T) {
+	transform, _ := translate.NewRegistry().Get(registry.Anthropic)
+	for _, test := range []struct {
+		name      string
+		err       error
+		wantError bool
+	}{
+		{name: "failure", err: errors.New("sensitive upstream account token detail"), wantError: true},
+		{name: "classified cancellation", err: &routing.ExecutionError{Classified: provider.ErrorClassification{Class: provider.ClassCancelled}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stream := &anthropicPostCommitFailureStream{err: test.err}
+			handler := MessagesHandler{Transform: transform, OpenStream: func(context.Context, routing.Request) (api.RoutedStream, error) { return stream, nil }}
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok","messages":[{"role":"user","content":"hello"}],"stream":true}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("anthropic-version", "2023-06-01")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			body := response.Body.String()
+			want := "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"stream terminated\"}}\n\n"
+			if got := strings.Count(body, "event: error\n"); got != map[bool]int{false: 0, true: 1}[test.wantError] || (test.wantError && !strings.Contains(body, want)) {
+				t.Fatalf("stream body=%q", body)
+			}
+			for _, secret := range []string{"sensitive", "upstream account", "token detail"} {
+				if strings.Contains(body, secret) {
+					t.Fatalf("stream leaked %q: %q", secret, body)
+				}
 			}
 		})
 	}

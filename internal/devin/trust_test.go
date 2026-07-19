@@ -97,7 +97,10 @@ func TestInjectedDialContextCannotBypassTrustedDialerOrSendCredential(t *testing
 	resolver := resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 	})
-	client, err := NewClient(ClientConfig{HTTPClient: &http.Client{Transport: transport}, Resolver: resolver, AllowedChatHosts: []string{"chat.example.com"}, UnaryTimeout: time.Second, MaxCompressedBytes: 1024, MaxDecompressedBytes: 1024})
+	config := validTestClientConfig()
+	config.HTTPClient = &http.Client{Transport: transport}
+	config.Resolver = resolver
+	client, err := NewClient(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +137,9 @@ func TestInjectedTLSVerificationHooksCannotBypassHostnameOrSendCredential(t *tes
 			return nil
 		},
 	}
-	client, err := NewClient(ClientConfig{HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: injectedTLS}}, AllowedChatHosts: []string{"chat.example.com"}, UnaryTimeout: time.Second, MaxCompressedBytes: 1024, MaxDecompressedBytes: 1024})
+	config := validTestClientConfig()
+	config.HTTPClient = &http.Client{Transport: &http.Transport{TLSClientConfig: injectedTLS}}
+	client, err := NewClient(config)
 	if err != nil {
 		t.Fatal(err)
 	}

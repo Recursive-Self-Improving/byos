@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -208,4 +209,121 @@ func TestResponsesContinuationCarriesManagedAccountAffinity(t *testing.T) {
 			}
 		})
 	}
+}
+
+type responsesPostCommitFailureStream struct {
+	calls  int
+	cancel context.CancelFunc
+	err    error
+}
+
+func (s *responsesPostCommitFailureStream) Next(context.Context) (provider.Event, error) {
+	s.calls++
+	if s.calls == 1 {
+		return provider.Event{Data: []byte(`{"type":"response.output_text.delta","delta":"hi","sequence_number":7}`)}, nil
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.err != nil {
+		return provider.Event{}, s.err
+	}
+	return provider.Event{}, errors.New("sensitive upstream account token detail")
+}
+
+func (*responsesPostCommitFailureStream) Close() error      { return nil }
+func (*responsesPostCommitFailureStream) Model() string     { return "grok-4.5" }
+func (*responsesPostCommitFailureStream) AccountID() string { return "acct" }
+
+func TestResponsesPostCommitStreamFailureEmitsOneSanitizedError(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{32}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transform, _ := translate.NewRegistry().Get(registry.OpenAIResponses)
+	stream := &responsesPostCommitFailureStream{}
+	handler := ResponsesHandler{
+		Transform:  transform,
+		OpenStream: func(context.Context, routing.Request) (api.RoutedStream, error) { return stream, nil },
+		Sessions:   sessions.NewService(store.NewResponseRepository(database.DB, keys)),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"grok","input":"hello","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	want := "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"stream terminated\",\"param\":null,\"sequence_number\":8}\n\n"
+	if strings.Count(body, "event: error\n") != 1 || !strings.Contains(body, want) {
+		t.Fatalf("stream body=%q, want exactly one sanitized error event", body)
+	}
+	for _, secret := range []string{"sensitive", "upstream account", "token detail"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("stream leaked %q: %q", secret, body)
+		}
+	}
+}
+
+func TestResponsesPostCommitCancellationEmitsNoError(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{33}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transform, _ := translate.NewRegistry().Get(registry.OpenAIResponses)
+	for _, test := range []struct {
+		name    string
+		stream  *responsesPostCommitFailureStream
+		context context.Context
+	}{
+		{name: "classified", stream: &responsesPostCommitFailureStream{err: &routing.ExecutionError{Classified: provider.ErrorClassification{Class: provider.ClassCancelled}}}, context: context.Background()},
+		{name: "request context", context: func() context.Context {
+			requestContext, cancel := context.WithCancel(context.Background())
+			returnContext := requestContext
+			_ = returnContext
+			return requestContextWithCancelStream(requestContext, cancel)
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stream := test.stream
+			requestContext := test.context
+			if stream == nil {
+				cancelContext := requestContext.(*cancelStreamContext)
+				stream = &responsesPostCommitFailureStream{cancel: cancelContext.cancel}
+				requestContext = cancelContext.Context
+			}
+			handler := ResponsesHandler{
+				Transform:  transform,
+				OpenStream: func(context.Context, routing.Request) (api.RoutedStream, error) { return stream, nil },
+				Sessions:   sessions.NewService(store.NewResponseRepository(database.DB, keys)),
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"grok","input":"hello","stream":true}`)).WithContext(requestContext)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if body := response.Body.String(); strings.Contains(body, "event: error") || !strings.Contains(body, "response.output_text.delta") {
+				t.Fatalf("cancelled stream body=%q", body)
+			}
+		})
+	}
+}
+
+type cancelStreamContext struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+func requestContextWithCancelStream(ctx context.Context, cancel context.CancelFunc) context.Context {
+	return &cancelStreamContext{Context: ctx, cancel: cancel}
 }

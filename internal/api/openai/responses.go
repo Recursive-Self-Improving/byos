@@ -1,11 +1,14 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"byos/internal/api"
+	"byos/internal/provider"
 	"byos/internal/routing"
 	"byos/internal/sessions"
 	"byos/internal/translate/registry"
@@ -82,9 +85,24 @@ func (h ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher, _ := w.(http.Flusher)
 	var state registry.StreamState
+	committed := false
+	lastSequenceNumber := -1
 	for {
 		event, err := stream.Next(r.Context())
 		if err != nil {
+			if committed && r.Context().Err() == nil && !isStreamCancellation(err) {
+				chunk, _ := json.Marshal(struct {
+					Type           string `json:"type"`
+					Code           string `json:"code"`
+					Message        string `json:"message"`
+					Param          any    `json:"param"`
+					SequenceNumber int    `json:"sequence_number"`
+				}{Type: "error", Code: "server_error", Message: "stream terminated", SequenceNumber: lastSequenceNumber + 1})
+				_, _ = w.Write(registry.SSE("error", chunk))
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 			return
 		}
 		chunks, err := h.Transform.Stream(stream.Model(), body, event.Data, &state)
@@ -101,6 +119,12 @@ func (h ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, chunk := range chunks {
 			eventType := registry.JSONEventType(chunk)
 			_, _ = w.Write(registry.SSE(eventType, chunk))
+			if sequenceNumber, ok := responseSequenceNumber(chunk); ok {
+				lastSequenceNumber = sequenceNumber
+			}
+		}
+		if len(chunks) > 0 {
+			committed = true
 		}
 		if terminalEvent {
 			if flusher != nil {
@@ -126,4 +150,22 @@ func completedResponse(event []byte) (string, []byte) {
 	}
 	_ = json.Unmarshal(envelope.Response, &response)
 	return response.ID, envelope.Response
+}
+
+func isStreamCancellation(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	var execution *routing.ExecutionError
+	return errors.As(err, &execution) && execution.Classified.Class == provider.ClassCancelled
+}
+
+func responseSequenceNumber(event []byte) (int, bool) {
+	var envelope struct {
+		SequenceNumber *int `json:"sequence_number"`
+	}
+	if json.Unmarshal(event, &envelope) != nil || envelope.SequenceNumber == nil {
+		return 0, false
+	}
+	return *envelope.SequenceNumber, true
 }

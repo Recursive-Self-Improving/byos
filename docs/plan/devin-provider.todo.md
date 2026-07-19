@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–6 complete; C7.1 is current**. Chunk 6 provenance, minimal wire definitions, session normalization, per-chat bootstrap, chat-origin trust, canonical request building, tool-choice boundary evidence, and final hardening review are complete; the sequential commit was intentionally not created by this tracker-only closure.
+> Status: **Chunks 1–7 complete; C8.1 is current**. Chunk 7 bounded Connect framing, neutral stream mapping, one-stream buffered/streaming generation, commitment behavior, monotonic response sequencing, and exact once-only Devin usage accounting are complete; the sequential commit has not been created.
 >
-> Current next item: **C7.1 — Implement bounded Connect request/response framing**.
+> Current next item: **C8.1 — Make credential refresh workers provider-aware**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -47,6 +47,12 @@
 > Chunk 6 canonical/tool evidence (2026-07-19): the per-chat builder passes the selected Devin model UID unchanged, preserves ordered mixed history, system/cache behavior, inline images, thinking/signatures, tool calls/results and IDs, stops/default caps, and source planner/provider values, while rejecting remote image URLs and keeping prompts and credentials out of errors/logging. At the manual wire boundary, only current canonical choices are accepted: omitted/default and `auto` encode upstream `auto`, explicit `none` remains `none`, and a selected defined tool preserves its exact `tool_name`; `required`, malformed, unknown, and undefined selections fail deterministically. Every accepted request sets `disable_parallel_tool_calls=true`, and Devin never invokes xAI search policy or receives injected `x_search`. The C6.1 provenance hard gate and focused protocol/session/bootstrap/trust/builder/tool fixture gates passed; this tracker-only advancement did not rerun final gates or create the sequential commit.
 >
 > Chunk 6 final review and gate evidence (2026-07-19): final independent review was **CLEAN** after preserving developer/system message chronology and top-level system-prompt cache behavior, and after hardening custom TLS handling to retain only cloned root CAs in a TLS 1.2-or-newer configuration while stripping verification-bypass hooks, flags, and other unsafe supplied fields. `go test -count=1 ./internal/devin/...`; `go test -race -count=1 ./internal/devin/...`; `go test -count=1 ./...`; `git diff --check` — all passed after the final ordering and TLS-hook fixes. This tracker-only closure did not rerun gates or create the sequential commit.
+>
+> Chunk 7 transport, mapper, generation, and usage evidence (2026-07-19): C7.1–C7.4 are complete. Connect requests use gzip protobuf flag `0x01`, big-endian framing, and exact streaming headers; raw/gzip response frames and JSON trailers are decoded under validated compressed, decompressed, total-stream, tool-argument, buffered-response, idle, caller, and optional earlier total-deadline bounds. Clean EOF is accepted only at a fresh five-byte header boundary, including empty streams and EOF after complete frames; partial headers/payloads, malformed trailers/protobuf, invalid flags, oversize data, gzip bombs, cancellation, and deadline failures remain deterministic and sanitized. The mapper preserves ordered text, reasoning/signature, tool-call, actual-model, stop, usage, and completion events; incremental and cumulative tool arguments do not duplicate. Final mapper fixes keep the first stable response/message identity, the latest non-empty reasoning signature, deterministic terminal output, the reasoning-to-text boundary, explicit-stop precedence, and checked token conversions/addition so uint64 or total-token overflow is rejected rather than wrapped.
+>
+> Chunk 7 status/error, commitment, and accounting record (2026-07-19): Devin status classification now covers 400/404 as validation; 401/403 as unauthorized with `RetryNext`, `RefreshSame`, account disable/relogin-required, and account-scoped cooldown; 408 and 500/502/503/504 as transient retry with model-scoped cooldown; 429 as rate limit with bounded delta-seconds or HTTP-date `Retry-After`; and all other statuses as sanitized upstream failures. One upstream stream backs both streaming and bounded non-stream output, so non-stream makes no second call. Pre-first-event failures remain eligible for provider-local failover, while post-commit failures never replay: OpenAI Responses emits exactly one sanitized error event with the next observed sequence number, Anthropic emits exactly one sanitized `api_error`, and classified/request cancellation emits no synthetic error. Terminal Devin usage maps input, output, cache-read, and total=`input+output` exactly once to the selected account through existing detached accounting; repeated/close paths do not double-count, actual model remains separate, and no cache-write, credit, ACU, quota, pricing, analytics, discovery, capacity, or usage-submission RPC work was added.
+>
+> Chunk 7 final review, gate, and scope evidence (2026-07-19): independent mapper-sequence re-review was **CLEAN** after native Devin Responses events were proven to emit contiguous monotonic `sequence_number` values `0..N` and a post-commit sanitized error to emit exactly the next value `N+1`. `go test -count=1 ./internal/devin ./internal/routing ./internal/provider ./internal/usage ./internal/api/openai ./internal/api/anthropic`; `go test -race -count=1 ./internal/devin ./internal/routing ./internal/usage`; and `git diff --check` passed. The first `go test -count=1 ./...` run hit the known isolated xAI `TestIdentityVerifierAndKeyRotation` flake; `go test -count=1 ./internal/oauth/xai -run '^TestIdentityVerifierAndKeyRotation$'` passed on isolated rerun, and a subsequent `go test -count=1 ./...` passed. Independent commit-scope accounting was **CLEAN/C7-only**: the delta is confined to Devin Connect framing, mapping, generation, client limits/status classification, their tests, and the C7.3-required OpenAI Responses/Anthropic post-commit SSE bridges and tests; no account/model/usage worker, runtime composition, optional discovery/statistics/quota, C8, or C9 work is included. This tracker-only closure did not rerun gates or create the sequential commit.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -332,7 +338,7 @@
   - Observable DoD: provenance is recorded; bootstrap and request building are bounded and credential-safe; no streaming, optional discovery, capacity, analytics, or quota code is mixed into this chunk.
   - Sequential commit: `feat(devin): add session bootstrap and request builder`.
 
-- [ ] **C7.1 — Implement bounded Connect request/response framing**
+- [x] **C7.1 — Implement bounded Connect request/response framing**
   - Chunk owner: **Chunk 7 — Devin Connect stream, neutral events, and per-response usage**.
   - Depends on: C6.7.
   - Files: `internal/devin/stream_client.go`, transport tests.
@@ -340,7 +346,7 @@
   - Observable DoD: invalid config cannot reach transport; truncated/oversized/invalid flags, gzip bombs, malformed protobuf/trailers, cancellation, idle timeout, caller deadline, and explicitly configured total deadline fail deterministically without unbounded allocation or raw-body errors; no default adapter deadline truncates an otherwise-live caller stream.
   - Verification: byte-level framing plus adversarial boundary, decompression, truncation, idle, caller-cancellation/deadline, disabled-total-deadline, and explicit-total-deadline tests for every locked setting.
 
-- [ ] **C7.2 — Map Devin stream responses to neutral events**
+- [x] **C7.2 — Map Devin stream responses to neutral events**
   - Chunk owner: **Chunk 7**.
   - Depends on: C7.1.
   - Files: stream mapper and tests.
@@ -348,7 +354,7 @@
   - Observable DoD: multi-frame output preserves event order; explicit stop wins and mapper finalization remains source-compatible; empty clean EOF and clean EOF after any complete-frame sequence succeed; partial header/payload returns a sanitized truncation error; no event is emitted twice.
   - Verification: raw/gzip multi-frame, cumulative/delta, explicit/inferred stop, empty EOF, EOF between complete frames, partial-header, partial-payload, malformed-trailer, and stop-reason fixtures.
 
-- [ ] **C7.3 — Integrate stream commitment and buffered non-stream behavior**
+- [x] **C7.3 — Integrate stream commitment and buffered non-stream behavior**
   - Chunk owner: **Chunk 7**.
   - Depends on: C7.2.
   - Files: Devin generation adapter, shared routed stream tests, public generation fixtures.
@@ -356,7 +362,7 @@
   - Observable DoD: non-stream performs no second/upstream non-stream call; pre-first-event failure can fail over within Devin accounts; post-first-event failure never replays on another account.
   - Verification: first-event flush timing, pre/post-commit error, cancellation, and buffered response tests.
 
-- [ ] **C7.4 — Map and record per-response Devin usage exactly once**
+- [x] **C7.4 — Map and record per-response Devin usage exactly once**
   - Chunk owner: **Chunk 7**.
   - Depends on: C7.3.
   - Files: stream mapper, routing/local usage integration tests.
@@ -364,7 +370,7 @@
   - Observable DoD: repeated usage frames or close paths do not double-count; incomplete/terminal usage follows existing semantics; actual model is preserved separately; no usage-submission RPC occurs.
   - Verification: repeated-frame, cache-write exclusion, incomplete stream, cancellation, failover, and local-counter persistence tests.
 
-- [ ] **C7.5 — Review and commit Chunk 7**
+- [x] **C7.5 — Review and commit Chunk 7**
   - Chunk owner: **Chunk 7**.
   - Depends on: C7.4.
   - Observable DoD: transport limits, event order, commitment, usage, and secret-free failures are proven; no optional discovery/statistics work is included.
