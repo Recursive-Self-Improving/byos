@@ -9,8 +9,8 @@
 {{if not .Flow}}
 <section class="flow-panel">
   <h2>Start a secure device flow</h2>
-  <p>BYOS will display the xAI verification link and user code. OAuth tokens never appear in this page.</p>
-  <form method="post" action="/admin/oauth/new">
+    <p>SuperGrok will display a verification link and user code. OAuth tokens never appear in this page.</p>
+    <form method="post" action="/admin/oauth/new">
     {{.CSRFField}}
     <button class="button button-primary" type="submit">Start connection</button>
   </form>

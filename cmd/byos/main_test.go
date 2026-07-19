@@ -22,7 +22,7 @@ func TestVersionCommand(t *testing.T) {
 	if err := runWith(context.Background(), []string{"version"}, deps); err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := "byos " + version + " (commit " + commit + ", built " + buildDate + ", grok-client "
+	wantPrefix := "byos " + version + " (commit " + commit + ", built " + buildDate
 	if !strings.HasPrefix(output.String(), wantPrefix) {
 		t.Fatalf("output=%q, want prefix %q", output.String(), wantPrefix)
 	}

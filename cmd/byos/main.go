@@ -42,7 +42,7 @@ func runWith(parent context.Context, args []string, deps dependencies) error {
 		if len(args) != 1 {
 			return errors.New("usage: byos version")
 		}
-		_, err := fmt.Fprintf(deps.stdout, "byos %s (commit %s, built %s, grok-client %s)\n", version, commit, buildDate, config.DefaultGrokClientVersion)
+		_, err := fmt.Fprintf(deps.stdout, "byos %s (commit %s, built %s)\n", version, commit, buildDate)
 		return err
 	case "serve", "login":
 		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
