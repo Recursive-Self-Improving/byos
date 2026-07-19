@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–5 complete; C6.1 is current**. Chunk 5 implementation, focused, race, full-suite, diff, and final independent-review/arbitration gates passed; the sequential commit has not been created.
+> Status: **Chunks 1–6 complete; C7.1 is current**. Chunk 6 provenance, minimal wire definitions, session normalization, per-chat bootstrap, chat-origin trust, canonical request building, tool-choice boundary evidence, and final hardening review are complete; the sequential commit was intentionally not created by this tracker-only closure.
 >
-> Current next item: **C6.1 — Verify provenance and add only required Devin protocol definitions**.
+> Current next item: **C7.1 — Implement bounded Connect request/response framing**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -39,6 +39,14 @@
 > Chunk 5 secret/replay evidence and final gates (2026-07-19): persistence matrices and raw DB/WAL/SHM scans prove raw state, callback code, plaintext token, and returned verifier are not durable; pending verifier/redirect material is encrypted, consume returns the verifier only in memory and disposes pending-secret access, and terminal sessions are secret-free and immutable. Wrong provider/flow, unknown, expired, cancelled, replayed, completed, failed, and missing-verifier attempts make zero exchange calls. CredentialManager tests prove valid Devin credentials are returned with zero refresh calls, naturally expired credentials durably transition the account to disabled/relogin-required, and upstream 401/403 mark relogin-required with zero refresh calls. Final gates passed: `go test -count=1 ./internal/oauth/devin ./internal/store ./internal/provider ./internal/accounts ./internal/oauth/xai ./internal/app ./internal/api/admin ./cmd/byos`; `go test -race -count=1 ./internal/oauth/devin ./internal/store ./internal/accounts`; `go test -count=1 ./...`; `git diff --check`. This tracker-only closure did not rerun gates or create the sequential commit.
 >
 > Chunk 5 final independent certification and arbitration (2026-07-19): atomic-store review **CLEAN**; composition/accounting review **CLEAN**; OAuth implementation review was **CLEAN** except for a proposed production registration of the implemented and tested Devin `CredentialManager`. Two independent arbiters discarded that finding as premature: C5 authoritatively requires lifecycle-only Devin runtime registration, the registry requires the generation capability trio `Policy` + `Generation` + `Credentials` all-or-none, and registering Credentials alone would invalidate startup while placeholder generation capabilities would violate chunk boundaries. The manager therefore remains intentionally unregistered for later composition with the real trio under C9; C5.1–C5.6 are complete.
+>
+> Chunk 6 provenance and protocol-boundary record (2026-07-19): C6.1–C6.6 are complete. The Devin wire boundary is intentionally hand-written with `google.golang.org/protobuf/encoding/protowire`; field numbers and the two required RPC paths were manually adapted from the MIT-licensed `can1357/oh-my-pi` protobuf sources at revision `fc01e3b6cba6e1add44a1613baa891a9b873f8a9`. `internal/devin/proto/proto.go` names the exact four source `.proto` files and `THIRD_PARTY_NOTICES` carries the project, revision, URL, copyright, and MIT permission notice.
+>
+> Chunk 6 bootstrap, trust, and request evidence (2026-07-19): session metadata trims whitespace, collapses repeated `devin-session-token$` prefixes to exactly one, rejects empty/prefix-only input, and retains only source Windsurf constants. Every `PrepareChatRequest` performs a fresh uncached `GetUserJwt`, keeps the returned JWT request-local, accepts bounded raw/gzip unary responses, rejects empty JWTs, refuses redirects, and maps 401/403 to relogin-required without xAI refresh. The bootstrap origin remains the validated default `https://server.codeium.com`; the returned chat-only origin must be an allowlisted absolute HTTPS origin with no userinfo, port, path, query, fragment, or IP literal, and every connection re-resolves and dials only validated public addresses through the trusted dialer. Caller-supplied transports cannot bypass that dialer or release credentials to an untrusted origin.
+>
+> Chunk 6 canonical/tool evidence (2026-07-19): the per-chat builder passes the selected Devin model UID unchanged, preserves ordered mixed history, system/cache behavior, inline images, thinking/signatures, tool calls/results and IDs, stops/default caps, and source planner/provider values, while rejecting remote image URLs and keeping prompts and credentials out of errors/logging. At the manual wire boundary, only current canonical choices are accepted: omitted/default and `auto` encode upstream `auto`, explicit `none` remains `none`, and a selected defined tool preserves its exact `tool_name`; `required`, malformed, unknown, and undefined selections fail deterministically. Every accepted request sets `disable_parallel_tool_calls=true`, and Devin never invokes xAI search policy or receives injected `x_search`. The C6.1 provenance hard gate and focused protocol/session/bootstrap/trust/builder/tool fixture gates passed; this tracker-only advancement did not rerun final gates or create the sequential commit.
+>
+> Chunk 6 final review and gate evidence (2026-07-19): final independent review was **CLEAN** after preserving developer/system message chronology and top-level system-prompt cache behavior, and after hardening custom TLS handling to retain only cloned root CAs in a TLS 1.2-or-newer configuration while stripping verification-bypass hooks, flags, and other unsafe supplied fields. `go test -count=1 ./internal/devin/...`; `go test -race -count=1 ./internal/devin/...`; `go test -count=1 ./...`; `git diff --check` — all passed after the final ordering and TLS-hook fixes. This tracker-only closure did not rerun gates or create the sequential commit.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -270,7 +278,7 @@
   - Observable DoD: Devin OAuth service is fully testable but not yet exposed by runtime routes; callback origin/path, exchange policy, code non-persistence, atomic in-memory-verifier consume, exclusive consumed finalization, immutable final states, and atomic account-plus-completion commit with failure-to-failed behavior are explicit; no plaintext file store or refresh fiction exists.
   - Sequential commit: `feat(devin): add encrypted callback oauth lifecycle`.
 
-- [ ] **C6.1 — Verify provenance and add only required Devin protocol definitions**
+- [x] **C6.1 — Verify provenance and add only required Devin protocol definitions**
   - Chunk owner: **Chunk 6 — Devin protocol bootstrap and request builder**.
   - Depends on: C5.6.
   - Files: license/notice inventory and `internal/devin/proto` generated/minimal definitions.
@@ -278,7 +286,7 @@
   - Observable DoD: source and generated-code notices satisfy repository policy; required symbols compile; no unsupported protocol surface is imported.
   - Verification: source-to-symbol inventory review. This item is a hard gate: do not proceed with copied/generated code if provenance is unresolved.
 
-- [ ] **C6.2 — Implement Devin session-token normalization and unary metadata**
+- [x] **C6.2 — Implement Devin session-token normalization and unary metadata**
   - Chunk owner: **Chunk 6**.
   - Depends on: C6.1.
   - Files: create `internal/devin` client/metadata files and tests.
@@ -286,7 +294,7 @@
   - Observable DoD: bare, once-prefixed, repeatedly prefixed, whitespace, and empty cases behave exactly; errors/logs never include the token.
   - Verification: table tests and captured protobuf metadata.
 
-- [ ] **C6.3 — Implement per-request GetUserJwt bootstrap**
+- [x] **C6.3 — Implement per-request GetUserJwt bootstrap**
   - Chunk owner: **Chunk 6**.
   - Depends on: C6.2.
   - Files: `internal/devin` unary client/transport tests.
@@ -294,7 +302,7 @@
   - Observable DoD: default runtime base is `https://server.codeium.com`; redirects are refused; request/response/decompression sizes and time are bounded; 401/403 map to relogin-required without calling xAI refresh.
   - Verification: raw/gzip, empty JWT, status, timeout, cancellation, redirect, oversized body, and malformed protobuf fixtures.
 
-- [ ] **C6.4 — Enforce the custom chat-base trust policy**
+- [x] **C6.4 — Enforce the custom chat-base trust policy**
   - Chunk owner: **Chunk 6**.
   - Depends on: C6.3.
   - Files: Devin URL validator/dial transport/config tests.
@@ -302,7 +310,7 @@
   - Observable DoD: unlisted host, IP literal, userinfo, path/query/fragment, HTTP, loopback/private/link-local resolution, redirect, and DNS rebinding fixture are rejected before sending session token or user JWT. Empty custom base falls back to the validated default.
   - Verification: URL and controlled resolver/dialer tests prove credentials reach only an allowed public HTTPS endpoint.
 
-- [ ] **C6.5 — Build canonical Devin chat requests**
+- [x] **C6.5 — Build canonical Devin chat requests**
   - Chunk owner: **Chunk 6**.
   - Depends on: C6.4.
   - Files: `internal/devin/chat_builder.go` and focused tests.
@@ -310,7 +318,7 @@
   - Observable DoD: each required Devin model reaches the wire unchanged; mixed history produces the expected protobuf; deterministic IDs are stable for structural inputs; no prompt or credential is logged.
   - Verification: source-equivalent request-builder fixture matrix.
 
-- [ ] **C6.6 — Preserve Devin tool-choice semantics at the wire boundary**
+- [x] **C6.6 — Preserve Devin tool-choice semantics at the wire boundary**
   - Chunk owner: **Chunk 6**.
   - Depends on: C6.5.
   - Files: Devin builder tests and canonical validation seams.
@@ -318,7 +326,7 @@
   - Observable DoD: none/auto/selected values are unchanged from canonical request to captured Devin protobuf; every case sets parallel tools disabled.
   - Verification: table tests covering all three public translators' canonical outputs and invalid selected-tool cases.
 
-- [ ] **C6.7 — Review and commit Chunk 6**
+- [x] **C6.7 — Review and commit Chunk 6**
   - Chunk owner: **Chunk 6**.
   - Depends on: C6.6.
   - Observable DoD: provenance is recorded; bootstrap and request building are bounded and credential-safe; no streaming, optional discovery, capacity, analytics, or quota code is mixed into this chunk.
