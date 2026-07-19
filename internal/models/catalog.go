@@ -80,20 +80,15 @@ type CapabilityStore interface {
 	MarkStale(context.Context, string) error
 }
 
-type Discoverer interface {
-	Discover(context.Context, string) ([]Model, error)
-}
-
 type Catalog struct {
 	repository CapabilityStore
-	discoverer Discoverer
 	allowlist  []string
 	allowed    map[string]struct{}
 	aliases    map[string]string
 	now        func() time.Time
 }
 
-func NewCatalog(repository CapabilityStore, discoverer Discoverer, allowlist []string, aliases map[string]string) *Catalog {
+func NewCatalog(repository CapabilityStore, allowlist []string, aliases map[string]string) *Catalog {
 	copyAllowlist := append([]string(nil), allowlist...)
 	allowed := make(map[string]struct{}, len(copyAllowlist))
 	for _, model := range copyAllowlist {
@@ -103,7 +98,7 @@ func NewCatalog(repository CapabilityStore, discoverer Discoverer, allowlist []s
 	for alias, target := range aliases {
 		copyAliases[alias] = target
 	}
-	return &Catalog{repository: repository, discoverer: discoverer, allowlist: copyAllowlist, allowed: allowed, aliases: copyAliases, now: time.Now}
+	return &Catalog{repository: repository, allowlist: copyAllowlist, allowed: allowed, aliases: copyAliases, now: time.Now}
 }
 
 func (c *Catalog) Resolve(model string) (string, bool) {
@@ -114,8 +109,30 @@ func (c *Catalog) Resolve(model string) (string, bool) {
 	return model, ok
 }
 
-func (c *Catalog) Refresh(ctx context.Context, accountID, token string) ([]Model, error) {
-	models, err := c.discoverer.Discover(ctx, token)
+// ApplyDiscovery normalizes a provider discovery result before persisting it.
+func (c *Catalog) ApplyDiscovery(ctx context.Context, accountID string, discovered []provider.DiscoveredModel, discoveryErr error) ([]Model, error) {
+	models := make([]Model, 0, len(discovered))
+	for _, model := range discovered {
+		var supportsSearch *bool
+		if model.SupportsBackendSearch != nil {
+			value := *model.SupportsBackendSearch
+			supportsSearch = &value
+		}
+		models = append(models, Model{
+			ID: model.UpstreamName, DisplayName: model.DisplayName,
+			SupportsBackendSearch: supportsSearch, ContextWindow: model.ContextWindow,
+			MaxOutputTokens:  model.MaxOutputTokens,
+			ReasoningEfforts: append([]string(nil), model.ReasoningEfforts...),
+		})
+	}
+	return c.RefreshFromModels(ctx, accountID, models, discoveryErr)
+}
+
+// RefreshFromModels applies a normalized discovery result. Failed discovery
+// retains the previous snapshot, marks it stale, and returns that snapshot
+// together with the discovery error.
+func (c *Catalog) RefreshFromModels(ctx context.Context, accountID string, models []Model, discoveryErr error) ([]Model, error) {
+	err := discoveryErr
 	if err != nil {
 		if staleErr := c.repository.MarkStale(ctx, accountID); staleErr != nil {
 			return nil, errors.Join(err, staleErr)

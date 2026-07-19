@@ -13,7 +13,7 @@ import (
 
 	"byos/internal/app"
 	"byos/internal/config"
-	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 )
 
 var version = "dev"
@@ -94,18 +94,18 @@ func login(ctx context.Context, runtime *app.Runtime, output io.Writer) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(output, "Open %s\nCode: %s\nWaiting for authorization...\n", verificationURL(authorization), authorization.UserCode)
-	account, err := runtime.Accounts.CompleteLogin(ctx, authorization.State)
+	account, err := runtime.Accounts.CompleteLogin(ctx, authorization.Ref.State)
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(output, "Account connected: %s\n", account.ID)
 	return err
 }
-func verificationURL(authorization oauthxai.DeviceAuthorization) string {
-	if authorization.VerificationURIComplete != "" {
-		return authorization.VerificationURIComplete
+func verificationURL(authorization provider.Authorization) string {
+	if authorization.VerificationURLComplete != "" {
+		return authorization.VerificationURLComplete
 	}
-	return authorization.VerificationURI
+	return authorization.VerificationURL
 }
 
 func main() {

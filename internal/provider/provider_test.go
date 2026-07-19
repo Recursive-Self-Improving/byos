@@ -6,9 +6,12 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestKindValidationAndParsing(t *testing.T) {
@@ -155,6 +158,27 @@ func (fakeCredentials) CredentialUsable(context.Context, string) (bool, error) {
 	return true, nil
 }
 
+type fakeCredentialRefresher struct{}
+
+func (fakeCredentialRefresher) NeedsRefresh(context.Context, string, time.Time) (bool, error) {
+	return true, nil
+}
+func (fakeCredentialRefresher) Refresh(context.Context, string) error { return nil }
+
+type fakeLifecycle struct{}
+
+func (fakeLifecycle) Start(context.Context) (Authorization, error) {
+	return Authorization{Ref: AuthorizationRef{Provider: XAI}}, nil
+}
+func (fakeLifecycle) Status(context.Context, AuthorizationRef) (AuthorizationSession, error) {
+	return AuthorizationSession{}, nil
+}
+func (fakeLifecycle) Complete(context.Context, AuthorizationRef) (AccountResult, error) {
+	return AccountResult{Provider: XAI}, nil
+}
+func (fakeLifecycle) Cancel(context.Context, AuthorizationRef) error         { return nil }
+func (fakeLifecycle) Resume(context.Context) ([]AuthorizationSession, error) { return nil, nil }
+
 type fakeDiscoverer struct{}
 
 func (fakeDiscoverer) Discover(context.Context, Credential) ([]DiscoveredModel, error) {
@@ -177,16 +201,38 @@ func (f fakeRegistry) Capabilities(Kind, string) (Capabilities, bool) {
 	return f.capabilities, true
 }
 
+type fakeLifecycleRegistry struct{ lifecycle AccountLifecycle }
+
+func (f fakeLifecycleRegistry) Lifecycle(Kind, string) (AccountLifecycle, bool) {
+	if f.lifecycle == nil {
+		return nil, false
+	}
+	return f.lifecycle, true
+}
+
+type fakeCredentialRefreshRegistry struct{ refresher CredentialRefresher }
+
+func (f fakeCredentialRefreshRegistry) CredentialRefresher(Kind, string) (CredentialRefresher, bool) {
+	if f.refresher == nil {
+		return nil, false
+	}
+	return f.refresher, true
+}
+
 var (
-	_ RequestPolicy       = (*fakePolicy)(nil)
-	_ GenerationClient    = (*fakeClient)(nil)
-	_ Stream              = (*fakeStream)(nil)
-	_ CredentialManager   = fakeCredentials{}
-	_ CredentialUsability = fakeCredentials{}
-	_ ModelDiscoverer     = fakeDiscoverer{}
-	_ UsageFetcher        = fakeUsageFetcher{}
-	_ ModelCatalog        = fakeCatalog{}
-	_ CapabilityRegistry  = fakeRegistry{}
+	_ RequestPolicy             = (*fakePolicy)(nil)
+	_ GenerationClient          = (*fakeClient)(nil)
+	_ Stream                    = (*fakeStream)(nil)
+	_ CredentialManager         = fakeCredentials{}
+	_ CredentialUsability       = fakeCredentials{}
+	_ CredentialRefresher       = fakeCredentialRefresher{}
+	_ AccountLifecycle          = fakeLifecycle{}
+	_ ModelDiscoverer           = fakeDiscoverer{}
+	_ UsageFetcher              = fakeUsageFetcher{}
+	_ ModelCatalog              = fakeCatalog{}
+	_ CapabilityRegistry        = fakeRegistry{}
+	_ LifecycleRegistry         = fakeLifecycleRegistry{}
+	_ CredentialRefreshRegistry = fakeCredentialRefreshRegistry{}
 )
 
 func TestOptionalCapabilitiesAreAbsentRatherThanNoOps(t *testing.T) {
@@ -196,8 +242,39 @@ func TestOptionalCapabilitiesAreAbsentRatherThanNoOps(t *testing.T) {
 		Generation:  &fakeClient{},
 		Credentials: fakeCredentials{},
 	}
-	if capabilities.ModelDiscoverer != nil || capabilities.UsageFetcher != nil {
+	if capabilities.CredentialRefresher != nil || capabilities.Lifecycle != nil || capabilities.ModelDiscoverer != nil || capabilities.UsageFetcher != nil {
 		t.Fatal("optional capabilities must be representable by nil")
+	}
+}
+
+func TestLifecycleResultsExposeSafeNormalizedFieldsOnly(t *testing.T) {
+	t.Parallel()
+	for _, value := range []any{AuthorizationRef{}, Authorization{}, AuthorizationSession{}, AccountResult{}} {
+		typeOf := reflect.TypeOf(value)
+		for _, forbidden := range []string{"DeviceCode", "AccessToken", "RefreshToken", "IDToken", "Verifier", "Subject", "Email", "Raw"} {
+			if _, ok := typeOf.FieldByName(forbidden); ok {
+				t.Fatalf("%s exposes forbidden field %s", typeOf, forbidden)
+			}
+		}
+	}
+
+	want := []AuthorizationStatus{AuthorizationPending, AuthorizationAuthorized, AuthorizationConsumed, AuthorizationCompleted, AuthorizationFailed, AuthorizationExpired, AuthorizationCancelled}
+	seen := make(map[AuthorizationStatus]bool, len(want))
+	for _, status := range want {
+		if status == "" || seen[status] {
+			t.Fatalf("invalid normalized authorization status %q", status)
+		}
+		seen[status] = true
+	}
+}
+
+func TestProviderMismatchErrorIsTypedAndSecretFree(t *testing.T) {
+	wrapped := fmt.Errorf("authorization lookup: %w", ErrProviderMismatch)
+	if !errors.Is(wrapped, ErrProviderMismatch) {
+		t.Fatal("provider mismatch must remain classifiable through wrapping")
+	}
+	if strings.Contains(wrapped.Error(), "credential-sentinel") {
+		t.Fatal("provider mismatch error exposed credential material")
 	}
 }
 

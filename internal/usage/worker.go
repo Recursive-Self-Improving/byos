@@ -6,15 +6,16 @@ import (
 	"sync"
 	"time"
 
+	"byos/internal/provider"
 	"byos/internal/store"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )
 
 type Account struct {
-	ID          string
-	AccessToken string
-	Enabled     bool
+	ID       string
+	Provider provider.Kind
+	Enabled  bool
 }
 
 type StoreAccountProvider struct {
@@ -35,7 +36,7 @@ func (p *StoreAccountProvider) UsageAccounts(ctx context.Context) ([]Account, er
 	}
 	result := make([]Account, 0, len(values))
 	for _, value := range values {
-		result = append(result, Account{ID: value.ID, AccessToken: value.Credentials.AccessToken, Enabled: value.Enabled})
+		result = append(result, Account{ID: value.ID, Provider: value.Provider, Enabled: value.Enabled})
 	}
 	return result, nil
 }
@@ -43,22 +44,23 @@ func (p *StoreAccountProvider) UsageAccounts(ctx context.Context) ([]Account, er
 type AccountProvider interface {
 	UsageAccounts(context.Context) ([]Account, error)
 }
-type UsageRefresher interface {
-	Refresh(context.Context, string, string) (Snapshot, error)
+type UsageApplier interface {
+	ApplyUsage(context.Context, string, provider.UsageSnapshot, error) (Snapshot, error)
 }
 
 type Worker struct {
-	accounts  AccountProvider
-	refresher UsageRefresher
-	interval  time.Duration
-	timeout   time.Duration
-	group     singleflight.Group
-	limiter   chan struct{}
-	mu        sync.RWMutex
-	status    map[string]RefreshStatus
+	accounts AccountProvider
+	registry provider.CapabilityRegistry
+	applier  UsageApplier
+	interval time.Duration
+	timeout  time.Duration
+	group    singleflight.Group
+	limiter  chan struct{}
+	mu       sync.RWMutex
+	status   map[string]RefreshStatus
 }
 
-func NewWorker(accounts AccountProvider, refresher UsageRefresher, interval, timeout time.Duration, concurrency int) *Worker {
+func NewWorker(accounts AccountProvider, registry provider.CapabilityRegistry, applier UsageApplier, interval, timeout time.Duration, concurrency int) *Worker {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
@@ -68,11 +70,18 @@ func NewWorker(accounts AccountProvider, refresher UsageRefresher, interval, tim
 	if concurrency <= 0 {
 		concurrency = 4
 	}
-	return &Worker{accounts: accounts, refresher: refresher, interval: interval, timeout: timeout, limiter: make(chan struct{}, concurrency), status: make(map[string]RefreshStatus)}
+	return &Worker{accounts: accounts, registry: registry, applier: applier, interval: interval, timeout: timeout, limiter: make(chan struct{}, concurrency), status: make(map[string]RefreshStatus)}
 }
 
 func (w *Worker) RefreshAccount(ctx context.Context, account Account) error {
 	if !account.Enabled {
+		return nil
+	}
+	if w.registry == nil {
+		return nil
+	}
+	capabilities, ok := w.registry.Capabilities(account.Provider, string(account.Provider))
+	if !ok || capabilities.UsageFetcher == nil || capabilities.Credentials == nil {
 		return nil
 	}
 	result := w.group.DoChan(account.ID, func() (any, error) {
@@ -88,9 +97,16 @@ func (w *Worker) RefreshAccount(ctx context.Context, account Account) error {
 			status.LastAttempt = attempt
 			status.Refreshing = true
 		})
-		refreshCtx, cancel := context.WithTimeout(ctx, w.timeout)
-		defer cancel()
-		_, err := w.refresher.Refresh(refreshCtx, account.ID, account.AccessToken)
+		refreshCtx, cancelRefresh := context.WithTimeout(ctx, w.timeout)
+		credential, fetchErr := capabilities.Credentials.Credential(refreshCtx, account.ID)
+		var observation provider.UsageSnapshot
+		if fetchErr == nil {
+			observation, fetchErr = capabilities.UsageFetcher.FetchUsage(refreshCtx, credential)
+		}
+		cancelRefresh()
+		persistCtx, cancelPersist := context.WithTimeout(ctx, w.timeout)
+		_, err := w.applier.ApplyUsage(persistCtx, account.ID, observation, fetchErr)
+		cancelPersist()
 		w.setStatus(account.ID, func(status *RefreshStatus) {
 			status.Refreshing = false
 			status.Stale = err != nil

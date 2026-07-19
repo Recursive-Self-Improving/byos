@@ -143,9 +143,16 @@ type Credential struct {
 // CredentialUsability projects whether an account can yield a credential when
 // selected, without returning credential material or performing a refresh.
 // Routing may use this optional pre-scheduler check to exclude unusable
-// accounts; Credential remains the only operation allowed to refresh.
+// accounts.
 type CredentialUsability interface {
 	CredentialUsable(context.Context, string) (bool, error)
+}
+
+// CredentialRefresher exposes explicit provider-bound refresh operations without
+// returning credential material or expiry metadata to shared callers.
+type CredentialRefresher interface {
+	NeedsRefresh(context.Context, string, time.Time) (bool, error)
+	Refresh(context.Context, string) error
 }
 
 // CredentialManager obtains usable credentials and performs provider-specific
@@ -155,6 +162,68 @@ type CredentialUsability interface {
 type CredentialManager interface {
 	Credential(context.Context, string) (Credential, error)
 	AuthenticationFailed(context.Context, string, *UpstreamError) error
+}
+
+var ErrProviderMismatch = errors.New("provider mismatch")
+
+// AuthorizationStatus is the normalized state of a provider authorization
+// session. Providers may support only the states applicable to their flow.
+type AuthorizationStatus string
+
+const (
+	AuthorizationPending    AuthorizationStatus = "pending"
+	AuthorizationAuthorized AuthorizationStatus = "authorized"
+	AuthorizationConsumed   AuthorizationStatus = "consumed"
+	AuthorizationCompleted  AuthorizationStatus = "completed"
+	AuthorizationFailed     AuthorizationStatus = "failed"
+	AuthorizationExpired    AuthorizationStatus = "expired"
+	AuthorizationCancelled  AuthorizationStatus = "cancelled"
+)
+
+// AuthorizationRef binds every lifecycle operation to a provider before an
+// implementation reads persisted state or performs network I/O.
+type AuthorizationRef struct {
+	Provider Kind
+	State    string
+}
+
+// Authorization contains only values safe to return to a caller starting an
+// authorization flow. Provider codes, tokens, PKCE verifiers, and verified
+// identity claims must remain behind the lifecycle implementation.
+type Authorization struct {
+	Ref                     AuthorizationRef
+	UserCode                string
+	VerificationURL         string
+	VerificationURLComplete string
+	ExpiresAt               time.Time
+	PollInterval            time.Duration
+}
+
+// AuthorizationSession is the safe, normalized projection of a persisted
+// authorization session. SanitizedMessage must never contain an upstream body,
+// credential, identity claim, or storage detail.
+type AuthorizationSession struct {
+	Authorization
+	Status           AuthorizationStatus
+	AccountID        string
+	SanitizedMessage string
+}
+
+// AccountResult identifies the account produced by successful authorization.
+// Account credentials and verified identity claims deliberately remain absent.
+type AccountResult struct {
+	Provider  Kind
+	AccountID string
+}
+
+// AccountLifecycle is an optional provider-bound authorization capability.
+// Implementations own protocol-specific state, secrets, and persistence.
+type AccountLifecycle interface {
+	Start(context.Context) (Authorization, error)
+	Status(context.Context, AuthorizationRef) (AuthorizationSession, error)
+	Complete(context.Context, AuthorizationRef) (AccountResult, error)
+	Cancel(context.Context, AuthorizationRef) error
+	Resume(context.Context) ([]AuthorizationSession, error)
 }
 
 // DiscoveredModel is a provider discovery result. Discovery is an optional
@@ -173,10 +242,29 @@ type ModelDiscoverer interface {
 }
 
 // UsageSnapshot is optional provider account/quota usage. Per-response token
-// usage is reported through Event.Usage instead.
+// usage is reported through Event.Usage instead. Monthly and Weekly are
+// normalized provider-neutral windows; Raw is the bounded provider response
+// retained for diagnostics and FetchedAt is the provider observation time.
 type UsageSnapshot struct {
+	Monthly   *MonthlyUsage
+	Weekly    *WeeklyUsage
 	FetchedAt time.Time
 	Raw       []byte
+}
+
+type MonthlyUsage struct {
+	Limit     float64
+	Used      float64
+	Remaining float64
+	ResetAt   time.Time
+}
+
+type WeeklyUsage struct {
+	UsedPercent      float64
+	RemainingPercent float64
+	ResetAt          time.Time
+	OnDemand         *float64
+	Prepaid          *float64
 }
 
 type UsageFetcher interface {
@@ -236,14 +324,17 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("%s upstream returned HTTP %d", e.Provider, e.Status)
 }
 
-// Capabilities are runtime implementations only. Discoverer and UsageFetcher
-// are optional and remain nil when unsupported.
+// Capabilities are runtime implementations only. CredentialRefresher,
+// Lifecycle, ModelDiscoverer, and UsageFetcher are optional and remain nil when
+// unsupported.
 type Capabilities struct {
-	Policy          RequestPolicy
-	Generation      GenerationClient
-	Credentials     CredentialManager
-	ModelDiscoverer ModelDiscoverer
-	UsageFetcher    UsageFetcher
+	Policy              RequestPolicy
+	Generation          GenerationClient
+	Credentials         CredentialManager
+	CredentialRefresher CredentialRefresher
+	Lifecycle           AccountLifecycle
+	ModelDiscoverer     ModelDiscoverer
+	UsageFetcher        UsageFetcher
 }
 
 // ModelCatalog resolves immutable static model ownership.
@@ -251,8 +342,20 @@ type ModelCatalog interface {
 	Resolve(string) (ResolvedModel, error)
 }
 
-// CapabilityRegistry resolves runtime behavior independently of model catalog
-// construction and ownership.
+// CapabilityRegistry resolves generation-facing runtime behavior independently
+// of model catalog construction and ownership.
 type CapabilityRegistry interface {
 	Capabilities(Kind, string) (Capabilities, bool)
+}
+
+// LifecycleRegistry resolves provider-bound account lifecycle behavior without
+// requiring generation-only callers to implement or depend on that lookup.
+type LifecycleRegistry interface {
+	Lifecycle(Kind, string) (AccountLifecycle, bool)
+}
+
+// CredentialRefreshRegistry resolves explicit provider-bound credential
+// refresh behavior without exposing credential material to shared callers.
+type CredentialRefreshRegistry interface {
+	CredentialRefresher(Kind, string) (CredentialRefresher, bool)
 }

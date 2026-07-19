@@ -14,7 +14,6 @@ import (
 
 	"byos/internal/accounts"
 	"byos/internal/models"
-	oauthxai "byos/internal/oauth/xai"
 	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
@@ -22,7 +21,7 @@ import (
 
 type fakeAccounts struct {
 	values       []store.Account
-	flow         oauthxai.DeviceAuthorization
+	flow         provider.Authorization
 	completed    store.Account
 	startErr     error
 	completeErr  error
@@ -32,13 +31,28 @@ type fakeAccounts struct {
 	updatedOn    bool
 	deletedID    string
 	refreshedID  string
+	loginState   string
+	loginErr     error
+	session      provider.AuthorizationSession
 }
 
-func (f *fakeAccounts) StartLogin(context.Context) (oauthxai.DeviceAuthorization, error) {
+func (f *fakeAccounts) StartLogin(context.Context) (provider.Authorization, error) {
 	return f.flow, f.startErr
 }
 func (f *fakeAccounts) CompleteLogin(context.Context, string) (store.Account, error) {
 	return f.completed, f.completeErr
+}
+func (f *fakeAccounts) LoginStatus(_ context.Context, state string) (provider.AuthorizationSession, error) {
+	if f.loginErr != nil {
+		return provider.AuthorizationSession{}, f.loginErr
+	}
+	value := f.session
+	value.Ref.State = state
+	return value, nil
+}
+func (f *fakeAccounts) CancelLogin(_ context.Context, state string) error {
+	f.loginState = state
+	return f.loginErr
 }
 func (f *fakeAccounts) List(context.Context) ([]store.Account, error) { return f.values, nil }
 func (f *fakeAccounts) Update(_ context.Context, id, label string, enabled bool) error {
@@ -57,21 +71,15 @@ func (f *fakeAccounts) Refresh(_ context.Context, id string) (store.Account, err
 	return f.completed, f.refreshErr
 }
 
-type fakeOAuth struct {
-	state   string
-	err     error
-	session store.OAuthSession
+type fakeCompletion struct {
+	resumed []string
+	ensured []string
 }
 
-func (f *fakeOAuth) Status(_ context.Context, state string) (store.OAuthSession, error) {
-	if f.err != nil {
-		return store.OAuthSession{}, f.err
-	}
-	value := f.session
-	value.State = state
-	return value, nil
+func (f *fakeCompletion) Resume(state string) { f.resumed = append(f.resumed, state) }
+func (f *fakeCompletion) EnsureCompletion(state string) {
+	f.ensured = append(f.ensured, state)
 }
-func (f *fakeOAuth) Cancel(_ context.Context, state string) error { f.state = state; return f.err }
 
 type fakeUsage struct {
 	values  map[string]usage.Snapshot
@@ -182,11 +190,12 @@ func TestOAuthDeviceLifecycleAndSafeProjection(t *testing.T) {
 		CreatedAt:   now, UpdatedAt: now,
 	}
 	accountsService := &fakeAccounts{
-		flow:      oauthxai.DeviceAuthorization{State: "opaque-state", UserCode: "ABCD-EFGH", VerificationURI: "https://accounts.x.ai/device", VerificationURIComplete: "https://accounts.x.ai/device?user_code=ABCD-EFGH", ExpiresAt: now.Add(10 * time.Minute), PollInterval: 5 * time.Second},
+		flow:      provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.XAI, State: "opaque-state"}, UserCode: "ABCD-EFGH", VerificationURL: "https://accounts.x.ai/device", VerificationURLComplete: "https://accounts.x.ai/device?user_code=ABCD-EFGH", ExpiresAt: now.Add(10 * time.Minute), PollInterval: 5 * time.Second},
 		completed: account,
+		session:   provider.AuthorizationSession{Authorization: provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.XAI}}, Status: provider.AuthorizationCompleted, AccountID: "acct_1"},
 	}
-	oauthService := &fakeOAuth{session: store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, Status: "completed", AccountID: "acct_1"}}
-	handler := NewHandler(Services{Accounts: accountsService, OAuth: oauthService})
+	completion := &fakeCompletion{}
+	handler := NewHandler(Services{Accounts: accountsService, Completion: completion})
 
 	started := request(t, handler, http.MethodPost, basePath+"/oauth/xai/device", "")
 	requireStatus(t, started, http.StatusCreated)
@@ -200,6 +209,9 @@ func TestOAuthDeviceLifecycleAndSafeProjection(t *testing.T) {
 		t.Fatalf("start response has non-allowlisted fields: %v", startBody)
 	}
 
+	if len(completion.resumed) != 1 || completion.resumed[0] != "opaque-state" {
+		t.Fatalf("completion resumes = %v", completion.resumed)
+	}
 	polled := request(t, handler, http.MethodGet, basePath+"/oauth/xai/device/opaque-state", "")
 	requireStatus(t, polled, http.StatusOK)
 	pollBody := decodeMap(t, polled)
@@ -211,16 +223,26 @@ func TestOAuthDeviceLifecycleAndSafeProjection(t *testing.T) {
 			t.Fatalf("poll response leaked %q: %s", secret, polled.Body.String())
 		}
 	}
+	if len(completion.ensured) != 0 {
+		t.Fatalf("completed poll ensured completion: %v", completion.ensured)
+	}
+
+	accountsService.session.Status = provider.AuthorizationAuthorized
+	pending := request(t, handler, http.MethodGet, basePath+"/oauth/xai/device/opaque-state", "")
+	requireStatus(t, pending, http.StatusAccepted)
+	if len(completion.ensured) != 1 || completion.ensured[0] != "opaque-state" {
+		t.Fatalf("completion ensures = %v", completion.ensured)
+	}
 
 	cancelled := request(t, handler, http.MethodDelete, basePath+"/oauth/xai/device/opaque-state", "")
 	requireStatus(t, cancelled, http.StatusNoContent)
-	if oauthService.state != "opaque-state" {
-		t.Fatalf("cancel state = %q", oauthService.state)
+	if accountsService.loginState != "opaque-state" {
+		t.Fatalf("cancel state = %q", accountsService.loginState)
 	}
 }
 
 func TestOAuthErrorsAreSanitized(t *testing.T) {
-	handler := NewHandler(Services{Accounts: &fakeAccounts{}, OAuth: &fakeOAuth{session: store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, Status: "failed", SanitizedError: "private upstream tenant and token"}}})
+	handler := NewHandler(Services{Accounts: &fakeAccounts{session: provider.AuthorizationSession{Authorization: provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.XAI}}, Status: provider.AuthorizationFailed, SanitizedMessage: "private upstream tenant and token"}}})
 	response := request(t, handler, http.MethodGet, basePath+"/oauth/xai/device/state", "")
 	requireStatus(t, response, http.StatusConflict)
 	if strings.Contains(response.Body.String(), "private upstream") || !strings.Contains(response.Body.String(), "device authorization failed") {
@@ -230,7 +252,7 @@ func TestOAuthErrorsAreSanitized(t *testing.T) {
 	if len(errorBody) != 3 || errorBody["state"] != "state" || errorBody["status"] != "failed" || errorBody["error"] != "device authorization failed" {
 		t.Fatalf("oauth error has non-allowlisted fields: %v", errorBody)
 	}
-	handler = NewHandler(Services{Accounts: &fakeAccounts{}, OAuth: &fakeOAuth{err: errors.New("sqlite path /private/db")}})
+	handler = NewHandler(Services{Accounts: &fakeAccounts{loginErr: errors.New("sqlite path /private/db")}})
 	response = request(t, handler, http.MethodDelete, basePath+"/oauth/xai/device/state", "")
 	requireStatus(t, response, http.StatusInternalServerError)
 	cancelBody := decodeMap(t, response)
@@ -314,7 +336,7 @@ func TestUsageEndpointsReturnStaleNormalizedDataWithoutRawBilling(t *testing.T) 
 	if !strings.Contains(refreshed.Body.String(), `"stale":true`) || strings.Contains(refreshed.Body.String(), "private billing") || strings.Contains(refreshed.Body.String(), "usage-refresh-secret") {
 		t.Fatalf("stale refresh body = %s", refreshed.Body.String())
 	}
-	if len(usageService.calls) != 1 || usageService.calls[0].ID != "acct_1" || usageService.calls[0].AccessToken != "usage-refresh-secret" {
+	if len(usageService.calls) != 1 || usageService.calls[0] != (usage.Account{ID: "acct_1", Provider: provider.XAI, Enabled: true}) {
 		t.Fatalf("usage worker calls = %v", usageService.calls)
 	}
 
@@ -349,7 +371,7 @@ func TestModelsListPreservesStaleStateAndRefreshesEnabledAccounts(t *testing.T) 
 
 	refreshed := request(t, handler, http.MethodPost, basePath+"/models/refresh", "")
 	requireStatus(t, refreshed, http.StatusOK)
-	if len(modelService.calls) != 1 || modelService.calls[0].ID != "enabled" || modelService.calls[0].AccessToken != "model-refresh-secret" {
+	if len(modelService.calls) != 1 || modelService.calls[0] != (models.Account{ID: "enabled", Provider: provider.XAI, Enabled: true}) {
 		t.Fatalf("refresh calls = %v", modelService.calls)
 	}
 	if strings.Contains(refreshed.Body.String(), "model-refresh-secret") {
@@ -409,8 +431,8 @@ func TestOAuthPollProjectsPersistedStatusesWithoutBlocking(t *testing.T) {
 		want   int
 	}{{"pending", http.StatusAccepted}, {"authorized", http.StatusAccepted}, {"completed", http.StatusOK}, {"cancelled", http.StatusConflict}, {"failed", http.StatusConflict}, {"expired", http.StatusGone}} {
 		t.Run(test.status, func(t *testing.T) {
-			session := store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, Status: test.status, UserCode: "CODE", VerificationURI: "https://auth.x.ai/device", ExpiresAt: expires, AccountID: "acct"}
-			response := request(t, NewHandler(Services{Accounts: &fakeAccounts{}, OAuth: &fakeOAuth{session: session}}), http.MethodGet, basePath+"/oauth/xai/device/state", "")
+			session := provider.AuthorizationSession{Authorization: provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.XAI}, UserCode: "CODE", VerificationURL: "https://auth.x.ai/device", ExpiresAt: expires}, Status: provider.AuthorizationStatus(test.status), AccountID: "acct"}
+			response := request(t, NewHandler(Services{Accounts: &fakeAccounts{session: session}}), http.MethodGet, basePath+"/oauth/xai/device/state", "")
 			requireStatus(t, response, test.want)
 			body := decodeMap(t, response)
 			if body["status"] == nil {

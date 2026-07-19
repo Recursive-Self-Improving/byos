@@ -54,6 +54,9 @@ func (s *RefreshService) refresh(ctx context.Context, accountID string) (store.A
 	if err != nil {
 		return store.Account{}, err
 	}
+	if account.Provider != provider.XAI {
+		return store.Account{}, fmt.Errorf("account %q is not an xAI account: %w", accountID, provider.ErrProviderMismatch)
+	}
 	credentials := account.Credentials
 	if strings.TrimSpace(credentials.RefreshToken) == "" {
 		return store.Account{}, errors.New("account has no refresh token")

@@ -62,7 +62,7 @@ func validateCapabilities(capabilities Capabilities) error {
 	if hasGenerationCapability && !(hasPolicy && hasGeneration && hasCredentials) {
 		return fmt.Errorf("%w: policy, generation client, and credentials must be registered together", ErrInvalidCapabilities)
 	}
-	if !hasGenerationCapability && capabilities.ModelDiscoverer == nil && capabilities.UsageFetcher == nil {
+	if !hasGenerationCapability && capabilities.CredentialRefresher == nil && capabilities.Lifecycle == nil && capabilities.ModelDiscoverer == nil && capabilities.UsageFetcher == nil {
 		return fmt.Errorf("%w: registration must contain at least one capability", ErrInvalidCapabilities)
 	}
 	return nil
@@ -78,4 +78,29 @@ func (r *RuntimeCapabilityRegistry) Capabilities(provider Kind, policyKey string
 	return capabilities, ok
 }
 
-var _ CapabilityRegistry = (*RuntimeCapabilityRegistry)(nil)
+// Lifecycle returns the optional authorization lifecycle registered for the
+// exact provider and policy key. An absent registration or lifecycle returns
+// false; callers must not substitute another provider's implementation.
+func (r *RuntimeCapabilityRegistry) Lifecycle(provider Kind, policyKey string) (AccountLifecycle, bool) {
+	capabilities, ok := r.Capabilities(provider, policyKey)
+	if !ok || capabilities.Lifecycle == nil {
+		return nil, false
+	}
+	return capabilities.Lifecycle, true
+}
+
+// CredentialRefresher returns the optional explicit refresh capability for the
+// exact provider and policy key. Callers must not substitute another entry.
+func (r *RuntimeCapabilityRegistry) CredentialRefresher(provider Kind, policyKey string) (CredentialRefresher, bool) {
+	capabilities, ok := r.Capabilities(provider, policyKey)
+	if !ok || capabilities.CredentialRefresher == nil {
+		return nil, false
+	}
+	return capabilities.CredentialRefresher, true
+}
+
+var (
+	_ CapabilityRegistry        = (*RuntimeCapabilityRegistry)(nil)
+	_ LifecycleRegistry         = (*RuntimeCapabilityRegistry)(nil)
+	_ CredentialRefreshRegistry = (*RuntimeCapabilityRegistry)(nil)
+)

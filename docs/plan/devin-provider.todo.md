@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–3 complete; Chunk 4 not started**. C3.1–C3.7 have verified implementation, review, and evidence; the sequential commit was intentionally not created during this tracker-only closure.
+> Status: **Chunks 1–4 complete; Chunk 5 is next**. C4.1–C4.3 have verified implementation, evidence, and clean independent review; the sequential commit has not been created.
 >
-> Current next item: **C4.1 — Cut xAI OAuth and refresh over to provider capabilities**.
+> Current next item: **C5.1 — Add Devin OAuth configuration and PKCE primitives**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -23,6 +23,14 @@
 > Chunk 3 alias disposition and final certification (2026-07-19): the fixed first-class public `grok` row intentionally preserves its distinct public metadata (`PublicName=grok`, `OwnedBy=byos`) while routing to canonical xAI upstream `grok-4.5`; additional aliases resolve to the exact canonical `grok-4.5` row. The contrary finding that every `grok` resolution must canonicalize its public metadata was discarded because it conflicted with this authoritative first-class metadata exception and would break the required five-model public projection. Independent structured single-encode, provider-adapter/routing, composition, alias/catalog, and Chunk 3 accounting reviews certified the final scope **CLEAN**.
 >
 > Chunk 3 final gate evidence (2026-07-19): focused structured/provider/routing/xAI certification gates, `go test ./...` (28 packages passed; 2 packages had no tests), and `git diff --check` all passed. This tracker-only closure did not rerun gates or create the sequential commit.
+>
+> Chunk 4 implementation record (2026-07-19): C4.1–C4.3 are complete. The sole complete `(xai,xai)` runtime registration retains the Chunk 3 policy, generation transport, and credential capabilities and owns lifecycle, refresh, model discovery, and usage capabilities; no Devin runtime is registered. Account lifecycle, Admin REST, Web, CLI, device OAuth/OIDC identity, ES256 verifier propagation, runtime-root completed-session coordination, and proactive/explicit refresh use exact provider-neutral capability dispatch. Completion is deduplicated across POST, GET, and resume; refresh retains the xAI due policy, provider guard, singleflight, credential rotation, and once-only model/usage hooks without a compatibility wrapper or parallel direct path.
+>
+> Chunk 4 discovery/usage, isolation, and persistence evidence (2026-07-19): model workers dispatch exact registry selection → credential → `ModelDiscoverer.Discover` → `Catalog.ApplyDiscovery`; usage workers dispatch exact registry selection → credential → `UsageFetcher.FetchUsage` → `Service.ApplyUsage`. Admin worker projections carry only account ID, provider, and enabled state. The direct runtime `NewUpstream`, `BillingFetcher`/xAI fetch compatibility, and raw-token worker paths are removed. The stored mixed-provider sentinel proves Devin causes zero credential calls, xAI control-plane endpoint calls, model/usage writes, refresh-status changes, or account mutation; the xAI positive control proves actual models-v2/models fallback and monthly/weekly billing capability dispatch. Credential and lifecycle errors crossing shared/Admin boundaries are sanitized; stale and unknown usage state survives restart; model and usage persistence run under fresh bounded contexts after fetch cancellation so blocked persistence cannot retain limiter or singleflight ownership indefinitely.
+>
+> Chunk 4 final independent certifications (2026-07-19): lifecycle/Admin/refresh review **CLEAN** after runtime-root completion coordination, complete runtime registration, exact capability dispatch, mismatch guards, once-only hooks, and boundary sanitization; discovery/usage review **CLEAN** after actual capability dispatch, the mixed-provider sentinel, sanitized errors, stale/unknown restart persistence, and fresh bounded model/usage persistence contexts. No second catalog, registry, mutation, marshal, transport, compatibility, or direct provider path remains, and Devin registration has not started.
+>
+> Chunk 4 final gate evidence (2026-07-19): `go test -count=1 ./internal/provider ./internal/oauth/xai ./internal/accounts ./internal/models ./internal/usage ./internal/api/admin ./internal/app ./cmd/byos`; `go test -race -count=1 ./internal/models ./internal/usage`; `go test -count=1 ./...`; `git diff --check` — all passed after the final fixes. The earlier explicit C3 generation-parity gate, `go test -count=1 ./internal/xai ./internal/routing ./internal/api/openai ./internal/api/anthropic ./internal/api`, also passed and is covered again by the full suite. This tracker-only closure did not rerun gates or create the sequential commit.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -186,7 +194,7 @@
   - Observable DoD: call order is visibly resolve → runtime capability lookup → real provider policy on public canonical model → upstream overwrite → provider-filtered candidates → credentials/client/sole marshal; all handlers stopped direct search mutation; shared routing/API has no direct concrete-provider event/client import; xAI search and generation transport are real and covered; no legacy transport, temporary compatibility/no-op policy, placeholder payload, or double marshal exists.
   - Sequential commit: `refactor(routing): cut xai generation to provider dispatch`.
 
-- [ ] **C4.1 — Cut xAI OAuth and refresh over to provider capabilities**
+- [x] **C4.1 — Cut xAI OAuth and refresh over to provider capabilities**
   - Chunk owner: **Chunk 4 — xAI OAuth, refresh, discovery, and billing parity**.
   - Depends on: C3.7.
   - Files: `internal/oauth/xai`, xAI capability adapter, account service seams, tests.
@@ -194,7 +202,7 @@
   - Observable DoD: migrated xAI accounts/sessions and device/refresh behavior remain exact; no parallel direct path or compatibility shim remains; xAI-only lifecycle capabilities reject non-xAI accounts.
   - Verification: focused xAI OAuth/OIDC/refresh tests and provider-mismatch negatives.
 
-- [ ] **C4.2 — Cut xAI discovery and billing over and prove parity**
+- [x] **C4.2 — Cut xAI discovery and billing over and prove parity**
   - Chunk owner: **Chunk 4**.
   - Depends on: C4.1.
   - Files: xAI model-discovery/backend-search and billing adapters, model/usage service seams, tests.
@@ -202,7 +210,7 @@
   - Observable DoD: xAI discovery/fallback/billing behavior is unchanged; provider mismatch cannot send Devin credentials to xAI; the full C3 xAI request/header/transport/error suite remains green through the same generation path.
   - Verification: all focused xAI model/usage tests, provider-mismatch endpoint counters, and C3 generation parity suite.
 
-- [ ] **C4.3 — Review and commit Chunk 4**
+- [x] **C4.3 — Review and commit Chunk 4**
   - Chunk owner: **Chunk 4**.
   - Depends on: C4.2.
   - Observable DoD: xAI is the only registered runtime implementation; its real policy and generation transport already work from Chunk 3; OAuth/refresh/discovery/billing now use capabilities; Devin registration has not started; no second catalog, registry, mutation, marshal, or transport path exists.

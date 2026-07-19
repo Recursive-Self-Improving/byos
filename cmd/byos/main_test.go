@@ -12,7 +12,7 @@ import (
 
 	"byos/internal/app"
 	"byos/internal/config"
-	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -59,12 +59,21 @@ func TestRunRejectsUnknownOrMissingCommand(t *testing.T) {
 }
 
 func TestVerificationURLFallback(t *testing.T) {
-	if got := verificationURL(oauthxai.DeviceAuthorization{VerificationURI: "https://auth.x.ai/device"}); got != "https://auth.x.ai/device" {
-		t.Fatalf("fallback=%q", got)
-	}
-	if got := verificationURL(oauthxai.DeviceAuthorization{VerificationURI: "https://auth.x.ai/device", VerificationURIComplete: "https://auth.x.ai/device?code=1"}); got != "https://auth.x.ai/device?code=1" {
-		t.Fatalf("complete=%q", got)
-	}
+	t.Run("falls back to verification URL", func(t *testing.T) {
+		if got := verificationURL(provider.Authorization{VerificationURL: "https://auth.x.ai/device"}); got != "https://auth.x.ai/device" {
+			t.Fatalf("verificationURL() = %q", got)
+		}
+	})
+
+	t.Run("prefers complete verification URL", func(t *testing.T) {
+		authorization := provider.Authorization{
+			VerificationURL:         "https://auth.x.ai/device",
+			VerificationURLComplete: "https://auth.x.ai/device?code=1",
+		}
+		if got := verificationURL(authorization); got != authorization.VerificationURLComplete {
+			t.Fatalf("verificationURL() = %q, want %q", got, authorization.VerificationURLComplete)
+		}
+	})
 }
 
 func TestLoginCancellationClosesRuntime(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 
 	appcrypto "byos/internal/crypto"
 	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -76,19 +77,24 @@ func TestCompleteLoginRejectsUnverifiedIdentityBeforePersistence(t *testing.T) {
 	oauthRepo := store.NewOAuthSessionRepository(database.DB, keys)
 	oauthService := oauthxai.NewService(oauthxai.NewDiscoveryClient(client, oauthxai.DiscoveryURL), client, oauthRepo, oauthxai.DefaultOptions())
 	identity := oauthxai.NewIdentityVerifier(ctx, oauthxai.Issuer, oauthxai.Issuer+"/jwks", oauthxai.DefaultClientID, []string{oidc.RS256})
-	service := NewService(accountsRepo, oauthService, identity, oauthxai.NewRefreshService(client, accountsRepo, oauthxai.DefaultOptions()), nil, nil)
+	lifecycle := oauthxai.NewProviderLifecycle(oauthService, accountsRepo, identity)
+	registry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{Provider: provider.XAI, PolicyKey: xaiPolicyKey, Capabilities: provider.Capabilities{Lifecycle: lifecycle}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(accountsRepo, registry, nil, nil)
 	flow, err := service.StartLogin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteLogin(ctx, flow.State); err == nil {
+	if _, err := service.CompleteLogin(ctx, flow.Ref.State); err == nil {
 		t.Fatal("wrong-audience identity persisted")
 	}
 	accounts, err := accountsRepo.List(ctx)
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("accounts=%+v err=%v", accounts, err)
 	}
-	session, err := oauthService.Session(ctx, flow.State)
+	session, err := oauthService.Get(ctx, flow.Ref.State)
 	if err != nil || session.Status != "failed" || session.SanitizedError != "The identity token could not be verified." {
 		t.Fatalf("session=%+v err=%v", session, err)
 	}

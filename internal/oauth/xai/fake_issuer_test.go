@@ -127,7 +127,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		flow, err := service.StartDevice(context.Background())
+		flow, err := service.Start(context.Background())
 		if err != nil || flow.VerificationURI == "" {
 			t.Fatalf("flow=%+v err=%v", flow, err)
 		}
@@ -170,7 +170,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 			database, _, _, sessions := fakeOAuthRepositories(t)
 			defer database.Close()
 			service := newIssuerOAuthService(t, issuer, sessions)
-			flow, err := service.StartDevice(context.Background())
+			flow, err := service.Start(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -190,7 +190,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 		issuer.malformed = true
 		database, _, _, sessions := fakeOAuthRepositories(t)
 		defer database.Close()
-		if _, err := newIssuerOAuthService(t, issuer, sessions).StartDevice(context.Background()); err == nil {
+		if _, err := newIssuerOAuthService(t, issuer, sessions).Start(context.Background()); err == nil {
 			t.Fatal("foreign endpoint accepted")
 		}
 	})

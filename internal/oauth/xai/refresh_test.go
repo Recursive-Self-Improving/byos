@@ -3,6 +3,7 @@ package xai
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -72,11 +73,43 @@ func TestRefreshSingleflightRotationAndInvalidGrant(t *testing.T) {
 		t.Fatalf("disabled=%+v err=%v", disabled, err)
 	}
 }
+func TestRefreshRejectsNonXAIWithoutEndpointCall(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{13}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := store.NewAccountRepository(database.DB, keys)
+	expires := time.Now().Add(time.Minute)
+	account, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "foreign", Credentials: store.AccountCredentials{OpaqueToken: "foreign-token"}, ExpiresAt: &expires})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var endpointCalls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		endpointCalls.Add(1)
+		return jsonResponse(`{"access_token":"unexpected"}`), nil
+	})}
+	_, err = NewRefreshService(client, accounts, Options{}).Refresh(ctx, account.ID)
+	if !errors.Is(err, provider.ErrProviderMismatch) {
+		t.Fatalf("refresh error = %v", err)
+	}
+	if endpointCalls.Load() != 0 {
+		t.Fatalf("endpoint calls = %d", endpointCalls.Load())
+	}
+}
+
 func TestNeedsRefresh(t *testing.T) {
 	now := time.Now()
-	soon := now.Add(RefreshLead - time.Second)
-	later := now.Add(RefreshLead + time.Second)
-	if !NeedsRefresh(store.Account{ExpiresAt: &soon}, now) || NeedsRefresh(store.Account{ExpiresAt: &later}, now) {
+	exact := now.Add(RefreshLead)
+	soon := exact.Add(-time.Second)
+	later := exact.Add(time.Second)
+	if !NeedsRefresh(store.Account{ExpiresAt: &soon}, now) || !NeedsRefresh(store.Account{ExpiresAt: &exact}, now) || NeedsRefresh(store.Account{ExpiresAt: &later}, now) {
 		t.Fatal("refresh lead mismatch")
 	}
 }

@@ -53,11 +53,11 @@ func NewService(discovery *DiscoveryClient, client *http.Client, sessions *store
 	return &Service{discovery: discovery, http: client, sessions: sessions, options: options.withDefaults(), now: func() time.Time { return time.Now().UTC() }, wait: waitContext, pollCancels: make(map[string]context.CancelFunc)}
 }
 
-func (s *Service) Session(ctx context.Context, state string) (store.OAuthSession, error) {
+func (s *Service) Get(ctx context.Context, state string) (store.OAuthSession, error) {
 	return s.sessions.Get(ctx, provider.XAI, store.OAuthFlowDevice, state)
 }
 
-func (s *Service) Resumable(ctx context.Context) ([]store.OAuthSession, error) {
+func (s *Service) ListResumable(ctx context.Context) ([]store.OAuthSession, error) {
 	return s.sessions.ListResumable(ctx, provider.XAI, store.OAuthFlowDevice, s.now())
 }
 
@@ -68,7 +68,7 @@ func (s *Service) Complete(ctx context.Context, state, accountID string) error {
 func (s *Service) Fail(ctx context.Context, state, sanitized string) error {
 	return s.sessions.Fail(ctx, provider.XAI, store.OAuthFlowDevice, state, sanitized, s.now())
 }
-func (s *Service) StartDevice(ctx context.Context) (DeviceAuthorization, error) {
+func (s *Service) Start(ctx context.Context) (DeviceAuthorization, error) {
 	discovery, err := s.discovery.Discover(ctx)
 	if err != nil {
 		return DeviceAuthorization{}, err

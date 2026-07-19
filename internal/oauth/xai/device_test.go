@@ -65,7 +65,7 @@ func jsonResponse(body string) *http.Response {
 func TestStartDevicePersistsSafeNormalizedSession(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"access_token":"token"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestStartDevicePersistsSafeNormalizedSession(t *testing.T) {
 func TestPollPendingSlowDownSuccessAndDeduplicates(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`, `{"error":"slow_down"}`, `{"access_token":"access","refresh_token":"refresh","id_token":"id","expires_in":3600}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestPollTerminalAndCancellationPaths(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service, database := oauthTestService(t, []string{test.body})
 			defer database.Close()
-			flow, _ := service.StartDevice(context.Background())
+			flow, _ := service.Start(context.Background())
 			_, err := service.Poll(context.Background(), flow.State)
 			var oauthErr *OAuthError
 			if !errors.As(err, &oauthErr) || oauthErr.Code != test.code {
@@ -134,7 +134,7 @@ func TestPollTerminalAndCancellationPaths(t *testing.T) {
 	}
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, _ := service.StartDevice(context.Background())
+	flow, _ := service.Start(context.Background())
 	if err := service.Cancel(context.Background(), flow.State); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestPollTerminalAndCancellationPaths(t *testing.T) {
 func TestCancelStopsActivePoll(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestCancelStopsActivePoll(t *testing.T) {
 func TestPollLeaderContextCancellationStopsWorkerAndPreservesPending(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestPollDoesNotExchangeAfterLocalExpiry(t *testing.T) {
 func TestJoinedPollCallerCancellationIsIndependent(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

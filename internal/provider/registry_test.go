@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 type registryTestPolicy struct{ id string }
@@ -31,6 +32,27 @@ func (registryTestCredentials) AuthenticationFailed(context.Context, string, *Up
 func generationCapabilities(policy RequestPolicy) Capabilities {
 	return Capabilities{Policy: policy, Generation: registryTestClient{}, Credentials: registryTestCredentials{}}
 }
+
+type registryTestLifecycle struct{}
+
+func (registryTestLifecycle) Start(context.Context) (Authorization, error) {
+	return Authorization{Ref: AuthorizationRef{Provider: XAI}}, nil
+}
+func (registryTestLifecycle) Status(context.Context, AuthorizationRef) (AuthorizationSession, error) {
+	return AuthorizationSession{}, nil
+}
+func (registryTestLifecycle) Complete(context.Context, AuthorizationRef) (AccountResult, error) {
+	return AccountResult{Provider: XAI}, nil
+}
+func (registryTestLifecycle) Cancel(context.Context, AuthorizationRef) error         { return nil }
+func (registryTestLifecycle) Resume(context.Context) ([]AuthorizationSession, error) { return nil, nil }
+
+type registryTestRefresher struct{}
+
+func (registryTestRefresher) NeedsRefresh(context.Context, string, time.Time) (bool, error) {
+	return false, nil
+}
+func (registryTestRefresher) Refresh(context.Context, string) error { return nil }
 
 type registryTestDiscoverer struct{}
 
@@ -111,6 +133,29 @@ func TestCapabilityRegistryRejectsEmptyAndPartialCapabilities(t *testing.T) {
 	}
 }
 
+func TestCredentialRefreshRegistryAcceptsAndBindsRefreshOnlyRegistration(t *testing.T) {
+	refresher := registryTestRefresher{}
+	registry, err := NewCapabilityRegistry([]CapabilityRegistration{
+		{Provider: XAI, PolicyKey: "xai", Capabilities: Capabilities{CredentialRefresher: refresher}},
+		{Provider: Devin, PolicyKey: "devin", Capabilities: generationCapabilities(&registryTestPolicy{id: "devin"})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := registry.CredentialRefresher(XAI, "xai")
+	if !ok || got != refresher {
+		t.Fatalf("credential refresher = %#v, %v", got, ok)
+	}
+	for _, key := range []struct {
+		provider Kind
+		policy   string
+	}{{Devin, "xai"}, {XAI, "devin"}, {Devin, "devin"}} {
+		if got, ok := registry.CredentialRefresher(key.provider, key.policy); ok || got != nil {
+			t.Fatalf("unexpected credential refresher for (%s,%s): %#v, %v", key.provider, key.policy, got, ok)
+		}
+	}
+}
+
 func TestCapabilityRegistryAcceptsDiscoveryOnlyRegistration(t *testing.T) {
 	registry, err := NewCapabilityRegistry([]CapabilityRegistration{{
 		Provider: XAI, PolicyKey: "discovery", Capabilities: Capabilities{ModelDiscoverer: registryTestDiscoverer{}},
@@ -123,9 +168,50 @@ func TestCapabilityRegistryAcceptsDiscoveryOnlyRegistration(t *testing.T) {
 	}
 }
 
-func TestNilCapabilityRegistryDoesNotResolve(t *testing.T) {
+func TestLifecycleRegistryAcceptsAndBindsLifecycleOnlyRegistration(t *testing.T) {
+	lifecycle := registryTestLifecycle{}
+	registry, err := NewCapabilityRegistry([]CapabilityRegistration{
+		{Provider: XAI, PolicyKey: "account", Capabilities: Capabilities{Lifecycle: lifecycle}},
+		{Provider: Devin, PolicyKey: "generation", Capabilities: generationCapabilities(&registryTestPolicy{id: "devin"})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := registry.Lifecycle(XAI, "account")
+	if !ok || got != lifecycle {
+		t.Fatalf("lifecycle = %#v, %v", got, ok)
+	}
+	for _, key := range []struct {
+		provider Kind
+		policy   string
+	}{{Devin, "account"}, {XAI, "generation"}, {Devin, "generation"}} {
+		if got, ok := registry.Lifecycle(key.provider, key.policy); ok || got != nil {
+			t.Fatalf("unexpected lifecycle for (%s,%s): %#v, %v", key.provider, key.policy, got, ok)
+		}
+	}
+}
+
+func TestLifecycleRegistryAcceptsLifecycleAlongsideGeneration(t *testing.T) {
+	capabilities := generationCapabilities(&registryTestPolicy{id: "xai"})
+	capabilities.Lifecycle = registryTestLifecycle{}
+	registry, err := NewCapabilityRegistry([]CapabilityRegistration{{Provider: XAI, PolicyKey: "xai", Capabilities: capabilities}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle, ok := registry.Lifecycle(XAI, "xai"); !ok || lifecycle == nil {
+		t.Fatal("combined generation and lifecycle registration did not resolve lifecycle")
+	}
+}
+
+func TestNilRuntimeCapabilityRegistryDoesNotResolveOptionalInterfaces(t *testing.T) {
 	var registry *RuntimeCapabilityRegistry
 	if _, ok := registry.Capabilities(XAI, "xai"); ok {
 		t.Fatal("nil registry resolved capabilities")
+	}
+	if lifecycle, ok := registry.Lifecycle(XAI, "xai"); ok || lifecycle != nil {
+		t.Fatal("nil registry resolved lifecycle")
+	}
+	if refresher, ok := registry.CredentialRefresher(XAI, "xai"); ok || refresher != nil {
+		t.Fatal("nil registry resolved credential refresher")
 	}
 }

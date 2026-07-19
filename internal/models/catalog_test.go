@@ -139,7 +139,7 @@ func TestAccountSupportsPartitionsProviderCapabilitySemantics(t *testing.T) {
 		"devin-known": {{Model: "kimi-k2-7", Supported: true, SupportsBackendSearch: &searchFalse}},
 		"other-known": {{Model: "other", Supported: true}},
 	}}
-	catalog := NewCatalog(store, nil, nil, nil)
+	catalog := NewCatalog(store, nil, nil)
 	xai := provider.ResolvedModel{PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "byos", PolicyKey: "xai"}
 	devin := provider.ResolvedModel{PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"}
 	for _, test := range []struct {

@@ -3,15 +3,21 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
+	"byos/internal/accounts"
 	"byos/internal/api"
+	"byos/internal/api/admin"
 	apiopenai "byos/internal/api/openai"
 	"byos/internal/config"
 	appcrypto "byos/internal/crypto"
@@ -20,8 +26,14 @@ import (
 	"byos/internal/provider"
 	"byos/internal/routing"
 	"byos/internal/store"
+	"byos/internal/usage"
 	"byos/internal/xai"
 )
+
+var _ admin.AccountManager = (*accounts.Service)(nil)
+var _ provider.CapabilityRegistry = (*provider.RuntimeCapabilityRegistry)(nil)
+var _ provider.LifecycleRegistry = (*provider.RuntimeCapabilityRegistry)(nil)
+var _ admin.CompletionCoordinator = (*webOAuthAdapter)(nil)
 
 func TestRuntimeHealthAndReadinessWithoutAccounts(t *testing.T) {
 	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
@@ -47,6 +59,39 @@ func TestRuntimeHealthAndReadinessWithoutAccounts(t *testing.T) {
 		runtime.Server.Handler.ServeHTTP(response, request)
 		if response.Code != test.want {
 			t.Fatalf("%s status=%d body=%s", test.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestRuntimeRegistersSingleCompleteXAIImplementation(t *testing.T) {
+	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
+	t.Setenv("BYOS_ADMIN_PASSWORD", "password")
+	t.Setenv("BYOS_ADMIN_API_KEY", "admin-key")
+	secrets, err := config.LoadSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	runtime, err := New(t.Context(), cfg, secrets, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	capabilities, ok := runtime.capabilityRegistry.Capabilities(provider.XAI, "xai")
+	if !ok {
+		t.Fatal("xAI capability registration is missing")
+	}
+	if capabilities.Policy == nil || capabilities.Generation == nil || capabilities.Credentials == nil || capabilities.CredentialRefresher == nil || capabilities.Lifecycle == nil || capabilities.ModelDiscoverer == nil || capabilities.UsageFetcher == nil {
+		t.Fatalf("incomplete xAI capabilities: %+v", capabilities)
+	}
+	for _, lookup := range []struct {
+		provider provider.Kind
+		policy   string
+	}{{provider.XAI, "devin"}, {provider.Devin, "xai"}, {provider.Devin, "devin"}} {
+		if _, registered := runtime.capabilityRegistry.Capabilities(lookup.provider, lookup.policy); registered {
+			t.Fatalf("unexpected runtime registration for provider=%q policy=%q", lookup.provider, lookup.policy)
 		}
 	}
 }
@@ -148,7 +193,7 @@ func TestPublicModelsAndReadinessAreProviderAware(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			catalog := models.NewCatalog(capabilities, nil, []string{"fast", config.DefaultModel}, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
+			catalog := models.NewCatalog(capabilities, []string{"fast", config.DefaultModel}, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
 			aliases := map[string]string{}
 			if _, resolveErr := static.Resolve(config.DefaultModel); resolveErr == nil {
 				aliases = map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel}
@@ -204,7 +249,7 @@ func TestAliasDefaultDoesNotChangeFiveModelPublicProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := models.NewCatalog(capabilities, nil, []string{"fast", config.DefaultModel}, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
+	catalog := models.NewCatalog(capabilities, []string{"fast", config.DefaultModel}, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
 	resolver, err := models.NewStaticCatalogOverlay(static, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -325,6 +370,221 @@ func TestNeutralExecutorCompositionRejectsUnregisteredProvidersBeforeDispatch(t 
 	if result.Model != config.DefaultModel || result.AccountID != account.ID || requests != 1 {
 		t.Fatalf("result=%+v requests=%d", result, requests)
 	}
+}
+
+func TestMixedProviderWorkersDoNotExposeDevinCredentialsToXAIControlPlanes(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{6}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := store.NewAccountRepository(database.DB, keys)
+	const devinSentinel = "devin-opaque-token-must-never-reach-xai"
+	devinAccount, err := accountRepo.UpsertLogin(ctx, devinRuntimeAccount(devinSentinel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	xaiAccount, err := accountRepo.UpsertLogin(ctx, xaiRuntimeAccount("mixed-provider-xai"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type requestKey struct{ path, query string }
+	var requestMu sync.Mutex
+	requests := make(map[requestKey]int)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMu.Lock()
+		requests[requestKey{r.URL.Path, r.URL.RawQuery}]++
+		requestMu.Unlock()
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Errorf("authorization = %q", got)
+		}
+		if bytes.Contains([]byte(r.Header.Get("Authorization")), []byte(devinSentinel)) {
+			t.Error("Devin sentinel reached xAI authorization header")
+		}
+		switch (requestKey{r.URL.Path, r.URL.RawQuery}) {
+		case requestKey{"/models-v2", ""}:
+			w.WriteHeader(http.StatusNotFound)
+		case requestKey{"/models", ""}:
+			_, _ = w.Write([]byte(`[{"id":"grok-control","displayName":"Grok Control"}]`))
+		case requestKey{"/billing", ""}:
+			_, _ = w.Write([]byte(`{"config":{"monthlyLimit":{"val":1000},"used":{"val":250},"billingPeriodEnd":"2030-01-01T00:00:00Z"}}`))
+		case requestKey{"/billing", "format=credits"}:
+			_, _ = w.Write([]byte(`{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"},"creditUsagePercent":20,"billingPeriodEnd":"2030-01-02T00:00:00Z"}}`))
+		default:
+			t.Errorf("unexpected xAI control endpoint: %s?%s", r.URL.Path, r.URL.RawQuery)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	credentialManager := &countingCredentialManager{delegate: oauthxai.NewProviderCredentialManager(accountRepo, nil), calls: make(map[string]int)}
+	xaiClient := xai.NewClient(xai.HTTPConfig{BaseURL: upstream.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
+	registry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{
+		Provider: provider.XAI, PolicyKey: "xai", Capabilities: provider.Capabilities{
+			Policy: xai.RequestPolicy{}, Generation: xai.NewProviderClient(xaiClient), Credentials: credentialManager,
+			ModelDiscoverer: models.NewXAIProvider(models.NewClient(xaiClient)),
+			UsageFetcher:    usage.NewXAIProvider(usage.NewClient(xaiClient)),
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelRepo := store.NewModelCapabilityRepository(database.DB)
+	usageRepo := store.NewUsageRepository(database.DB, keys)
+	modelWorker := models.NewWorker(models.NewStoreAccountProvider(accountRepo), registry, models.NewCatalog(modelRepo, nil, nil), time.Hour, time.Second, 1)
+	usageWorker := usage.NewWorker(usage.NewStoreAccountProvider(accountRepo), registry, usage.NewService(usageRepo, store.NewLocalUsageRepository(database.DB)), time.Hour, time.Second, 1)
+
+	modelAccounts, err := models.NewStoreAccountProvider(accountRepo).ModelAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageAccounts, err := usage.NewStoreAccountProvider(accountRepo).UsageAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelByID := make(map[string]models.Account, len(modelAccounts))
+	for _, account := range modelAccounts {
+		modelByID[account.ID] = account
+	}
+	usageByID := make(map[string]usage.Account, len(usageAccounts))
+	for _, account := range usageAccounts {
+		usageByID[account.ID] = account
+	}
+	devinModelAccount, ok := modelByID[devinAccount.ID]
+	if !ok || devinModelAccount.Provider != provider.Devin || !devinModelAccount.Enabled {
+		t.Fatalf("Devin model projection=%+v present=%v", devinModelAccount, ok)
+	}
+	devinUsageAccount, ok := usageByID[devinAccount.ID]
+	if !ok || devinUsageAccount.Provider != provider.Devin || !devinUsageAccount.Enabled {
+		t.Fatalf("Devin usage projection=%+v present=%v", devinUsageAccount, ok)
+	}
+	xaiModelAccount, ok := modelByID[xaiAccount.ID]
+	if !ok || xaiModelAccount.Provider != provider.XAI || !xaiModelAccount.Enabled {
+		t.Fatalf("xAI model projection=%+v present=%v", xaiModelAccount, ok)
+	}
+	xaiUsageAccount, ok := usageByID[xaiAccount.ID]
+	if !ok || xaiUsageAccount.Provider != provider.XAI || !xaiUsageAccount.Enabled {
+		t.Fatalf("xAI usage projection=%+v present=%v", xaiUsageAccount, ok)
+	}
+	if err := modelWorker.RefreshAccount(ctx, devinModelAccount); err != nil {
+		t.Fatal(err)
+	}
+	if err := usageWorker.RefreshAccount(ctx, devinUsageAccount); err != nil {
+		t.Fatal(err)
+	}
+	requestMu.Lock()
+	devinRequests := len(requests)
+	requestMu.Unlock()
+	if devinRequests != 0 || credentialManager.count(devinAccount.ID) != 0 {
+		t.Fatalf("Devin crossed xAI boundary: endpoints=%v credential_calls=%d", requests, credentialManager.count(devinAccount.ID))
+	}
+	if rows, err := modelRepo.List(ctx, devinAccount.ID); err != nil || len(rows) != 0 {
+		t.Fatalf("Devin model rows=%+v err=%v", rows, err)
+	}
+	if _, err := usageRepo.Latest(ctx, devinAccount.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Devin usage snapshot err=%v, want sql.ErrNoRows", err)
+	}
+	if status := modelWorker.Status(devinAccount.ID); status != (models.RefreshStatus{}) {
+		t.Fatalf("Devin model status mutated: %+v", status)
+	}
+	if status := usageWorker.Status(devinAccount.ID); status != (usage.RefreshStatus{}) {
+		t.Fatalf("Devin usage status mutated: %+v", status)
+	}
+	storedDevin, err := accountRepo.Get(ctx, devinAccount.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(storedDevin, devinAccount) {
+		t.Fatalf("Devin account mutated: before=%+v after=%+v", devinAccount, storedDevin)
+	}
+
+	if err := modelWorker.RefreshAccount(ctx, xaiModelAccount); err != nil {
+		t.Fatal(err)
+	}
+	if err := usageWorker.RefreshAccount(ctx, xaiUsageAccount); err != nil {
+		t.Fatal(err)
+	}
+	requestMu.Lock()
+	gotRequests := make(map[requestKey]int, len(requests))
+	for key, count := range requests {
+		gotRequests[key] = count
+	}
+	requestMu.Unlock()
+	wantRequests := map[requestKey]int{{"/models-v2", ""}: 1, {"/models", ""}: 1, {"/billing", ""}: 1, {"/billing", "format=credits"}: 1}
+	if len(gotRequests) != len(wantRequests) {
+		t.Fatalf("xAI endpoints=%v want=%v", gotRequests, wantRequests)
+	}
+	for key, want := range wantRequests {
+		if gotRequests[key] != want {
+			t.Fatalf("xAI endpoint %v calls=%d want=%d (all=%v)", key, gotRequests[key], want, gotRequests)
+		}
+	}
+	if credentialManager.count(xaiAccount.ID) != 2 {
+		t.Fatalf("xAI credential calls=%d want=2", credentialManager.count(xaiAccount.ID))
+	}
+	modelStatus := modelWorker.Status(xaiAccount.ID)
+	if modelStatus.AccountID != xaiAccount.ID || modelStatus.LastSuccess.IsZero() || modelStatus.LastAttempt.IsZero() || modelStatus.LastError != "" || modelStatus.Refreshing || modelStatus.Stale {
+		t.Fatalf("xAI model refresh status=%+v", modelStatus)
+	}
+	usageStatus := usageWorker.Status(xaiAccount.ID)
+	if usageStatus.AccountID != xaiAccount.ID || usageStatus.LastSuccess.IsZero() || usageStatus.LastAttempt.IsZero() || usageStatus.LastError != "" || usageStatus.Refreshing || usageStatus.Stale {
+		t.Fatalf("xAI usage refresh status=%+v", usageStatus)
+	}
+	modelRows, err := modelRepo.List(ctx, xaiAccount.ID)
+	if err != nil || len(modelRows) != 1 || modelRows[0].AccountID != xaiAccount.ID || modelRows[0].Model != "grok-control" || modelRows[0].DisplayName != "Grok Control" || !modelRows[0].Supported || modelRows[0].Stale || modelRows[0].DiscoveredAt.IsZero() {
+		t.Fatalf("xAI model persistence=%+v err=%v", modelRows, err)
+	}
+	storedXAI, err := accountRepo.Get(ctx, xaiAccount.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(storedXAI, xaiAccount) {
+		t.Fatalf("xAI account mutated: before=%+v after=%+v", xaiAccount, storedXAI)
+	}
+	storedUsage, err := usageRepo.Latest(ctx, xaiAccount.ID)
+	if err != nil || storedUsage.AccountID != xaiAccount.ID || len(storedUsage.Normalized) == 0 || len(storedUsage.Raw) == 0 || storedUsage.Stale || storedUsage.Error != "" {
+		t.Fatalf("xAI usage persistence=%+v err=%v", storedUsage, err)
+	}
+	var normalized struct {
+		Monthly *usage.Monthly `json:"monthly"`
+		Weekly  *usage.Weekly  `json:"weekly"`
+	}
+	if err := json.Unmarshal(storedUsage.Normalized, &normalized); err != nil || normalized.Monthly == nil || normalized.Monthly.Limit != 1000 || normalized.Monthly.Used != 250 || normalized.Monthly.Remaining != 750 || normalized.Monthly.ResetAt != time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC) || normalized.Weekly == nil || normalized.Weekly.UsedPercent != 20 || normalized.Weekly.RemainingPercent != 80 || normalized.Weekly.ResetAt != time.Date(2030, 1, 2, 0, 0, 0, 0, time.UTC) {
+		t.Fatalf("xAI normalized usage=%s decoded=%+v err=%v", storedUsage.Normalized, normalized, err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(storedUsage.Raw, &raw); err != nil || len(raw) != 2 || string(raw["monthly"]) != `{"config":{"monthlyLimit":{"val":1000},"used":{"val":250},"billingPeriodEnd":"2030-01-01T00:00:00Z"}}` || string(raw["credits"]) != `{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"},"creditUsagePercent":20,"billingPeriodEnd":"2030-01-02T00:00:00Z"}}` {
+		t.Fatalf("xAI raw usage=%s decoded=%v err=%v", storedUsage.Raw, raw, err)
+	}
+}
+
+type countingCredentialManager struct {
+	delegate provider.CredentialManager
+	mu       sync.Mutex
+	calls    map[string]int
+}
+
+func (m *countingCredentialManager) Credential(ctx context.Context, accountID string) (provider.Credential, error) {
+	m.mu.Lock()
+	m.calls[accountID]++
+	m.mu.Unlock()
+	return m.delegate.Credential(ctx, accountID)
+}
+
+func (m *countingCredentialManager) AuthenticationFailed(ctx context.Context, accountID string, upstream *provider.UpstreamError) error {
+	return m.delegate.AuthenticationFailed(ctx, accountID, upstream)
+}
+
+func (m *countingCredentialManager) count(accountID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[accountID]
 }
 
 func xaiRuntimeAccount(subject string) store.Account {

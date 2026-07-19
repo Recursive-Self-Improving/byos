@@ -12,7 +12,7 @@ import (
 
 	"byos/internal/accounts"
 	"byos/internal/models"
-	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
 )
@@ -20,17 +20,18 @@ import (
 const basePath = "/admin/api/v1"
 
 type AccountManager interface {
-	StartLogin(context.Context) (oauthxai.DeviceAuthorization, error)
-	CompleteLogin(context.Context, string) (store.Account, error)
+	StartLogin(context.Context) (provider.Authorization, error)
+	LoginStatus(context.Context, string) (provider.AuthorizationSession, error)
+	CancelLogin(context.Context, string) error
 	List(context.Context) ([]store.Account, error)
 	Update(context.Context, string, string, bool) error
 	Delete(context.Context, string) error
 	Refresh(context.Context, string) (store.Account, error)
 }
 
-type OAuthLifecycle interface {
-	Status(context.Context, string) (store.OAuthSession, error)
-	Cancel(context.Context, string) error
+type CompletionCoordinator interface {
+	Resume(string)
+	EnsureCompletion(string)
 }
 
 type UsageReader interface {
@@ -63,7 +64,7 @@ type APIKeyManager interface {
 
 type Services struct {
 	Accounts      AccountManager
-	OAuth         OAuthLifecycle
+	Completion    CompletionCoordinator
 	Usage         UsageReader
 	UsageRefresh  UsageRefresher
 	Models        ModelReader
@@ -160,20 +161,23 @@ func (h *handler) startDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, deviceView{Status: "failed", Error: "device authorization failed"})
 		return
 	}
-	verificationURL := flow.VerificationURIComplete
+	verificationURL := flow.VerificationURLComplete
 	if verificationURL == "" {
-		verificationURL = flow.VerificationURI
+		verificationURL = flow.VerificationURL
 	}
-	writeJSON(w, http.StatusCreated, deviceView{State: flow.State, Status: "pending", UserCode: flow.UserCode, VerificationURL: verificationURL, ExpiresAt: &flow.ExpiresAt})
+	if h.services.Completion != nil {
+		h.services.Completion.Resume(flow.Ref.State)
+	}
+	writeJSON(w, http.StatusCreated, deviceView{State: flow.Ref.State, Status: "pending", UserCode: flow.UserCode, VerificationURL: verificationURL, ExpiresAt: &flow.ExpiresAt})
 }
 
 func (h *handler) pollDevice(w http.ResponseWriter, r *http.Request) {
-	if h.services.OAuth == nil {
+	if h.services.Accounts == nil {
 		internalError(w)
 		return
 	}
 	state := r.PathValue("state")
-	session, err := h.services.OAuth.Status(r.Context(), state)
+	session, err := h.services.Accounts.LoginStatus(r.Context(), state)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, deviceView{State: state, Status: "failed", Error: "device authorization not found"})
@@ -182,26 +186,29 @@ func (h *handler) pollDevice(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	view := deviceView{State: state, Status: session.Status, AccountID: session.AccountID}
+	if h.services.Completion != nil && (session.Status == provider.AuthorizationPending || session.Status == provider.AuthorizationAuthorized) {
+		h.services.Completion.EnsureCompletion(state)
+	}
+	view := deviceView{State: state, Status: string(session.Status), AccountID: session.AccountID}
 	switch session.Status {
-	case "pending", "authorized":
+	case provider.AuthorizationPending, provider.AuthorizationAuthorized:
 		view.Status = "pending"
 		view.UserCode = session.UserCode
 		view.ExpiresAt = &session.ExpiresAt
-		view.VerificationURL = session.VerificationURIComplete
+		view.VerificationURL = session.VerificationURLComplete
 		if view.VerificationURL == "" {
-			view.VerificationURL = session.VerificationURI
+			view.VerificationURL = session.VerificationURL
 		}
 		writeJSON(w, http.StatusAccepted, view)
-	case "completed":
+	case provider.AuthorizationCompleted:
 		writeJSON(w, http.StatusOK, view)
-	case "expired":
+	case provider.AuthorizationExpired:
 		view.Error = "device authorization expired"
 		writeJSON(w, http.StatusGone, view)
-	case "cancelled":
+	case provider.AuthorizationCancelled:
 		view.Error = "device authorization was cancelled"
 		writeJSON(w, http.StatusConflict, view)
-	case "failed":
+	case provider.AuthorizationFailed:
 		view.Error = "device authorization failed"
 		writeJSON(w, http.StatusConflict, view)
 	default:
@@ -211,11 +218,11 @@ func (h *handler) pollDevice(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) cancelDevice(w http.ResponseWriter, r *http.Request) {
 	state := r.PathValue("state")
-	if h.services.OAuth == nil {
+	if h.services.Accounts == nil {
 		writeJSON(w, http.StatusInternalServerError, deviceView{State: state, Status: "failed", Error: "device authorization cancellation failed"})
 		return
 	}
-	if err := h.services.OAuth.Cancel(r.Context(), state); err != nil {
+	if err := h.services.Accounts.CancelLogin(r.Context(), state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, deviceView{State: state, Status: "failed", Error: "device authorization not found"})
 		} else {
@@ -467,7 +474,7 @@ func (h *handler) refreshUsage(w http.ResponseWriter, r *http.Request) {
 		notFoundOrInternal(w, err, "account")
 		return
 	}
-	refreshErr := h.services.UsageRefresh.RefreshAccount(r.Context(), usage.Account{ID: account.ID, AccessToken: account.Credentials.AccessToken, Enabled: account.Enabled})
+	refreshErr := h.services.UsageRefresh.RefreshAccount(r.Context(), usage.Account{ID: account.ID, Provider: account.Provider, Enabled: account.Enabled})
 	value, latestErr := h.services.Usage.Latest(r.Context(), id)
 	if latestErr != nil {
 		notFoundOrInternal(w, latestErr, "usage")
@@ -570,7 +577,7 @@ func (h *handler) refreshModels(w http.ResponseWriter, r *http.Request) {
 	}
 	failed := false
 	for _, account := range accountsList {
-		if account.Enabled && h.services.ModelsRefresh.RefreshAccount(r.Context(), models.Account{ID: account.ID, AccessToken: account.Credentials.AccessToken, Enabled: true}) != nil {
+		if account.Enabled && h.services.ModelsRefresh.RefreshAccount(r.Context(), models.Account{ID: account.ID, Provider: account.Provider, Enabled: true}) != nil {
 			failed = true
 		}
 	}

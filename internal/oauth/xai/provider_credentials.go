@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -43,6 +45,40 @@ func (m *ProviderCredentialManager) CredentialUsable(ctx context.Context, accoun
 		return false, nil
 	}
 	return CredentialsUsable(account, m.now()), nil
+}
+
+// NeedsRefresh evaluates xAI refresh timing while keeping the account's expiry
+// and credential material inside the provider adapter.
+func (m *ProviderCredentialManager) NeedsRefresh(ctx context.Context, accountID string, now time.Time) (bool, error) {
+	account, err := m.xaiAccount(ctx, accountID)
+	if err != nil {
+		return false, err
+	}
+	return NeedsRefresh(account, now), nil
+}
+
+// Refresh verifies provider ownership before delegating to RefreshService. The
+// refreshed account remains internal to the adapter.
+func (m *ProviderCredentialManager) Refresh(ctx context.Context, accountID string) error {
+	if _, err := m.xaiAccount(ctx, accountID); err != nil {
+		return err
+	}
+	if m.refresher == nil {
+		return errors.New("xAI credential refresh is unavailable")
+	}
+	_, err := m.refresher.Refresh(ctx, accountID)
+	return providerCredentialError(err)
+}
+
+func (m *ProviderCredentialManager) xaiAccount(ctx context.Context, accountID string) (store.Account, error) {
+	account, err := m.accounts.Get(ctx, accountID)
+	if err != nil {
+		return store.Account{}, err
+	}
+	if account.Provider != provider.XAI {
+		return store.Account{}, fmt.Errorf("account %q is not an xAI account: %w", accountID, provider.ErrProviderMismatch)
+	}
+	return account, nil
 }
 
 func (m *ProviderCredentialManager) Credential(ctx context.Context, accountID string) (provider.Credential, error) {
@@ -87,15 +123,40 @@ func providerCredentialError(err error) error {
 	if err == nil {
 		return nil
 	}
+	var upstream *provider.UpstreamError
+	if errors.As(err, &upstream) {
+		return &provider.UpstreamError{Provider: provider.XAI, Status: upstream.Status, Classification: upstream.Classification}
+	}
+	classification := provider.ErrorClassification{
+		Class:         provider.ClassUpstream,
+		PublicStatus:  http.StatusBadGateway,
+		PublicCode:    "provider_error",
+		PublicMessage: "upstream provider error",
+	}
 	var oauthErr *OAuthError
 	if errors.As(err, &oauthErr) && oauthErr.Code == "invalid_grant" {
-		return &provider.UpstreamError{Provider: provider.XAI, Status: 401, Classification: provider.ErrorClassification{
+		return &provider.UpstreamError{Provider: provider.XAI, Status: http.StatusUnauthorized, Classification: provider.ErrorClassification{
 			Class: provider.ClassInvalidGrant, RetryNext: true, DisableAccount: true, ReloginRequired: true,
-			CooldownScope: provider.CooldownAccount, PublicStatus: 401, PublicCode: "provider_authentication_error", PublicMessage: "account requires login",
+			CooldownScope: provider.CooldownAccount, PublicStatus: http.StatusUnauthorized, PublicCode: "provider_authentication_error", PublicMessage: "account requires login",
 		}}
 	}
-	return err
+	if errors.Is(err, context.Canceled) {
+		classification.Class = provider.ClassCancelled
+		classification.PublicStatus = http.StatusRequestTimeout
+		classification.PublicCode = "request_cancelled"
+		classification.PublicMessage = "provider request cancelled"
+	} else {
+		var networkError net.Error
+		if errors.As(err, &networkError) {
+			classification.Class = provider.ClassConnection
+			classification.RetryNext = true
+			classification.PublicStatus = http.StatusServiceUnavailable
+			classification.PublicCode = "provider_unavailable"
+		}
+	}
+	return &provider.UpstreamError{Provider: provider.XAI, Classification: classification}
 }
 
 var _ provider.CredentialManager = (*ProviderCredentialManager)(nil)
 var _ provider.CredentialUsability = (*ProviderCredentialManager)(nil)
+var _ provider.CredentialRefresher = (*ProviderCredentialManager)(nil)

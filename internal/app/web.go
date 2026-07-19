@@ -9,7 +9,7 @@ import (
 
 	"byos/internal/accounts"
 	"byos/internal/models"
-	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
 	"byos/internal/web"
@@ -331,15 +331,11 @@ func projectWebAPIKey(value store.APIKey) web.APIKey {
 }
 
 type webOAuthAccountManager interface {
-	StartLogin(context.Context) (oauthxai.DeviceAuthorization, error)
+	StartLogin(context.Context) (provider.Authorization, error)
+	LoginStatus(context.Context, string) (provider.AuthorizationSession, error)
 	CompleteLogin(context.Context, string) (store.Account, error)
-}
-
-type webOAuthLifecycle interface {
-	Session(context.Context, string) (store.OAuthSession, error)
-	Resumable(context.Context) ([]store.OAuthSession, error)
-	Cancel(context.Context, string) error
-	Stop(string)
+	CancelLogin(context.Context, string) error
+	ResumeLogins(context.Context) ([]provider.AuthorizationSession, error)
 }
 
 type activeOAuthCompletion struct {
@@ -350,7 +346,6 @@ type activeOAuthCompletion struct {
 type webOAuthAdapter struct {
 	ctx      context.Context
 	accounts webOAuthAccountManager
-	oauth    webOAuthLifecycle
 	now      func() time.Time
 
 	mu     sync.Mutex
@@ -358,8 +353,8 @@ type webOAuthAdapter struct {
 	closed bool
 }
 
-func newWebOAuthAdapter(ctx context.Context, accountService webOAuthAccountManager, oauthService webOAuthLifecycle) *webOAuthAdapter {
-	return &webOAuthAdapter{ctx: ctx, accounts: accountService, oauth: oauthService, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]*activeOAuthCompletion)}
+func newWebOAuthAdapter(ctx context.Context, accountService webOAuthAccountManager) *webOAuthAdapter {
+	return &webOAuthAdapter{ctx: ctx, accounts: accountService, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]*activeOAuthCompletion)}
 }
 
 func (a *webOAuthAdapter) Start(ctx context.Context) (web.OAuthFlow, error) {
@@ -367,25 +362,19 @@ func (a *webOAuthAdapter) Start(ctx context.Context) (web.OAuthFlow, error) {
 	if err != nil {
 		return web.OAuthFlow{}, err
 	}
-	a.resume(value.State)
-	return web.OAuthFlow{State: value.State, Status: "pending", UserCode: value.UserCode, VerificationURL: verificationURL(value.VerificationURIComplete, value.VerificationURI), ExpiresAt: value.ExpiresAt, PollAfter: value.PollInterval}, nil
+	a.resume(value.Ref.State)
+	return web.OAuthFlow{State: value.Ref.State, Status: "pending", UserCode: value.UserCode, VerificationURL: verificationURL(value.VerificationURLComplete, value.VerificationURL), ExpiresAt: value.ExpiresAt, PollAfter: value.PollInterval}, nil
 }
 
 func (a *webOAuthAdapter) Get(ctx context.Context, state string) (web.OAuthFlow, error) {
-	value, err := a.oauth.Session(ctx, state)
+	value, err := a.accounts.LoginStatus(ctx, state)
 	if err != nil {
 		return web.OAuthFlow{}, err
 	}
-	if value.Status == "authorized" || (value.Status == "pending" && a.now().Before(value.ExpiresAt)) {
+	if value.Status == provider.AuthorizationAuthorized || (value.Status == provider.AuthorizationPending && a.now().Before(value.ExpiresAt)) {
 		a.resume(state)
 	}
 	return projectWebOAuthFlow(value, a.now()), nil
-}
-func (a *webOAuthAdapter) Status(ctx context.Context, state string) (store.OAuthSession, error) {
-	if _, err := a.Get(ctx, state); err != nil {
-		return store.OAuthSession{}, err
-	}
-	return a.oauth.Session(ctx, state)
 }
 
 func (a *webOAuthAdapter) Cancel(ctx context.Context, state string) error {
@@ -395,14 +384,14 @@ func (a *webOAuthAdapter) Cancel(ctx context.Context, state string) error {
 	if active != nil {
 		active.cancel()
 	}
-	return a.oauth.Cancel(ctx, state)
+	return a.accounts.CancelLogin(ctx, state)
 }
 
 func (a *webOAuthAdapter) Run(ctx context.Context) error {
-	values, err := a.oauth.Resumable(ctx)
+	values, err := a.accounts.ResumeLogins(ctx)
 	if err == nil {
 		for _, value := range values {
-			a.resume(value.State)
+			a.resume(value.Ref.State)
 		}
 	} else if ctx.Err() == nil {
 		return err
@@ -418,14 +407,21 @@ func (a *webOAuthAdapter) Run(ctx context.Context) error {
 		active[state] = completion
 	}
 	a.mu.Unlock()
-	for state, completion := range active {
+	for _, completion := range active {
 		completion.cancel()
-		a.oauth.Stop(state)
 	}
 	for _, completion := range active {
 		<-completion.done
 	}
 	return ctx.Err()
+}
+
+func (a *webOAuthAdapter) Resume(state string) {
+	a.resume(state)
+}
+
+func (a *webOAuthAdapter) EnsureCompletion(state string) {
+	a.resume(state)
 }
 
 func (a *webOAuthAdapter) resume(state string) {
@@ -451,32 +447,32 @@ func (a *webOAuthAdapter) resume(state string) {
 	}()
 }
 
-func projectWebOAuthFlow(value store.OAuthSession, now time.Time) web.OAuthFlow {
-	status := value.Status
+func projectWebOAuthFlow(value provider.AuthorizationSession, now time.Time) web.OAuthFlow {
+	status := string(value.Status)
 	message := ""
-	switch status {
-	case "authorized":
+	switch value.Status {
+	case provider.AuthorizationAuthorized:
 		status = "pending"
 		message = "Authorization received. Finishing account setup."
-	case "pending":
+	case provider.AuthorizationPending:
 		if !now.Before(value.ExpiresAt) {
 			status = "expired"
 			message = "The device code expired. Start a new connection."
 		}
-	case "completed":
-	case "cancelled":
+	case provider.AuthorizationCompleted:
+	case provider.AuthorizationCancelled:
 		message = "Device authorization was cancelled."
-	case "expired":
+	case provider.AuthorizationExpired:
 		message = "The device code expired. Start a new connection."
 	default:
 		status = "failed"
 		message = "Device authorization failed. Start a new connection."
 	}
 	return web.OAuthFlow{
-		State:            value.State,
+		State:            value.Ref.State,
 		Status:           status,
 		UserCode:         value.UserCode,
-		VerificationURL:  verificationURL(value.VerificationURIComplete, value.VerificationURI),
+		VerificationURL:  verificationURL(value.VerificationURLComplete, value.VerificationURL),
 		ExpiresAt:        value.ExpiresAt,
 		PollAfter:        value.PollInterval,
 		AccountID:        value.AccountID,

@@ -41,6 +41,7 @@ type Runtime struct {
 	Server                             *http.Server
 	Store                              *store.SQLite
 	Accounts                           *accounts.Service
+	capabilityRegistry                 *provider.RuntimeCapabilityRegistry
 	modelWorker                        *models.Worker
 	usageWorker                        *usage.Worker
 	refreshWorker                      *accounts.RefreshWorker
@@ -80,7 +81,7 @@ func (a modelRefresh) Refresh(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return a.worker.RefreshAccount(ctx, models.Account{ID: account.ID, AccessToken: account.Credentials.AccessToken, Enabled: account.Enabled})
+	return a.worker.RefreshAccount(ctx, models.Account{ID: account.ID, Provider: account.Provider, Enabled: account.Enabled})
 }
 
 type usageRefresh struct {
@@ -93,7 +94,7 @@ func (a usageRefresh) Refresh(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return a.worker.RefreshAccount(ctx, usage.Account{ID: account.ID, AccessToken: account.Credentials.AccessToken, Enabled: account.Enabled})
+	return a.worker.RefreshAccount(ctx, usage.Account{ID: account.ID, Provider: account.Provider, Enabled: account.Enabled})
 }
 
 type usageRecorder struct{ service *usage.Service }
@@ -237,7 +238,9 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	adminThrottleRepo := store.NewAdminAuthThrottleRepository(database.DB)
 	apiKeyService := accounts.NewAPIKeyService(store.NewAPIKeyRepository(database.DB))
 	upstream := xai.NewClient(xai.HTTPConfig{BaseURL: cfg.Upstream.CLIProxyBaseURL, ClientVersion: cfg.Upstream.GrokClientVersion, UserAgent: "byos", RequestTimeout: cfg.Upstream.RequestTimeout.Duration(), SSEIdleTimeout: cfg.Upstream.SSEIdleTimeout.Duration()})
-	catalog := models.NewCatalog(capabilityRepo, models.NewUpstream(upstream), cfg.Models.Allowlist, cfg.Models.Aliases)
+	modelClient := models.NewClient(upstream)
+	modelProvider := models.NewXAIProvider(modelClient)
+	catalog := models.NewCatalog(capabilityRepo, cfg.Models.Allowlist, cfg.Models.Aliases)
 	staticCatalog, err := models.NewStaticCatalog(cfg.Models.Entries)
 	if err != nil {
 		return fail(err)
@@ -246,31 +249,37 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	if err != nil {
 		return fail(err)
 	}
-	modelWorker := models.NewWorker(models.NewStoreAccountProvider(accountRepo), catalog, 15*time.Minute, cfg.Upstream.RequestTimeout.Duration(), 4)
-	usageService := usage.NewService(usage.NewBillingAdapter(upstream), usageRepo, localUsageRepo)
-	usageWorker := usage.NewWorker(usage.NewStoreAccountProvider(accountRepo), usageService, cfg.Usage.RefreshInterval.Duration(), cfg.Upstream.RequestTimeout.Duration(), 4)
+	usageProvider := usage.NewXAIProvider(usage.NewClient(upstream))
+	usageService := usage.NewService(usageRepo, localUsageRepo)
 	discovery := oauthxai.NewDiscoveryClient(nil, "")
 	oauthOptions := oauthxai.Options{ClientID: cfg.OAuth.ClientID, Scopes: cfg.OAuth.Scopes}
 	oauthService := oauthxai.NewService(discovery, nil, oauthRepo, oauthOptions)
 	refreshService := oauthxai.NewRefreshService(nil, accountRepo, oauthOptions)
 	identity := &lazyIdentity{discovery: discovery, clientID: oauthOptions.ClientID}
-	modelRefresher := modelRefresh{accountRepo, modelWorker}
-	usageRefresher := usageRefresh{accountRepo, usageWorker}
-	accountService := accounts.NewService(accountRepo, oauthService, identity, refreshService, modelRefresher, usageRefresher)
 	cooldowns := routing.NewCooldownManager(cooldownRepo, accountRepo)
 	credentialManager := oauthxai.NewProviderCredentialManager(accountRepo, refreshService)
+	lifecycle := oauthxai.NewProviderLifecycle(oauthService, accountRepo, identity)
 	capabilityRegistry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{
 		Provider:  provider.XAI,
 		PolicyKey: "xai",
 		Capabilities: provider.Capabilities{
-			Policy:      xai.RequestPolicy{},
-			Generation:  xai.NewProviderClient(upstream),
-			Credentials: credentialManager,
+			Policy:              xai.RequestPolicy{},
+			Generation:          xai.NewProviderClient(upstream),
+			Credentials:         credentialManager,
+			CredentialRefresher: credentialManager,
+			Lifecycle:           lifecycle,
+			ModelDiscoverer:     modelProvider,
+			UsageFetcher:        usageProvider,
 		},
 	}})
 	if err != nil {
 		return fail(err)
 	}
+	modelWorker := models.NewWorker(models.NewStoreAccountProvider(accountRepo), capabilityRegistry, catalog, 15*time.Minute, cfg.Upstream.RequestTimeout.Duration(), 4)
+	usageWorker := usage.NewWorker(usage.NewStoreAccountProvider(accountRepo), capabilityRegistry, usageService, cfg.Usage.RefreshInterval.Duration(), cfg.Upstream.RequestTimeout.Duration(), 4)
+	modelRefresher := modelRefresh{accountRepo, modelWorker}
+	usageRefresher := usageRefresh{accountRepo, usageWorker}
+	accountService := accounts.NewService(accountRepo, capabilityRegistry, modelRefresher, usageRefresher)
 	executor := routing.NewExecutor(routing.NewScheduler(), modelCatalog, capabilityRegistry, cooldowns, accountRepo, capabilityRepo, cooldownRepo)
 	executor.SetUsageRecorder(usageRecorder{service: usageService})
 	transforms := translate.NewRegistry()
@@ -295,8 +304,8 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	}, Sessions: sessionService}, Messages: apianthropic.MessagesHandler{Transform: anthropicTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {
 		return executor.Stream(ctx, request)
 	}}, CountTokens: http.HandlerFunc(apianthropic.CountTokensHandler)}
-	webOAuth := newWebOAuthAdapter(ctx, accountService, oauthService)
-	handlers.Admin = admin.NewHandler(admin.Services{Accounts: accountService, OAuth: webOAuth, Usage: usageService, UsageRefresh: usageWorker, Models: catalog, ModelsRefresh: modelWorker, Cooldowns: cooldownRepo, APIKeys: apiKeyService})
+	webOAuth := newWebOAuthAdapter(ctx, accountService)
+	handlers.Admin = admin.NewHandler(admin.Services{Accounts: accountService, Completion: webOAuth, Usage: usageService, UsageRefresh: usageWorker, Models: catalog, ModelsRefresh: modelWorker, Cooldowns: cooldownRepo, APIKeys: apiKeyService})
 	webAccounts := &webAccountAdapter{accounts: accountService, models: catalog, usage: usageService, cooldowns: cooldownRepo, now: func() time.Time { return time.Now().UTC() }}
 	trustedProxies, err := requestsource.ParseTrustedProxies(cfg.Server.TrustedProxies)
 	if err != nil {
@@ -327,7 +336,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	handlers.Web = webHandler
 	root := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: apiKeyService, AdminAPIKey: secrets.AdminAPIKey(), AdminAttempts: adminAuthGuard, AdminSources: trustedProxies, MaxBodyBytes: cfg.Limits.MaxBodyBytes, Logger: logger})
 	trackedRoot, activity := api.NewActivityTracker(root)
-	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, refreshService, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, adminThrottleRepo, cooldownRepo, 30*24*time.Hour, auththrottle.DefaultPolicy().SourceRetention), webOAuth: webOAuth, activity: activity, shutdownTimeout: 10 * time.Second, forceDrainTimeout: 5 * time.Second}
+	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, capabilityRegistry: capabilityRegistry, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, capabilityRegistry, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, adminThrottleRepo, cooldownRepo, 30*24*time.Hour, auththrottle.DefaultPolicy().SourceRetention), webOAuth: webOAuth, activity: activity, shutdownTimeout: 15 * time.Second, forceDrainTimeout: 5 * time.Second}
 	runtime.Server = &http.Server{Addr: cfg.Server.Listen, Handler: trackedRoot, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	return runtime, nil
 }
