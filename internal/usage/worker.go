@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"byos/internal/store"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
-	"supergrok-api/internal/store"
 )
 
 type Account struct {

@@ -1,10 +1,10 @@
 package translate
 
 import (
-	"supergrok-api/internal/translate/anthropic"
-	"supergrok-api/internal/translate/openai/chatcompletions"
-	"supergrok-api/internal/translate/openai/responses"
-	"supergrok-api/internal/translate/registry"
+	"byos/internal/translate/anthropic"
+	"byos/internal/translate/openai/chatcompletions"
+	"byos/internal/translate/openai/responses"
+	"byos/internal/translate/registry"
 )
 
 func NewRegistry() *registry.Registry {

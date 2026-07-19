@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byos/internal/store"
 )
 
 type CooldownManager struct {

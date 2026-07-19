@@ -12,7 +12,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o /out/supergrok-api ./cmd/supergrok-api
+RUN GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o /out/byos ./cmd/byos
 
 FROM debian:bookworm-slim AS runtime
 ARG VERSION=container
@@ -24,13 +24,13 @@ RUN apt-get update \
     && apt-get install --no-install-recommends --yes ca-certificates wget \
     && rm -rf /var/lib/apt/lists/* \
     && install --directory --mode=0700 /data \
-    && install --directory --mode=0755 /etc/supergrok-api \
-    && install --directory --mode=0755 /usr/share/doc/supergrok-api
+    && install --directory --mode=0755 /etc/byos \
+    && install --directory --mode=0755 /usr/share/doc/byos
 
-COPY --from=builder /out/supergrok-api /usr/local/bin/supergrok-api
-COPY --from=builder /src/LICENSE /usr/share/doc/supergrok-api/LICENSE
-COPY --from=builder /src/THIRD_PARTY_NOTICES /usr/share/doc/supergrok-api/THIRD_PARTY_NOTICES
-COPY --from=builder /src/deploy/railway.yaml /etc/supergrok-api/railway.yaml
+COPY --from=builder /out/byos /usr/local/bin/byos
+COPY --from=builder /src/LICENSE /usr/share/doc/byos/LICENSE
+COPY --from=builder /src/THIRD_PARTY_NOTICES /usr/share/doc/byos/THIRD_PARTY_NOTICES
+COPY --from=builder /src/deploy/railway.yaml /etc/byos/railway.yaml
 
 WORKDIR /data
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
@@ -42,4 +42,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # Railway volumes are mounted as root and require the service process to run as UID 0.
 USER root:root
-CMD ["supergrok-api", "serve", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
+CMD ["byos", "serve", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]

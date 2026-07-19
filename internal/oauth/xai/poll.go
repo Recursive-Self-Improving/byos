@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byos/internal/store"
 )
 
 type TokenResponse struct {

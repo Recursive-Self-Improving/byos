@@ -16,7 +16,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"supergrok-api/internal/store"
+	"byos/internal/store"
 )
 
 type RefreshService struct {

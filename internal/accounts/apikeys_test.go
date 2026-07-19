@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/store"
+	"byos/internal/store"
 )
 
 func TestAPIKeyLifecycleAndLastUseRateLimit(t *testing.T) {
@@ -82,7 +82,10 @@ func TestAPIKeyLifecycleAndLastUseRateLimit(t *testing.T) {
 	if _, err := service.Authenticate(ctx, created.Plaintext); err == nil {
 		t.Fatal("revoked key authenticated")
 	}
-	if _, err := service.Authenticate(ctx, "sgk_unknown"); err == nil {
+	if _, err := service.Authenticate(ctx, "sgk_legacy_key"); err == nil {
+		t.Fatal("legacy key authenticated")
+	}
+	if _, err := service.Authenticate(ctx, "byos_unknown"); err == nil {
 		t.Fatal("unknown key authenticated")
 	}
 	if err := database.Checkpoint(ctx); err != nil {
@@ -100,4 +103,4 @@ func TestAPIKeyLifecycleAndLastUseRateLimit(t *testing.T) {
 		t.Fatalf("hash count = %d, %v", hashCount, err)
 	}
 }
-func APIKeyPrefixLength() int { return 47 }
+func APIKeyPrefixLength() int { return 48 }

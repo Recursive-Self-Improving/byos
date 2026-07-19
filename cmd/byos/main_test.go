@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"supergrok-api/internal/app"
-	"supergrok-api/internal/config"
-	oauthxai "supergrok-api/internal/oauth/xai"
+	"byos/internal/app"
+	"byos/internal/config"
+	oauthxai "byos/internal/oauth/xai"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -22,8 +22,9 @@ func TestVersionCommand(t *testing.T) {
 	if err := runWith(context.Background(), []string{"version"}, deps); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), version) || !strings.Contains(output.String(), commit) {
-		t.Fatalf("output=%q", output.String())
+	wantPrefix := "byos " + version + " (commit " + commit + ", built " + buildDate
+	if !strings.HasPrefix(output.String(), wantPrefix) {
+		t.Fatalf("output=%q, want prefix %q", output.String(), wantPrefix)
 	}
 }
 func TestServeLoadsConfigurationSecretsAndRuntime(t *testing.T) {
@@ -67,9 +68,9 @@ func TestVerificationURLFallback(t *testing.T) {
 }
 
 func TestLoginCancellationClosesRuntime(t *testing.T) {
-	t.Setenv("SUPERGROK_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32)))
-	t.Setenv("SUPERGROK_ADMIN_PASSWORD", "password")
-	t.Setenv("SUPERGROK_ADMIN_API_KEY", "admin-key")
+	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32)))
+	t.Setenv("BYOS_ADMIN_PASSWORD", "password")
+	t.Setenv("BYOS_ADMIN_API_KEY", "admin-key")
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
 	var runtime *app.Runtime

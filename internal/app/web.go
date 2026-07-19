@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/models"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/usage"
-	"supergrok-api/internal/web"
+	"byos/internal/accounts"
+	"byos/internal/models"
+	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/store"
+	"byos/internal/usage"
+	"byos/internal/web"
 )
 
 type webAccountManager interface {

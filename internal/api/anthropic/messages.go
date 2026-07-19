@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"supergrok-api/internal/api"
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/search"
-	"supergrok-api/internal/translate/registry"
+	"byos/internal/api"
+	"byos/internal/routing"
+	"byos/internal/search"
+	"byos/internal/translate/registry"
 )
 
 type MessagesHandler struct {

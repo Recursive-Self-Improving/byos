@@ -9,10 +9,13 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"supergrok-api/migrations"
+	"byos/migrations"
 )
 
-const cleanupBatchSize = 500
+const (
+	cleanupBatchSize = 500
+	databaseFilename = "byos.db"
+)
 
 type SQLite struct {
 	DB   *sql.DB
@@ -26,7 +29,7 @@ func Open(ctx context.Context, dataDir string) (*SQLite, error) {
 	if err := os.Chmod(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure data directory: %w", err)
 	}
-	path := filepath.Join(dataDir, "supergrok.db")
+	path := filepath.Join(dataDir, databaseFilename)
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

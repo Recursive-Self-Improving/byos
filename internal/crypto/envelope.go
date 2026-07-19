@@ -10,9 +10,12 @@ import (
 	"strings"
 )
 
-const envelopePrefix = "v1:"
+const (
+	envelopePrefix = "v1:"
+	envelopeDomain = "byos/envelope/v1"
+)
 
-var envelopeAAD = []byte("supergrok-api/envelope/v1")
+var envelopeAAD = []byte(envelopeDomain)
 
 func Encrypt(key [32]byte, plaintext []byte) (string, error) {
 	gcm, err := newGCM(key)

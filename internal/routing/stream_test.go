@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/xai"
+	"byos/internal/xai"
 )
 
 func TestStreamFailsOverOnlyBeforeFirstEventWithoutDuplicates(t *testing.T) {

@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"time"
 
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/search"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/xai"
+	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/search"
+	"byos/internal/store"
+	"byos/internal/xai"
 )
 
 // ModelResolver resolves public model names and aliases to an upstream model.

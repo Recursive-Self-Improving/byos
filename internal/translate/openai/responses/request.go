@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"supergrok-api/internal/translate/common"
+	"byos/internal/translate/common"
 )
 
 func Request(model string, body []byte, _ bool) ([]byte, error) {

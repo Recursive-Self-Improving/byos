@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 
-	"supergrok-api/internal/translate/common"
-	"supergrok-api/internal/translate/registry"
+	"byos/internal/translate/common"
+	"byos/internal/translate/registry"
 )
 
 type Transformer struct{}

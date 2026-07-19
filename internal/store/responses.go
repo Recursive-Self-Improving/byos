@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
+	appcrypto "byos/internal/crypto"
 )
 
 type ResponseSession struct {

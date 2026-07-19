@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"supergrok-api/internal/api"
-	translateanthropic "supergrok-api/internal/translate/anthropic"
+	"byos/internal/api"
+	translateanthropic "byos/internal/translate/anthropic"
 )
 
 func CountTokensHandler(w http.ResponseWriter, r *http.Request) {

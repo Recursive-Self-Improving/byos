@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"supergrok-api/internal/api"
-	"supergrok-api/internal/routing"
-	"supergrok-api/internal/search"
-	"supergrok-api/internal/translate"
-	"supergrok-api/internal/translate/registry"
-	"supergrok-api/internal/xai"
+	"byos/internal/api"
+	"byos/internal/routing"
+	"byos/internal/search"
+	"byos/internal/translate"
+	"byos/internal/translate/registry"
+	"byos/internal/xai"
 )
 
 type fakeStream struct {

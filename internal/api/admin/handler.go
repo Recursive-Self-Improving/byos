@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/models"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/usage"
+	"byos/internal/accounts"
+	"byos/internal/models"
+	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/store"
+	"byos/internal/usage"
 )
 
 const basePath = "/admin/api/v1"

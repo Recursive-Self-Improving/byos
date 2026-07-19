@@ -31,6 +31,9 @@ func TestAuthenticatedNavigationAndPageInventory(t *testing.T) {
 			if response.StatusCode != http.StatusOK || !strings.Contains(body, page.want) {
 				t.Fatalf("GET %s = %d, missing %q", page.path, response.StatusCode, page.want)
 			}
+			if !strings.Contains(body, "BYOS") || strings.Contains(body, "SuperGrok administration") {
+				t.Fatalf("GET %s has stale or missing brand", page.path)
+			}
 			for _, link := range []string{"/admin/accounts", "/admin/usage", "/admin/models", "/admin/api-keys"} {
 				if !strings.Contains(body, `href="`+link+`"`) {
 					t.Fatalf("GET %s missing navigation link %s", page.path, link)

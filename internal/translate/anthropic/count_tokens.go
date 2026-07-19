@@ -7,7 +7,7 @@ import (
 
 	"github.com/tiktoken-go/tokenizer"
 
-	"supergrok-api/internal/search"
+	"byos/internal/search"
 )
 
 type ValidationError struct{ Message string }

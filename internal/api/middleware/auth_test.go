@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/auththrottle"
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/store"
+	"byos/internal/accounts"
+	"byos/internal/auththrottle"
+	appcrypto "byos/internal/crypto"
+	"byos/internal/store"
 )
 
 func TestClientAuth(t *testing.T) {
@@ -39,7 +39,7 @@ func TestClientAuth(t *testing.T) {
 	for _, test := range []struct {
 		name, header string
 		status       int
-	}{{"missing", "", 401}, {"malformed", "Basic x", 401}, {"unknown", "Bearer sgk_unknown", 401}, {"valid", "Bearer " + created.Plaintext, 204}} {
+	}{{"missing", "", 401}, {"malformed", "Basic x", 401}, {"unknown", "Bearer byos_unknown", 401}, {"valid", "Bearer " + created.Plaintext, 204}} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 			request.Header.Set("Authorization", test.header)
@@ -99,7 +99,7 @@ func (fixedAdminSource) ClientIP(*http.Request) (netip.Addr, error) {
 
 func TestAdminAuthIsSeparate(t *testing.T) {
 	handler := AdminAuth("admin-secret", directAdminAttempts{}, fixedAdminSource{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
-	for _, header := range []string{"Bearer sgk_client", "Bearer wrong", ""} {
+	for _, header := range []string{"Bearer byos_client", "Bearer wrong", ""} {
 		request := httptest.NewRequest(http.MethodGet, "/admin/api/v1/accounts", nil)
 		request.Header.Set("Authorization", header)
 		response := httptest.NewRecorder()

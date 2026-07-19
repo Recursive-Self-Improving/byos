@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
-	"supergrok-api/internal/store"
+	appcrypto "byos/internal/crypto"
+	"byos/internal/store"
 )
 
 func oauthTestService(t *testing.T, tokenBodies []string) (*Service, *store.SQLite) {

@@ -2,10 +2,15 @@ package config
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
+)
+
+const (
+	masterKeyEnvironment     = "BYOS_MASTER_KEY"
+	adminPasswordEnvironment = "BYOS_ADMIN_PASSWORD"
+	adminAPIKeyEnvironment   = "BYOS_ADMIN_API_KEY"
 )
 
 type Secrets struct {
@@ -15,19 +20,19 @@ type Secrets struct {
 }
 
 func LoadSecrets() (Secrets, error) {
-	master, err := secretValue("SUPERGROK_MASTER_KEY")
+	master, err := secretValue(masterKeyEnvironment)
 	if err != nil {
 		return Secrets{}, err
 	}
 	decoded, err := base64.StdEncoding.DecodeString(master)
 	if err != nil || len(decoded) != 32 {
-		return Secrets{}, errors.New("SUPERGROK_MASTER_KEY must be base64-encoded 32 bytes")
+		return Secrets{}, fmt.Errorf("%s must be base64-encoded 32 bytes", masterKeyEnvironment)
 	}
-	password, err := secretValue("SUPERGROK_ADMIN_PASSWORD")
+	password, err := secretValue(adminPasswordEnvironment)
 	if err != nil {
 		return Secrets{}, err
 	}
-	apiKey, err := secretValue("SUPERGROK_ADMIN_API_KEY")
+	apiKey, err := secretValue(adminAPIKeyEnvironment)
 	if err != nil {
 		return Secrets{}, err
 	}

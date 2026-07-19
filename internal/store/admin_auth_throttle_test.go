@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/auththrottle"
+	"byos/internal/auththrottle"
 )
 
 func TestAdminAuthThrottleRepositoryLadderResetAndGlobalGuard(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	appcrypto "supergrok-api/internal/crypto"
+	appcrypto "byos/internal/crypto"
 )
 
 func TestLocalUsageCountersPersistAcrossRestart(t *testing.T) {

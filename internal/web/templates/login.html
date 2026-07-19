@@ -2,7 +2,7 @@
 <section class="auth-panel" aria-labelledby="login-heading">
   <div class="eyebrow">Restricted administration</div>
   <h1 id="login-heading">Sign in</h1>
-  <p class="lede">Use the administrator password configured for this instance.</p>
+  <p class="lede">BYOS (Bring Your Own Subscription) administration. Use the administrator password configured for this instance.</p>
   {{if .ExpiredNotice}}<div class="notice notice-info" role="status">{{.ExpiredNotice}}</div>{{end}}
   {{if .Error}}<div class="notice notice-error" role="alert">{{.Error}}</div>{{end}}
   <form class="stack" method="post" action="/admin/login">

@@ -17,13 +17,13 @@ import (
 	"testing"
 	"time"
 
-	"supergrok-api/internal/accounts"
-	"supergrok-api/internal/config"
-	"supergrok-api/internal/models"
-	oauthxai "supergrok-api/internal/oauth/xai"
-	"supergrok-api/internal/store"
-	"supergrok-api/internal/usage"
-	"supergrok-api/internal/web"
+	"byos/internal/accounts"
+	"byos/internal/config"
+	"byos/internal/models"
+	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/store"
+	"byos/internal/usage"
+	"byos/internal/web"
 )
 
 type adapterAccountManager struct {
@@ -93,7 +93,7 @@ func (a adapterAPIKeys) List(context.Context) ([]store.APIKey, error) {
 	return append([]store.APIKey(nil), a.values...), nil
 }
 func (adapterAPIKeys) Create(context.Context, string) (accounts.CreatedAPIKey, error) {
-	return accounts.CreatedAPIKey{Key: store.APIKey{ID: "key_new", Prefix: "sgk_new", Label: "New"}, Plaintext: "sgk_one_time_secret"}, nil
+	return accounts.CreatedAPIKey{Key: store.APIKey{ID: "key_new", Prefix: "byos_new", Label: "New"}, Plaintext: "byos_one_time_secret"}, nil
 }
 func (adapterAPIKeys) Revoke(context.Context, string) error { return nil }
 
@@ -117,7 +117,7 @@ func TestWebAdaptersProjectOnlySafeManagementData(t *testing.T) {
 	accountAdapter := &webAccountAdapter{accounts: accountManager, models: capabilities, usage: usageReader, cooldowns: adapterCooldowns{value: store.Cooldown{Until: &cooldownUntil, LastErrorClass: "raw provider error secret"}}, now: func() time.Time { return now }}
 	usageAdapter := &webUsageAdapter{accounts: accountManager, usage: usageReader, refresher: adapterRefresher{}}
 	modelAdapter := &webModelAdapter{accounts: accountManager, models: capabilities, refresher: adapterRefresher{}}
-	keyAdapter := &webAPIKeyAdapter{service: adapterAPIKeys{values: []store.APIKey{{ID: "key_safe", Prefix: "sgk_prefix", Label: "Client", CreatedAt: now}}}}
+	keyAdapter := &webAPIKeyAdapter{service: adapterAPIKeys{values: []store.APIKey{{ID: "key_safe", Prefix: "byos_prefix", Label: "Client", CreatedAt: now}}}}
 
 	details, err := accountAdapter.Get(context.Background(), "acct_safe")
 	if err != nil {
@@ -163,7 +163,7 @@ func TestWebAdaptersProjectOnlySafeManagementData(t *testing.T) {
 		t.Fatalf("partial update lost existing fields: %+v", accountManager.updated)
 	}
 	created, err := keyAdapter.Create(context.Background(), "New")
-	if err != nil || created.Plaintext != "sgk_one_time_secret" {
+	if err != nil || created.Plaintext != "byos_one_time_secret" {
 		t.Fatalf("created key = %+v, %v", created, err)
 	}
 	listedAgain, err := keyAdapter.List(context.Background())
@@ -321,9 +321,9 @@ func TestRuntimeMountsWebHandler(t *testing.T) {
 	cfg.DataDir = t.TempDir()
 	cfg.Server.TrustedProxies = []string{"192.0.2.0/24"}
 	master := bytes.Repeat([]byte{31}, 32)
-	t.Setenv("SUPERGROK_MASTER_KEY", base64.StdEncoding.EncodeToString(master))
-	t.Setenv("SUPERGROK_ADMIN_PASSWORD", "runtime-admin-password")
-	t.Setenv("SUPERGROK_ADMIN_API_KEY", "runtime-admin-api-key")
+	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(master))
+	t.Setenv("BYOS_ADMIN_PASSWORD", "runtime-admin-password")
+	t.Setenv("BYOS_ADMIN_API_KEY", "runtime-admin-api-key")
 	secrets, err := config.LoadSecrets()
 	if err != nil {
 		t.Fatal(err)
