@@ -247,11 +247,11 @@ Rollback/risk: configured frame/stream/tool/non-stream limits and malformed trai
 
 ### Chunk 8 — Provider-aware refresh, discovery, and usage workers
 
-Update `internal/accounts/refresh_worker.go`, `internal/models/worker.go`, `internal/usage/worker.go`, service projections, and tests to carry provider and dispatch optional capabilities. Implement optional Devin `GetCliModelConfigs` only as a hardcoded-set capability overlay. Do not implement account statistics or quota RPCs.
+Update `internal/accounts/refresh_worker.go`, `internal/models/worker.go`, `internal/usage/worker.go`, service projections, and tests to carry provider and dispatch optional capabilities. At the implementation review, either implement Devin `GetCliModelConfigs` only as a hardcoded-set capability overlay or explicitly omit it with no registered discoverer or stub. Do not implement account statistics or quota RPCs.
 
-Verification: xAI refresh/billing unchanged; Devin expiry becomes relogin; no Devin credential reaches xAI endpoints; discovery cannot expose a fourth Devin model; unavailable discovery/quota is represented safely; workers remain bounded/restart-safe.
+Verification: xAI refresh/billing unchanged; Devin expiry becomes relogin; no Devin credential reaches xAI endpoints; implemented discovery cannot expose a fourth Devin model and passes bounded fixtures, or omitted discovery has no registered discoverer/stub and passes the absent-capability path; unavailable discovery/quota is represented safely; workers remain bounded/restart-safe.
 
-Rollback/risk: required routing cannot depend on dynamic discovery. The optional adapter can be disabled without removing the three static model definitions.
+Rollback/risk: required routing cannot depend on dynamic discovery. An implemented optional adapter can be disabled without removing the three static model definitions; omission leaves the capability genuinely absent rather than represented by a no-op.
 
 ### Chunk 9 — Final runtime composition and end-to-end model dispatch
 
@@ -279,9 +279,9 @@ Rollback/risk: no new long-lived deployment secret or late configuration contrac
 
 ### Chunk 12 — Final security, regression, and acceptance
 
-Run focused then full automated gates, race checks for lifecycle/routing, local fake-provider smoke, database restart/backup migration scenario, route/non-goal inventory, and source/scope/license review. Live OAuth/provider acceptance is separately recorded if credentials and operator approval exist; lack of live credentials must not weaken deterministic local acceptance.
+Run focused then full automated gates, race checks for lifecycle/routing, local fake-provider smoke, database restart/backup migration scenario, route/non-goal inventory, and source/scope/license review. C12.5 must record a completed live-provider disposition: sanitized live OAuth/provider evidence when credentials and operator approval exist, or the exact credential/operator blocker when they do not. A blocked live scenario remains blocked in that evidence and must not weaken deterministic local acceptance.
 
-Verification: commands and deterministic scenarios in the checklist all pass; every non-live item is checked; any remaining unchecked item is only an explicitly identified credential/approval-blocked live-provider scenario recorded without claiming success; no other blocked decision remains; only the required providers/models/routes are exposed.
+Verification: commands and deterministic scenarios in the checklist all pass; every tracker item, including the C12.5 disposition item, is checked; unavailable live execution is represented by exact blocker evidence without claiming live success; no open tracker dependency or other blocked decision remains; only the required providers/models/routes are exposed.
 
 Rollback/risk: final acceptance must verify a v4 database can upgrade and the service can be restored from the pre-upgrade backup. Do not attempt schema downgrade in place.
 
@@ -306,11 +306,11 @@ Rollback/risk: final acceptance must verify a v4 database can upgrade and the se
 |---|---|---|
 | D-1 | Stable Devin identity is not source-supported. | Fingerprint the opaque token; identical token deduplicates, rotated/new token creates a new account. Document operator cleanup. Do not trust unverified JWT identity claims. |
 | D-2 | Devin refresh token/endpoint is absent. | No refresh. Expiry and 401/403 produce relogin-required. |
-| D-3 | Dynamic Devin discovery is implemented in the source but required IDs are not source constants. | Static ownership is required. Optional discovery only confirms the three IDs and cannot expand `/v1/models`. |
+| D-3 | Dynamic Devin discovery is implemented in the source but required IDs are not source constants. | Static ownership is required. At implementation review, either retain optional discovery only to confirm the three IDs with bounded fixtures, or explicitly omit it and prove no discoverer/stub is registered plus the absent-capability behavior passes. Neither disposition may expand `/v1/models`. |
 | D-4 | Devin account quota/statistics are not implemented in the source. | Excluded. Only per-response token usage is integrated. |
 | D-5 | Public names must be unique without rejecting valid aliases. | The immutable static catalog rejects duplicate public names and ambiguous reuse of one canonical upstream name across different provider/policy identities, while allowing `grok` and `grok-4.5` to share canonical xAI upstream `grok-4.5`. The separate runtime capability registry rejects duplicate provider/policy keys. `OwnedBy` is listing metadata, never a routing key; no provider-qualified names or conflict-resolution schema/UI. |
 | B-1 | License/provenance for copied/generated Devin protobuf and runtime code must be verified before Chunk 6. | Hard blocker for Chunk 6. Record exact source revision and required notices; otherwise obtain an approved clean-room/generation source. |
-| B-2 | Live xAI/Devin OAuth credentials and operator approval may be unavailable. | Not a blocker for deterministic implementation acceptance. Record live scenarios separately as blocked with exact missing credentials/approval; never mark them passed from fake fixtures. |
+| B-2 | Live xAI/Devin OAuth credentials and operator approval may be unavailable. | Not a blocker for deterministic implementation acceptance. Complete and check the C12.5 disposition with sanitized live evidence or the exact missing credential/operator blocker; never mark a blocked live scenario passed from fake fixtures. |
 
 The four unchecked historical `init.todo.md` blockers remain separately open: `Initialize the Go module and pin dependencies`; `Perform live OAuth and x_search acceptance with two accounts`; `Perform live failover and restart acceptance`; and `Complete final source and license review`. Devin tracker item C12.5 cannot satisfy, combine, check, or close any of them.
 
@@ -318,7 +318,7 @@ The four unchecked historical `init.todo.md` blockers remain separately open: `I
 
 The implementation is accepted only when:
 
-- all deterministic and non-live items in [`devin-provider.todo.md`](./devin-provider.todo.md) are checked; only an explicitly credential/approval-blocked live-provider item may remain unchecked and identified without masking automated acceptance;
+- every item in [`devin-provider.todo.md`](./devin-provider.todo.md) is checked, including C8.3 under either its implemented-discovery or explicit-omission DoD and C12.5 as a completed disposition; when live credentials or operator approval are unavailable, the exact live-scenario blocker remains recorded in evidence without being an open tracker dependency or masking automated acceptance;
 - a migrated xAI account still serves both public `grok` and `grok-4.5` through their shared canonical xAI upstream `grok-4.5` with mandatory x_search; duplicate public names and ambiguous canonical provider-model registrations fail while this valid alias pair succeeds;
 - each required Devin model serves through a Devin account with no x_search and unchanged explicit `none`/`auto`/selected tool choice across Chat, Responses, and Anthropic;
 - unknown capability state, affinity, cooldown, 401/403, 429, transient failures, and streaming commitment never produce cross-provider calls;
