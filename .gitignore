@@ -1,0 +1,31 @@
+# Go build and test output
+/bin/
+*.test
+coverage.out
+coverage.html
+
+# Runtime state
+/data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Temporary files
+.tmp-*/
+/tmp/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
