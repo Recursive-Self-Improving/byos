@@ -30,7 +30,7 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	manager := NewCooldownManager(states, accounts)
 	now := time.Now().UTC().Truncate(time.Second)
 	manager.now = func() time.Time { return now }
-	generic := ClassifiedError{Class: ClassRateLimit}
+	generic := provider.ErrorClassification{Class: provider.ClassRateLimit, CooldownScope: provider.CooldownModel}
 	if err := manager.Apply(ctx, account.ID, "model-a", generic); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	if second.BackoffLevel != 1 {
 		t.Fatalf("expired backoff not reset: %+v", second)
 	}
-	explicit := ClassifiedError{Class: ClassRateLimit, Cooldown: 10 * time.Minute, ExplicitRetryAfter: true}
+	explicit := provider.ErrorClassification{Class: provider.ClassRateLimit, CooldownScope: provider.CooldownModel, Cooldown: 10 * time.Minute, ExplicitRetryAfter: true}
 	if err := manager.Apply(ctx, account.ID, "model-b", explicit); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	if modelB.Until.Sub(now) != 10*time.Minute {
 		t.Fatalf("model-b=%+v", modelB)
 	}
-	accountWide := ClassifiedError{Class: ClassTransient, Cooldown: time.Minute, AccountWide: true}
+	accountWide := provider.ErrorClassification{Class: provider.ClassTransient, CooldownScope: provider.CooldownAccount, Cooldown: time.Minute}
 	if err := manager.Apply(ctx, account.ID, "model-a", accountWide); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	if err != nil || global.Until == nil {
 		t.Fatalf("global cooldown = %+v, %v", global, err)
 	}
-	zeroRetry := ClassifiedError{Class: ClassRateLimit, ExplicitRetryAfter: true}
+	zeroRetry := provider.ErrorClassification{Class: provider.ClassRateLimit, CooldownScope: provider.CooldownModel, ExplicitRetryAfter: true}
 	if err := manager.Apply(ctx, account.ID, "zero", zeroRetry); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	if ready.LastErrorClass != modelB.LastErrorClass || ready.LastErrorAt == nil || !ready.LastErrorAt.Equal(*modelB.LastErrorAt) {
 		t.Fatalf("success erased error audit: before=%+v after=%+v", modelB, ready)
 	}
-	if err := manager.Apply(ctx, account.ID, "model-a", InvalidGrant("")); err != nil {
+	if err := manager.Apply(ctx, account.ID, "model-a", provider.ErrorClassification{Class: provider.ClassInvalidGrant, DisableAccount: true, ReloginRequired: true, CooldownScope: provider.CooldownAccount}); err != nil {
 		t.Fatal(err)
 	}
 	disabled, err := manager.accounts.Get(ctx, account.ID)

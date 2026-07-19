@@ -1,8 +1,10 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
@@ -107,20 +109,26 @@ func TestResolvedModelContainsStaticIdentityOnly(t *testing.T) {
 
 type fakePolicy struct{ calls int }
 
-func (f *fakePolicy) Prepare(_ context.Context, _ ResolvedModel, body []byte) ([]byte, error) {
+func (f *fakePolicy) Prepare(_ context.Context, _ ResolvedModel, canonical CanonicalRequest) error {
 	f.calls++
-	return append(body, '\n'), nil
+	canonical["policy"] = true
+	return nil
 }
 
-type fakeClient struct{ marshals int }
+type fakeClient struct{ encodes int }
 
 func (f *fakeClient) Execute(_ context.Context, request GenerationRequest) ([]Event, error) {
-	f.marshals++
-	return []Event{{Event: "response.completed", Data: append([]byte(nil), request.CanonicalBody...)}}, nil
+	var wire bytes.Buffer
+	encoder := json.NewEncoder(&wire)
+	encoder.SetEscapeHTML(false)
+	f.encodes++
+	if err := encoder.Encode(request.Canonical); err != nil {
+		return nil, err
+	}
+	return []Event{{Event: "response.completed", Data: wire.Bytes()}}, nil
 }
 
 func (f *fakeClient) Stream(_ context.Context, _ GenerationRequest) (Stream, error) {
-	f.marshals++
 	return &fakeStream{}, nil
 }
 
@@ -142,6 +150,9 @@ func (fakeCredentials) Credential(context.Context, string) (Credential, error) {
 }
 func (fakeCredentials) AuthenticationFailed(context.Context, string, *UpstreamError) error {
 	return nil
+}
+func (fakeCredentials) CredentialUsable(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 type fakeDiscoverer struct{}
@@ -167,14 +178,15 @@ func (f fakeRegistry) Capabilities(Kind, string) (Capabilities, bool) {
 }
 
 var (
-	_ RequestPolicy      = (*fakePolicy)(nil)
-	_ GenerationClient   = (*fakeClient)(nil)
-	_ Stream             = (*fakeStream)(nil)
-	_ CredentialManager  = fakeCredentials{}
-	_ ModelDiscoverer    = fakeDiscoverer{}
-	_ UsageFetcher       = fakeUsageFetcher{}
-	_ ModelCatalog       = fakeCatalog{}
-	_ CapabilityRegistry = fakeRegistry{}
+	_ RequestPolicy       = (*fakePolicy)(nil)
+	_ GenerationClient    = (*fakeClient)(nil)
+	_ Stream              = (*fakeStream)(nil)
+	_ CredentialManager   = fakeCredentials{}
+	_ CredentialUsability = fakeCredentials{}
+	_ ModelDiscoverer     = fakeDiscoverer{}
+	_ UsageFetcher        = fakeUsageFetcher{}
+	_ ModelCatalog        = fakeCatalog{}
+	_ CapabilityRegistry  = fakeRegistry{}
 )
 
 func TestOptionalCapabilitiesAreAbsentRatherThanNoOps(t *testing.T) {
@@ -205,26 +217,28 @@ func TestCatalogPolicyAndRegistryDoNotMarshalProviderWireBody(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime capabilities missing")
 	}
-	body, err := capabilities.Policy.Prepare(context.Background(), resolved, []byte(`{"model":"public"}`))
-	if err != nil {
+	canonical := CanonicalRequest{"model": "public", "large": json.Number("9007199254740993"), "text": "<opaque>"}
+	if err := capabilities.Policy.Prepare(context.Background(), resolved, canonical); err != nil {
 		t.Fatal(err)
 	}
-	if client.marshals != 0 {
-		t.Fatalf("wire marshal count before client = %d, want 0", client.marshals)
+	if client.encodes != 0 {
+		t.Fatalf("wire encode count before client = %d, want 0", client.encodes)
 	}
-	resolvedBody := []byte(`{"model":"upstream"}`)
-	resolvedBody = append(resolvedBody, body[len(body)-1])
+	canonical["model"] = resolved.UpstreamName
 	events, err := capabilities.Generation.Execute(context.Background(), GenerationRequest{
-		Model: resolved, CanonicalBody: resolvedBody, Credential: Credential{Value: "opaque"},
+		Model: resolved, Canonical: canonical, Credential: Credential{Value: "opaque"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.calls != 1 || client.marshals != 1 {
-		t.Fatalf("policy calls=%d, client marshals=%d; want 1, 1", policy.calls, client.marshals)
+	if policy.calls != 1 || client.encodes != 1 {
+		t.Fatalf("policy calls=%d, client encodes=%d; want 1, 1", policy.calls, client.encodes)
 	}
-	if len(events) != 1 || string(events[0].Data) != string(resolvedBody) {
-		t.Fatalf("client received body %q, want %q", events[0].Data, resolvedBody)
+	var received CanonicalRequest
+	decoder := json.NewDecoder(bytes.NewReader(events[0].Data))
+	decoder.UseNumber()
+	if len(events) != 1 || decoder.Decode(&received) != nil || received["model"] != "upstream" || received["large"] != json.Number("9007199254740993") || received["text"] != "<opaque>" || received["policy"] != true {
+		t.Fatalf("client received canonical request %#v as %q", received, events[0].Data)
 	}
 }
 

@@ -3,79 +3,198 @@ package routing
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
-	"net/http"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	appcrypto "byos/internal/crypto"
-	oauthxai "byos/internal/oauth/xai"
 	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/xai"
 )
 
+type fakeCatalog struct {
+	ledger *[]string
+	models map[string]provider.ResolvedModel
+}
+
+func (f fakeCatalog) Resolve(name string) (provider.ResolvedModel, error) {
+	*f.ledger = append(*f.ledger, "resolve")
+	m, ok := f.models[name]
+	if !ok {
+		return provider.ResolvedModel{}, fmt.Errorf("%w: secret catalog detail", provider.ErrUnknownModel)
+	}
+	return m, nil
+}
+
+type fakeRegistry struct {
+	ledger *[]string
+	caps   map[string]provider.Capabilities
+}
+
+func (f fakeRegistry) Capabilities(kind provider.Kind, key string) (provider.Capabilities, bool) {
+	*f.ledger = append(*f.ledger, "capabilities")
+	c, ok := f.caps[kind.String()+"/"+key]
+	return c, ok
+}
+
+type fakePolicy struct {
+	ledger *[]string
+	seen   provider.CanonicalRequest
+}
+
+func (f *fakePolicy) Prepare(_ context.Context, _ provider.ResolvedModel, canonical provider.CanonicalRequest) error {
+	*f.ledger = append(*f.ledger, "policy")
+	f.seen = cloneCanonical(canonical)
+	canonical["policy_applied"] = true
+	return nil
+}
+
+func cloneCanonical(canonical provider.CanonicalRequest) provider.CanonicalRequest {
+	cloned := make(provider.CanonicalRequest, len(canonical))
+	for key, value := range canonical {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+type ledgerPolicy struct {
+	ledger *[]string
+	policy provider.RequestPolicy
+}
+
+func (p ledgerPolicy) Prepare(ctx context.Context, model provider.ResolvedModel, canonical provider.CanonicalRequest) error {
+	*p.ledger = append(*p.ledger, "policy")
+	return p.policy.Prepare(ctx, model, canonical)
+}
+
+type fakeCredentials struct {
+	ledger *[]string
+	values map[string]string
+	calls  []string
+}
+
+func (f *fakeCredentials) Credential(_ context.Context, id string) (provider.Credential, error) {
+	*f.ledger = append(*f.ledger, "credential")
+	f.calls = append(f.calls, id)
+	return provider.Credential{Value: f.values[id]}, nil
+}
+func (f *fakeCredentials) AuthenticationFailed(context.Context, string, *provider.UpstreamError) error {
+	return nil
+}
+func (f *fakeCredentials) CredentialUsable(_ context.Context, id string) (bool, error) {
+	*f.ledger = append(*f.ledger, "credential-usable")
+	return f.values[id] != "", nil
+}
+
+type ledgerAccounts struct {
+	ledger *[]string
+	repo   *store.AccountRepository
+}
+
+func (s ledgerAccounts) List(ctx context.Context) ([]store.Account, error) {
+	*s.ledger = append(*s.ledger, "account-list")
+	return s.repo.List(ctx)
+}
+
+func (s ledgerAccounts) Get(ctx context.Context, id string) (store.Account, error) {
+	*s.ledger = append(*s.ledger, "account-get")
+	return s.repo.Get(ctx, id)
+}
+
+type ledgerCapabilities struct {
+	ledger *[]string
+	repo   *store.ModelCapabilityRepository
+}
+
+func (s ledgerCapabilities) List(ctx context.Context, accountID string) ([]store.ModelCapability, error) {
+	*s.ledger = append(*s.ledger, "capability-list")
+	return s.repo.List(ctx, accountID)
+}
+
+type ledgerCooldowns struct {
+	ledger *[]string
+	repo   *store.CooldownRepository
+}
+
+func (s ledgerCooldowns) Get(ctx context.Context, accountID, model string, now time.Time) (store.Cooldown, error) {
+	*s.ledger = append(*s.ledger, "cooldown-get")
+	return s.repo.Get(ctx, accountID, model, now)
+}
+
+type usageRecord struct {
+	accountID string
+	delta     LocalUsageDelta
+}
+
+type ledgerUsage struct {
+	ledger  *[]string
+	records *[]usageRecord
+}
+
+func (u ledgerUsage) Record(_ context.Context, accountID string, delta LocalUsageDelta) error {
+	*u.ledger = append(*u.ledger, "usage")
+	*u.records = append(*u.records, usageRecord{accountID: accountID, delta: delta})
+	return nil
+}
+
+func requireLedger(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("ledger=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ledger=%v, want %v", got, want)
+		}
+	}
+}
+
 type executeStep struct {
-	events []xai.Event
+	events []provider.Event
 	err    error
 }
-
-type fakeExecutionClient struct {
-	mu        sync.Mutex
-	steps     []executeStep
-	tokens    []string
-	models    []string
-	bodies    [][]byte
-	onExecute func()
+type fakeGeneration struct {
+	mu       sync.Mutex
+	ledger   *[]string
+	steps    []executeStep
+	requests []provider.GenerationRequest
 }
 
-func (f *fakeExecutionClient) Execute(_ context.Context, token, model string, body []byte) ([]xai.Event, error) {
+func (f *fakeGeneration) Execute(_ context.Context, r provider.GenerationRequest) ([]provider.Event, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.tokens = append(f.tokens, token)
-	f.models = append(f.models, model)
-	f.bodies = append(f.bodies, bytes.Clone(body))
-	if f.onExecute != nil {
-		f.onExecute()
-	}
-	step := f.steps[0]
+	*f.ledger = append(*f.ledger, "client")
+	r.Canonical = cloneCanonical(r.Canonical)
+	f.requests = append(f.requests, r)
+	s := f.steps[0]
 	f.steps = f.steps[1:]
-	return step.events, step.err
+	return s.events, s.err
 }
-
-func (*fakeExecutionClient) Stream(context.Context, string, string, []byte) (*xai.Stream, error) {
-	panic("unexpected Stream call")
-}
-
-type fakeRefresher struct {
-	accounts map[string]store.Account
-	errors   map[string]error
-	calls    []string
-}
-
-func (f *fakeRefresher) Refresh(_ context.Context, accountID string) (store.Account, error) {
-	f.calls = append(f.calls, accountID)
-	if err := f.errors[accountID]; err != nil {
-		return store.Account{}, err
-	}
-	return f.accounts[accountID], nil
+func (f *fakeGeneration) Stream(context.Context, provider.GenerationRequest) (provider.Stream, error) {
+	panic("unexpected stream")
 }
 
 type executionFixture struct {
-	executor *Executor
-	client   *fakeExecutionClient
-	refresh  *fakeRefresher
-	accounts *store.AccountRepository
-	states   *store.CooldownRepository
-	manager  *CooldownManager
-	close    func()
+	executor    *Executor
+	client      *fakeGeneration
+	credentials *fakeCredentials
+	policy      *fakePolicy
+	accounts    *store.AccountRepository
+	db          *sql.DB
+	close       func()
+	ledger      *[]string
+	usage       *[]usageRecord
 }
 
-func newExecutionFixture(t *testing.T, count int) (*executionFixture, []store.Account) {
+func newExecutionFixture(t *testing.T, count int) *executionFixture {
 	t.Helper()
 	ctx := context.Background()
-	database, err := store.Open(ctx, t.TempDir())
+	db, err := store.Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,250 +202,364 @@ func newExecutionFixture(t *testing.T, count int) (*executionFixture, []store.Ac
 	if err != nil {
 		t.Fatal(err)
 	}
-	accounts := store.NewAccountRepository(database.DB, keys)
-	stored := make([]store.Account, 0, count)
-	for index := range count {
-		account, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Label: "account", Status: "ready", Credentials: store.AccountCredentials{Issuer: "issuer", Subject: string(rune('a' + index)), AccessToken: "token-" + string(rune('a'+index)), RefreshToken: "refresh", TokenEndpoint: "https://auth.invalid/token"}})
+	accounts := store.NewAccountRepository(db.DB, keys)
+	ledger := []string{}
+	usage := []usageRecord{}
+	credentials := &fakeCredentials{ledger: &ledger, values: map[string]string{}}
+	for i := range count {
+		a, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Label: "x", Status: "ready", Credentials: store.AccountCredentials{Issuer: "issuer", Subject: string(rune('a' + i)), AccessToken: "token"}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		stored = append(stored, account)
+		credentials.values[a.ID] = "token-" + a.ID
 	}
-	states := store.NewCooldownRepository(database.DB)
-	manager := NewCooldownManager(states, accounts)
-	client := &fakeExecutionClient{}
-	refresh := &fakeRefresher{accounts: make(map[string]store.Account), errors: make(map[string]error)}
-	executor := newExecutor(NewScheduler(), client, refresh, manager, accounts, store.NewModelCapabilityRepository(database.DB), states, ResolverFunc(func(model string) (string, error) {
-		if model == "alias" {
-			return "grok-4.5", nil
+	states := store.NewCooldownRepository(db.DB)
+	cooldowns := NewCooldownManager(states, accounts)
+	policy := &fakePolicy{ledger: &ledger}
+	client := &fakeGeneration{ledger: &ledger}
+	resolved := provider.ResolvedModel{PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"}
+	catalog := fakeCatalog{ledger: &ledger, models: map[string]provider.ResolvedModel{"grok": resolved}}
+	registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{"xai/xai": {Policy: policy, Generation: client, Credentials: credentials}}}
+	executor := newExecutor(NewScheduler(), catalog, registry, cooldowns, ledgerAccounts{ledger: &ledger, repo: accounts}, ledgerCapabilities{ledger: &ledger, repo: store.NewModelCapabilityRepository(db.DB)}, ledgerCooldowns{ledger: &ledger, repo: states})
+	executor.SetUsageRecorder(ledgerUsage{ledger: &ledger, records: &usage})
+	return &executionFixture{executor: executor, client: client, credentials: credentials, policy: policy, accounts: accounts, db: db.DB, close: func() { db.Close() }, ledger: &ledger, usage: &usage}
+}
+
+func (f *executionFixture) cooldownRows(t *testing.T) int {
+	t.Helper()
+	var count int
+	if err := f.db.QueryRow(`SELECT COUNT(*) FROM account_model_states`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func TestExecutePreparationOrderAndBodyOwnership(t *testing.T) {
+	f := newExecutionFixture(t, 1)
+	defer f.close()
+	f.client.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+	input := []byte(`{"model":"grok","input":"<hello>","large":9007199254740993}`)
+	original := bytes.Clone(input)
+	_, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedger(t, *f.ledger, "resolve", "capabilities", "policy", "account-list", "credential-usable", "capability-list", "cooldown-get", "cooldown-get", "account-get", "credential", "client", "usage")
+	if !bytes.Equal(input, original) || f.policy.seen["model"] != "grok" || f.policy.seen["large"] != json.Number("9007199254740993") || f.policy.seen["input"] != "<hello>" {
+		t.Fatalf("policy canonical=%#v input=%s", f.policy.seen, input)
+	}
+	request := f.client.requests[0]
+	if request.Model.PublicName != "grok" || request.Model.UpstreamName != "grok-4.5" || request.Canonical["model"] != "grok-4.5" || request.Canonical["large"] != json.Number("9007199254740993") || request.Canonical["input"] != "<hello>" || request.Canonical["policy_applied"] != true {
+		t.Fatalf("request=%+v canonical=%#v", request, request.Canonical)
+	}
+}
+
+func TestExecuteRejectsDuplicateSearchBeforeBodyOrDownstreamAccess(t *testing.T) {
+	f := newExecutionFixture(t, 1)
+	defer f.close()
+	resolved := provider.ResolvedModel{PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, PolicyKey: "xai"}
+	f.executor.registry = fakeRegistry{ledger: f.ledger, caps: map[string]provider.Capabilities{"xai/xai": {Policy: ledgerPolicy{ledger: f.ledger, policy: xai.RequestPolicy{}}, Generation: f.client, Credentials: f.credentials}}}
+	f.executor.catalog = fakeCatalog{ledger: f.ledger, models: map[string]provider.ResolvedModel{"grok": resolved}}
+	for _, body := range [][]byte{[]byte(`{"model":"grok","input":"hello","tools":[{"type":"x_search"},{"type":"x_search"}]}`), []byte(`{"model":"grok","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"x_search"},{"type":"x_search"}]}`)} {
+		original := bytes.Clone(body)
+		cooldownsBefore := f.cooldownRows(t)
+		_, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: body})
+		var upstream *provider.UpstreamError
+		if !errors.As(err, &upstream) || upstream.Classification.Class != provider.ClassValidation || upstream.Classification.PublicStatus != 400 || upstream.Classification.PublicCode != "invalid_request_error" || upstream.Classification.PublicMessage != "invalid request" {
+			t.Fatalf("error=%#v", err)
 		}
-		return model, nil
-	}))
-	return &executionFixture{executor: executor, client: client, refresh: refresh, accounts: accounts, states: states, manager: manager, close: func() { database.Close() }}, stored
-}
-
-type recordedUsage struct {
-	mu     sync.Mutex
-	values map[string][]LocalUsageDelta
-}
-
-func (r *recordedUsage) Record(_ context.Context, accountID string, delta LocalUsageDelta) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.values[accountID] = append(r.values[accountID], delta)
-	return nil
-}
-func (r *recordedUsage) latest(accountID string) LocalUsageDelta {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	values := r.values[accountID]
-	if len(values) == 0 {
-		return LocalUsageDelta{}
+		requireLedger(t, *f.ledger, "resolve", "capabilities", "policy")
+		if !bytes.Equal(body, original) || len(f.credentials.calls) != 0 || len(f.client.requests) != 0 || f.cooldownRows(t) != cooldownsBefore {
+			t.Fatalf("speculative side effects: body=%s credentials=%v requests=%d cooldowns=%d", body, f.credentials.calls, len(f.client.requests), f.cooldownRows(t))
+		}
+		*f.ledger = nil
 	}
-	return values[len(values)-1]
+}
+func TestExecuteRejectsUnknownAndMissingCapabilityBeforeMutation(t *testing.T) {
+	f := newExecutionFixture(t, 1)
+	defer f.close()
+	input := []byte(" { \"model\" : \"unknown\" } ")
+	original := bytes.Clone(input)
+	_, err := f.executor.Execute(context.Background(), Request{Model: "unknown", Body: input})
+	if !errors.Is(err, ErrModelUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	requireLedger(t, *f.ledger, "resolve")
+	if !bytes.Equal(input, original) || len(f.credentials.calls) != 0 || len(f.client.requests) != 0 {
+		t.Fatalf("speculative side effects: body=%s credentials=%v requests=%d", input, f.credentials.calls, len(f.client.requests))
+	}
+	*f.ledger = nil
+	resolved := provider.ResolvedModel{PublicName: "devin", UpstreamName: "devin", Provider: provider.Devin, PolicyKey: "devin"}
+	f.executor.catalog = fakeCatalog{ledger: f.ledger, models: map[string]provider.ResolvedModel{"devin": resolved}}
+	_, err = f.executor.Execute(context.Background(), Request{Model: "devin", Body: input})
+	if !errors.Is(err, ErrModelUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	requireLedger(t, *f.ledger, "resolve", "capabilities")
+	if !bytes.Equal(input, original) || len(f.credentials.calls) != 0 || len(f.client.requests) != 0 {
+		t.Fatalf("speculative side effects: body=%s credentials=%v requests=%d", input, f.credentials.calls, len(f.client.requests))
+	}
 }
 
-func TestExecuteRecordsSuccessAndFailedFailoverPerAccount(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 2)
-	defer fixture.close()
-	recorder := &recordedUsage{values: make(map[string][]LocalUsageDelta)}
-	fixture.executor.SetUsageRecorder(recorder)
-	fixture.client.steps = []executeStep{{err: &xai.UpstreamError{Status: http.StatusInternalServerError}}, {events: []xai.Event{{Data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":9}}}`)}}}}
-	_, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID})
+func TestExecuteFiltersWrongProviderBeforeCredentialAndFailover(t *testing.T) {
+	f := newExecutionFixture(t, 2)
+	defer f.close()
+	ctx := context.Background()
+	wrong, err := f.accounts.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d", Status: "ready", Credentials: store.AccountCredentials{OpaqueToken: "secret"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := recorder.latest(accounts[0].ID); got.Requests != 1 || got.Failures != 1 {
-		t.Fatalf("failed account delta=%+v", got)
-	}
-	if got := recorder.latest(accounts[1].ID); got.Requests != 1 || got.Failures != 0 || got.InputTokens != 7 || got.OutputTokens != 9 {
-		t.Fatalf("success account delta=%+v", got)
-	}
-}
-
-type contextCheckingRecorder struct {
-	mu       sync.Mutex
-	canceled bool
-	delta    LocalUsageDelta
-}
-
-func (r *contextCheckingRecorder) Record(ctx context.Context, _ string, delta LocalUsageDelta) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.canceled = ctx.Err() != nil
-	r.delta = delta
-	return nil
-}
-
-func TestExecuteRecordsCancellationWithDetachedContext(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 1)
-	defer fixture.close()
-	recorder := &contextCheckingRecorder{}
-	fixture.executor.SetUsageRecorder(recorder)
-	ctx, cancel := context.WithCancel(context.Background())
-	fixture.client.onExecute = cancel
-	fixture.client.steps = []executeStep{{err: context.Canceled}}
-	_, _ = fixture.executor.Execute(ctx, Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID})
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	if recorder.canceled || recorder.delta.Failures != 1 {
-		t.Fatalf("recorder=%+v", recorder)
-	}
-}
-
-func TestExecuteRecordsIncompleteTerminalUsage(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 1)
-	defer fixture.close()
-	recorder := &recordedUsage{values: make(map[string][]LocalUsageDelta)}
-	fixture.executor.SetUsageRecorder(recorder)
-	fixture.client.steps = []executeStep{{events: []xai.Event{{Data: []byte(`{"type":"response.incomplete","response":{"usage":{"input_tokens":5,"output_tokens":6}}}`)}}}}
-	if _, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID}); err != nil {
-		t.Fatal(err)
-	}
-	if got := recorder.latest(accounts[0].ID); got.Failures != 0 || got.InputTokens != 5 || got.OutputTokens != 6 {
-		t.Fatalf("delta=%+v", got)
-	}
-}
-
-func TestExecuteSuccessResolvesAliasAndPreservesPreparedSearch(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 1)
-	defer fixture.close()
-	fixture.client.steps = []executeStep{{events: []xai.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
-	result, err := fixture.executor.Execute(context.Background(), Request{Model: "alias", Body: []byte(`{"input":"hello","tools":[{"type":"x_search"}],"tool_choice":"required"}`), PreferredAccountID: accounts[0].ID})
+	f.client.steps = []executeStep{{err: &provider.UpstreamError{Provider: provider.XAI, Status: 503, Classification: provider.ErrorClassification{Class: provider.ClassTransient, RetryNext: true, CooldownScope: provider.CooldownModel, Cooldown: time.Minute}}}, {events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+	result, err := f.executor.Execute(ctx, Request{Model: "grok", Body: []byte(`{"model":"grok"}`), PreferredAccountID: wrong.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Model != "grok-4.5" || result.AccountID != accounts[0].ID || len(result.Events) != 1 {
-		t.Fatalf("result=%+v", result)
+	if result.AccountID == wrong.ID {
+		t.Fatal("cross-provider affinity selected")
 	}
-	if len(fixture.client.bodies) != 1 || !bytes.Contains(fixture.client.bodies[0], []byte(`"type":"x_search"`)) || !bytes.Contains(fixture.client.bodies[0], []byte(`"tool_choice":"required"`)) || !bytes.Contains(fixture.client.bodies[0], []byte(`"model":"grok-4.5"`)) {
-		t.Fatalf("unprepared body: %s", fixture.client.bodies[0])
+	for _, id := range f.credentials.calls {
+		if id == wrong.ID {
+			t.Fatal("wrong-provider credential accessed")
+		}
 	}
-}
-
-func TestExecuteRejectsMissingPreparedSearchBeforeScheduling(t *testing.T) {
-	fixture, _ := newExecutionFixture(t, 1)
-	defer fixture.close()
-	_, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"input":"hello"}`)})
-	if err == nil || len(fixture.client.tokens) != 0 {
-		t.Fatalf("err=%v calls=%v", err, fixture.client.tokens)
-	}
-}
-
-func TestExecuteValidationDoesNotRetry(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 2)
-	defer fixture.close()
-	fixture.client.steps = []executeStep{{err: &xai.UpstreamError{Status: http.StatusBadRequest, Body: "private"}}}
-	_, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID})
-	var executionErr *ExecutionError
-	if !errors.As(err, &executionErr) || executionErr.Classified.Class != ClassValidation || len(fixture.client.tokens) != 1 {
-		t.Fatalf("err=%v calls=%v", err, fixture.client.tokens)
-	}
-}
-
-func TestExecuteRefreshesAndRetriesUnauthorizedOnSameAccount(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 2)
-	defer fixture.close()
-	refreshed := accounts[0]
-	refreshed.Credentials.AccessToken = "fresh-token"
-	fixture.refresh.accounts[accounts[0].ID] = refreshed
-	fixture.client.steps = []executeStep{{err: &xai.UpstreamError{Status: http.StatusUnauthorized}}, {events: []xai.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
-	result, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AccountID != accounts[0].ID || len(fixture.refresh.calls) != 1 || len(fixture.client.tokens) != 2 || fixture.client.tokens[0] == fixture.client.tokens[1] || fixture.client.tokens[1] != "fresh-token" {
-		t.Fatalf("result=%+v refresh=%v tokens=%v", result, fixture.refresh.calls, fixture.client.tokens)
-	}
-}
-
-func TestExecuteFailsOverRateLimitAndTransient(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 3)
-	defer fixture.close()
-	fixture.client.steps = []executeStep{
-		{err: &xai.UpstreamError{Status: http.StatusTooManyRequests}},
-		{err: &xai.UpstreamError{Status: http.StatusServiceUnavailable}},
-		{events: []xai.Event{{Data: []byte(`{"type":"response.completed"}`)}}},
-	}
-	result, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	accountByToken := make(map[string]store.Account, len(accounts))
-	for _, account := range accounts {
-		accountByToken[account.Credentials.AccessToken] = account
-	}
-	if len(fixture.client.tokens) != 3 || result.AccountID != accountByToken[fixture.client.tokens[2]].ID {
-		t.Fatalf("result=%+v tokens=%v", result, fixture.client.tokens)
-	}
-	for _, token := range fixture.client.tokens[:2] {
-		account := accountByToken[token]
-		state, err := fixture.states.Get(context.Background(), account.ID, "grok-4.5", time.Now().UTC())
-		if err != nil || state.Until == nil {
-			t.Fatalf("missing cooldown for %s: %+v %v", account.ID, state, err)
+	for _, request := range f.client.requests {
+		if request.Model.Provider != provider.XAI {
+			t.Fatal("failover crossed providers")
 		}
 	}
 }
 
-func TestExecuteFinalRateLimitExposesSanitizedRetryAfter(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 1)
-	defer fixture.close()
-	now := time.Now().UTC().Truncate(time.Second)
-	fixture.executor.now = func() time.Time { return now }
-	fixture.manager.now = func() time.Time { return now }
-	fixture.client.steps = []executeStep{{err: &xai.UpstreamError{Status: http.StatusTooManyRequests, Body: "private-upstream-detail", Headers: http.Header{"Retry-After": []string{"120"}}}}}
-	_, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID})
-	var executionErr *ExecutionError
-	if !errors.As(err, &executionErr) || executionErr.Classified.Class != ClassRateLimit || !executionErr.Classified.ExplicitRetryAfter || !executionErr.Classified.RetryAfter.Equal(now.Add(2*time.Minute)) || executionErr.Classified.Cooldown != 2*time.Minute {
-		t.Fatalf("err=%v classified=%+v", err, executionErr)
-	}
-	if bytes.Contains([]byte(err.Error()), []byte("private-upstream-detail")) {
-		t.Fatalf("upstream detail leaked: %v", err)
-	}
-}
-
-func TestExecuteAllAccountsCooling(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 2)
-	defer fixture.close()
-	now := time.Now().UTC()
-	for _, account := range accounts {
-		until := now.Add(time.Hour)
-		if err := fixture.states.Put(context.Background(), store.Cooldown{AccountID: account.ID, Model: "grok-4.5", Until: &until}); err != nil {
+func TestExecuteManagedAffinityEligibility(t *testing.T) {
+	t.Run("same-provider preferred retained", func(t *testing.T) {
+		f := newExecutionFixture(t, 2)
+		defer f.close()
+		accounts, err := f.accounts.List(context.Background())
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	_, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`)})
-	var executionErr *ExecutionError
-	if !errors.As(err, &executionErr) || executionErr.Classified.Class != ClassRateLimit || executionErr.Classified.RetryAfter.IsZero() || executionErr.Classified.Cooldown <= 0 || len(fixture.client.tokens) != 0 {
-		t.Fatalf("err=%v calls=%v", err, fixture.client.tokens)
+		preferred := accounts[1].ID
+		f.client.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+		result, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: []byte(`{"model":"grok"}`), PreferredAccountID: preferred})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.AccountID != preferred || len(f.credentials.calls) != 1 || f.credentials.calls[0] != preferred {
+			t.Fatalf("result=%+v credential calls=%v", result, f.credentials.calls)
+		}
+	})
+
+	for _, state := range []string{"deleted", "disabled", "cooled"} {
+		t.Run(state+" preferred skipped", func(t *testing.T) {
+			f := newExecutionFixture(t, 2)
+			defer f.close()
+			ctx := context.Background()
+			accounts, err := f.accounts.List(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preferred := accounts[0].ID
+			switch state {
+			case "deleted":
+				err = f.accounts.Delete(ctx, preferred)
+			case "disabled":
+				err = f.accounts.Update(ctx, preferred, accounts[0].Label, false)
+			case "cooled":
+				err = f.executor.cooldowns.Apply(ctx, preferred, "grok-4.5", provider.ErrorClassification{Class: provider.ClassTransient, CooldownScope: provider.CooldownModel, Cooldown: time.Hour})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.client.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+			result, err := f.executor.Execute(ctx, Request{Model: "grok", Body: []byte(`{"model":"grok"}`), PreferredAccountID: preferred})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.AccountID == preferred {
+				t.Fatalf("ineligible preferred account selected: %+v", result)
+			}
+			for _, id := range f.credentials.calls {
+				if id == preferred {
+					t.Fatalf("ineligible preferred credential accessed: %v", f.credentials.calls)
+				}
+			}
+		})
 	}
 }
 
-func TestExecuteCancellationNeverFailsOver(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 2)
-	defer fixture.close()
-	fixture.client.steps = []executeStep{{err: context.Canceled}}
-	_, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: accounts[0].ID})
-	var executionErr *ExecutionError
-	if !errors.As(err, &executionErr) || executionErr.Classified.Class != ClassCancelled || len(fixture.client.tokens) != 1 {
-		t.Fatalf("err=%v calls=%v", err, fixture.client.tokens)
-	}
-}
+func TestExecuteRecordsTerminalUsageExactlyOnce(t *testing.T) {
+	f := newExecutionFixture(t, 1)
+	defer f.close()
+	f.client.steps = []executeStep{{events: []provider.Event{
+		{Event: "response.output_text.delta", Data: []byte(`{"type":"response.output_text.delta"}`)},
+		{Event: "response.completed", Data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":17,"output_tokens":23}}}`)},
+	}}}
 
-func TestExecuteProactivelyRefreshesNearExpiry(t *testing.T) {
-	fixture, accounts := newExecutionFixture(t, 1)
-	defer fixture.close()
-	expires := time.Now().UTC().Add(oauthxai.RefreshLead / 2)
-	account := accounts[0]
-	account.ExpiresAt = &expires
-	if _, err := fixture.accounts.UpsertLogin(context.Background(), account); err != nil {
+	result, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: []byte(`{"model":"grok"}`)})
+	if err != nil {
 		t.Fatal(err)
 	}
-	account.Credentials.AccessToken = "proactive-token"
-	fixture.refresh.accounts[account.ID] = account
-	fixture.client.steps = []executeStep{{events: []xai.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
-	_, err := fixture.executor.Execute(context.Background(), Request{Model: "grok-4.5", Body: []byte(`{"tools":[{"type":"x_search"}]}`), PreferredAccountID: account.ID})
-	if err != nil || len(fixture.refresh.calls) != 1 || fixture.client.tokens[0] != "proactive-token" {
-		t.Fatalf("err=%v refresh=%v tokens=%v", err, fixture.refresh.calls, fixture.client.tokens)
+	if result.Model != "grok-4.5" {
+		t.Fatalf("model=%q", result.Model)
+	}
+	if len(*f.usage) != 1 {
+		t.Fatalf("usage records=%+v", *f.usage)
+	}
+	want := usageRecord{accountID: result.AccountID, delta: LocalUsageDelta{Requests: 1, InputTokens: 17, OutputTokens: 23}}
+	if (*f.usage)[0] != want {
+		t.Fatalf("usage=%+v, want %+v", (*f.usage)[0], want)
+	}
+}
+
+type authRecoveryCredentials struct {
+	values        map[string]string
+	fresh         map[string]string
+	recoveryErr   error
+	credentialIDs []string
+	recoveryIDs   []string
+}
+
+func (c *authRecoveryCredentials) Credential(_ context.Context, id string) (provider.Credential, error) {
+	c.credentialIDs = append(c.credentialIDs, id)
+	return provider.Credential{Value: c.values[id]}, nil
+}
+
+func (c *authRecoveryCredentials) AuthenticationFailed(_ context.Context, id string, _ *provider.UpstreamError) error {
+	c.recoveryIDs = append(c.recoveryIDs, id)
+	if c.recoveryErr == nil {
+		c.values[id] = c.fresh[id]
+	}
+	return c.recoveryErr
+}
+
+func (c *authRecoveryCredentials) CredentialUsable(_ context.Context, id string) (bool, error) {
+	return c.values[id] != "", nil
+}
+
+func unauthorizedExecutionError() error {
+	return &provider.UpstreamError{Provider: provider.XAI, Status: 401, Classification: provider.ErrorClassification{
+		Class: provider.ClassUnauthorized, RefreshSame: true, RetryNext: true,
+		CooldownScope: provider.CooldownAccount, PublicStatus: 401, PublicCode: "provider_authentication_error",
+	}}
+}
+
+func permissionExecutionError() error {
+	return &provider.UpstreamError{Provider: provider.XAI, Status: 403, Classification: provider.ErrorClassification{
+		Class: provider.ClassPermission, CooldownScope: provider.CooldownAccount,
+		PublicStatus: 403, PublicCode: "provider_permission_error",
+	}}
+}
+
+func installAuthRecoveryCredentials(f *executionFixture, credentials *authRecoveryCredentials, generation provider.GenerationClient) {
+	caps, _ := f.executor.registry.Capabilities(provider.XAI, "xai")
+	caps.Credentials = credentials
+	caps.Generation = generation
+	f.executor.registry = fakeRegistry{ledger: f.ledger, caps: map[string]provider.Capabilities{"xai/xai": caps}}
+}
+
+func TestExecuteUnauthorizedRecoveryRetriesSameAccountOnceWithFreshCredential(t *testing.T) {
+	f := newExecutionFixture(t, 1)
+	defer f.close()
+	credentials := &authRecoveryCredentials{values: map[string]string{}, fresh: map[string]string{}}
+	for id, token := range f.credentials.values {
+		credentials.values[id] = token
+		credentials.fresh[id] = "fresh-" + id
+	}
+	installAuthRecoveryCredentials(f, credentials, f.client)
+	f.client.steps = []executeStep{{err: unauthorizedExecutionError()}, {events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+
+	result, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: []byte(`{"model":"grok"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials.recoveryIDs) != 1 || len(credentials.credentialIDs) != 2 || credentials.recoveryIDs[0] != result.AccountID || credentials.credentialIDs[0] != result.AccountID || credentials.credentialIDs[1] != result.AccountID {
+		t.Fatalf("account=%q credential calls=%v recovery calls=%v", result.AccountID, credentials.credentialIDs, credentials.recoveryIDs)
+	}
+	if len(f.client.requests) != 2 || f.client.requests[0].Credential.Value == f.client.requests[1].Credential.Value || f.client.requests[1].Credential.Value != "fresh-"+result.AccountID {
+		t.Fatalf("requests=%d credentials=%q,%q", len(f.client.requests), f.client.requests[0].Credential.Value, f.client.requests[1].Credential.Value)
+	}
+}
+
+func TestExecuteUnauthorizedRecoveryFailureNeverResendsRejectedCredential(t *testing.T) {
+	invalidGrant := &provider.UpstreamError{Provider: provider.XAI, Status: 401, Classification: provider.ErrorClassification{
+		Class: provider.ClassInvalidGrant, RetryNext: true, DisableAccount: true, ReloginRequired: true,
+		CooldownScope: provider.CooldownAccount, PublicStatus: 401, PublicCode: "provider_authentication_error", PublicMessage: "account requires login",
+	}}
+	for _, tc := range []struct {
+		name      string
+		recovery  error
+		wantClass provider.ErrorClass
+	}{
+		{name: "invalid grant", recovery: invalidGrant, wantClass: provider.ClassInvalidGrant},
+		{name: "generic refresh failure", recovery: errors.New("refresh transport failed"), wantClass: provider.ClassUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionFixture(t, 1)
+			defer f.close()
+			credentials := &authRecoveryCredentials{values: map[string]string{}, fresh: map[string]string{}, recoveryErr: tc.recovery}
+			for id, token := range f.credentials.values {
+				credentials.values[id] = token
+			}
+			installAuthRecoveryCredentials(f, credentials, f.client)
+			f.client.steps = []executeStep{{err: unauthorizedExecutionError()}}
+
+			_, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: []byte(`{"model":"grok"}`)})
+			var executionErr *ExecutionError
+			if !errors.As(err, &executionErr) || executionErr.Classified.Class != tc.wantClass || executionErr.Classified.RetryNext != true {
+				t.Fatalf("err=%v classification=%+v", err, executionErr)
+			}
+			if len(f.client.requests) != 1 || len(credentials.credentialIDs) != 1 || len(credentials.recoveryIDs) != 1 {
+				t.Fatalf("requests=%d credential calls=%v recovery calls=%v", len(f.client.requests), credentials.credentialIDs, credentials.recoveryIDs)
+			}
+		})
+	}
+}
+
+func TestExecuteUnauthorizedRecoveryFailureFailsOverWithoutRejectedTokenResend(t *testing.T) {
+	for _, recovery := range []error{
+		&provider.UpstreamError{Provider: provider.XAI, Status: 401, Classification: provider.ErrorClassification{Class: provider.ClassInvalidGrant, RetryNext: true, DisableAccount: true, ReloginRequired: true, CooldownScope: provider.CooldownAccount, PublicStatus: 401, PublicCode: "provider_authentication_error"}},
+		errors.New("refresh transport failed"),
+	} {
+		f := newExecutionFixture(t, 2)
+		credentials := &authRecoveryCredentials{values: map[string]string{}, fresh: map[string]string{}, recoveryErr: recovery}
+		for id, token := range f.credentials.values {
+			credentials.values[id] = token
+		}
+		installAuthRecoveryCredentials(f, credentials, f.client)
+		f.client.steps = []executeStep{{err: unauthorizedExecutionError()}, {events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
+
+		result, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: []byte(`{"model":"grok"}`)})
+		if err != nil {
+			f.close()
+			t.Fatal(err)
+		}
+		if len(f.client.requests) != 2 || len(credentials.credentialIDs) != 2 || len(credentials.recoveryIDs) != 1 || credentials.credentialIDs[0] == credentials.credentialIDs[1] || credentials.recoveryIDs[0] != credentials.credentialIDs[0] || result.AccountID != credentials.credentialIDs[1] {
+			f.close()
+			t.Fatalf("account=%q requests=%d credential calls=%v recovery calls=%v", result.AccountID, len(f.client.requests), credentials.credentialIDs, credentials.recoveryIDs)
+		}
+		if f.client.requests[0].Credential.Value == f.client.requests[1].Credential.Value {
+			f.close()
+			t.Fatalf("rejected credential resent: %q", f.client.requests[0].Credential.Value)
+		}
+		f.close()
+	}
+}
+
+func TestExecutePermissionFailureIsTerminalWithoutRecoveryOrFailover(t *testing.T) {
+	f := newExecutionFixture(t, 2)
+	defer f.close()
+	credentials := &authRecoveryCredentials{values: map[string]string{}, fresh: map[string]string{}}
+	for id, token := range f.credentials.values {
+		credentials.values[id] = token
+	}
+	installAuthRecoveryCredentials(f, credentials, f.client)
+	f.client.steps = []executeStep{{err: permissionExecutionError()}}
+
+	_, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: []byte(`{"model":"grok"}`)})
+	var executionErr *ExecutionError
+	if !errors.As(err, &executionErr) || executionErr.Classified.Class != provider.ClassPermission || executionErr.Classified.RetryNext || executionErr.Classified.RefreshSame || executionErr.Classified.PublicStatus != 403 || executionErr.Classified.PublicCode != "provider_permission_error" {
+		t.Fatalf("err=%v classification=%+v", err, executionErr)
+	}
+	if len(f.client.requests) != 1 || len(credentials.credentialIDs) != 1 || len(credentials.recoveryIDs) != 0 {
+		t.Fatalf("requests=%d credential calls=%v recovery calls=%v", len(f.client.requests), credentials.credentialIDs, credentials.recoveryIDs)
 	}
 }

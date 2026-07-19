@@ -74,6 +74,52 @@ func TestNewStaticCatalogUnknownDoesNotUseLegacyCatalog(t *testing.T) {
 	}
 }
 
+func TestStaticCatalogOverlayResolvesXAIOnlyOneHop(t *testing.T) {
+	static, err := NewStaticCatalog(config.Default().Models.Entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay, err := NewStaticCatalogOverlay(static, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fast, err := overlay.Resolve("fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := provider.ResolvedModel{PublicName: config.DefaultModel, UpstreamName: config.DefaultModel, Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"}
+	if fast != want {
+		t.Fatalf("Resolve(fast) = %+v, want %+v", fast, want)
+	}
+	grok, err := overlay.Resolve("grok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grok.PublicName != "grok" || grok.OwnedBy != "byos" {
+		t.Fatalf("fixed grok identity changed: %+v", grok)
+	}
+	if len(static.Models()) != 5 {
+		t.Fatalf("static projection length = %d, want 5", len(static.Models()))
+	}
+}
+
+func TestStaticCatalogOverlayRejectsOwnershipRedirects(t *testing.T) {
+	static, err := NewStaticCatalog(config.Default().Models.Entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, aliases := range []map[string]string{
+		{"kimi-k2-7": config.DefaultModel},
+		{"fast": "kimi-k2-7"},
+		{"fast": "unknown"},
+		{"fast": "turbo", "turbo": config.DefaultModel},
+	} {
+		if _, err := NewStaticCatalogOverlay(static, aliases); err == nil {
+			t.Fatalf("aliases %+v unexpectedly accepted", aliases)
+		}
+	}
+}
+
 type capabilityStoreStub struct {
 	values map[string][]store.ModelCapability
 }

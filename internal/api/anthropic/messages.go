@@ -7,7 +7,6 @@ import (
 
 	"byos/internal/api"
 	"byos/internal/routing"
-	"byos/internal/search"
 	"byos/internal/translate/registry"
 )
 
@@ -36,11 +35,6 @@ func (h MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canonical, err := h.Transform.Request(metadata.Model, body, metadata.Stream)
-	if err != nil {
-		api.AnthropicError(w, api.Invalid(err))
-		return
-	}
-	canonical, err = search.Inject(canonical)
 	if err != nil {
 		api.AnthropicError(w, api.Invalid(err))
 		return

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	apierrors "byos/internal/api/errors"
+	"byos/internal/provider"
 	"byos/internal/routing"
-	"byos/internal/xai"
 )
 
 const DefaultMaxBody = 16 << 20
@@ -37,8 +37,7 @@ func ReadJSONBody(_ http.ResponseWriter, r *http.Request) ([]byte, error) {
 }
 
 type RoutedStream interface {
-	Next(context.Context) (xai.Event, error)
-	Close() error
+	provider.Stream
 	Model() string
 	AccountID() string
 }
@@ -51,16 +50,12 @@ func OpenAIError(w http.ResponseWriter, err error) {
 		apierrors.WriteOpenAI(w, apierrors.OpenAI(apierrors.Validation, 0))
 		return
 	}
-	var execution *routing.ExecutionError
-	if errors.As(err, &execution) {
-		retry := execution.Classified.Cooldown
-		if !execution.Classified.RetryAfter.IsZero() {
-			retry = time.Until(execution.Classified.RetryAfter)
-			if retry < 0 {
-				retry = 0
-			}
+	if classified, ok := errorClassification(err); ok {
+		retry, present := retryDuration(classified)
+		if present && retry == 0 {
+			w.Header().Set("Retry-After", "0")
 		}
-		apierrors.WriteOpenAI(w, apierrors.OpenAI(apierrors.FromClassified(execution.Classified), retry))
+		apierrors.WriteOpenAI(w, apierrors.OpenAIClassification(classified, retry))
 		return
 	}
 	apierrors.WriteOpenAI(w, apierrors.OpenAI(apierrors.KindOf(err), 0))
@@ -71,17 +66,38 @@ func AnthropicError(w http.ResponseWriter, err error) {
 		apierrors.WriteAnthropic(w, apierrors.Anthropic(apierrors.Validation, 0))
 		return
 	}
-	var execution *routing.ExecutionError
-	if errors.As(err, &execution) {
-		retry := execution.Classified.Cooldown
-		if !execution.Classified.RetryAfter.IsZero() {
-			retry = time.Until(execution.Classified.RetryAfter)
-			if retry < 0 {
-				retry = 0
-			}
+	if classified, ok := errorClassification(err); ok {
+		retry, present := retryDuration(classified)
+		if present && retry == 0 {
+			w.Header().Set("Retry-After", "0")
 		}
-		apierrors.WriteAnthropic(w, apierrors.Anthropic(apierrors.FromClassified(execution.Classified), retry))
+		apierrors.WriteAnthropic(w, apierrors.AnthropicClassification(classified, retry))
 		return
 	}
 	apierrors.WriteAnthropic(w, apierrors.Anthropic(apierrors.KindOf(err), 0))
+}
+
+func errorClassification(err error) (provider.ErrorClassification, bool) {
+	var execution *routing.ExecutionError
+	if errors.As(err, &execution) {
+		return execution.Classified, true
+	}
+	var upstream *provider.UpstreamError
+	if errors.As(err, &upstream) {
+		return upstream.Classification, true
+	}
+	return provider.ErrorClassification{}, false
+}
+
+func retryDuration(classified provider.ErrorClassification) (time.Duration, bool) {
+	retry := classified.Cooldown
+	present := classified.ExplicitRetryAfter || retry > 0
+	if !classified.RetryAfter.IsZero() {
+		present = true
+		retry = time.Until(classified.RetryAfter)
+		if retry < 0 {
+			return 0, true
+		}
+	}
+	return retry, present
 }

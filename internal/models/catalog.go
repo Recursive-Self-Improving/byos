@@ -30,6 +30,50 @@ func NewStaticCatalog(entries []config.ModelEntry) (*provider.StaticModelCatalog
 	return provider.NewStaticModelCatalog(resolved)
 }
 
+// StaticCatalogOverlay adds configured one-hop aliases to an immutable static
+// catalog without changing its advertised model projection.
+type StaticCatalogOverlay struct {
+	static  *provider.StaticModelCatalog
+	aliases map[string]provider.ResolvedModel
+}
+
+// NewStaticCatalogOverlay validates aliases against fixed static ownership.
+// Fixed public names always resolve directly; the sole permitted fixed-name
+// alias is an identity mapping to the same xAI upstream model.
+func NewStaticCatalogOverlay(static *provider.StaticModelCatalog, aliases map[string]string) (*StaticCatalogOverlay, error) {
+	if static == nil {
+		return nil, errors.New("static model catalog is required")
+	}
+	overlay := &StaticCatalogOverlay{static: static, aliases: make(map[string]provider.ResolvedModel, len(aliases))}
+	for alias, target := range aliases {
+		if fixed, err := static.Resolve(alias); err == nil {
+			if fixed.Provider == provider.XAI && fixed.UpstreamName == target {
+				continue
+			}
+			return nil, errors.New("model alias conflicts with fixed public model ownership")
+		}
+		canonical, err := static.Resolve(target)
+		if err != nil {
+			return nil, provider.ErrUnknownModel
+		}
+		if canonical.Provider != provider.XAI {
+			return nil, errors.New("model alias cannot redirect fixed provider ownership")
+		}
+		overlay.aliases[alias] = canonical
+	}
+	return overlay, nil
+}
+
+func (c *StaticCatalogOverlay) Resolve(name string) (provider.ResolvedModel, error) {
+	if resolved, err := c.static.Resolve(name); err == nil {
+		return resolved, nil
+	}
+	if resolved, ok := c.aliases[name]; ok {
+		return resolved, nil
+	}
+	return provider.ResolvedModel{}, provider.ErrUnknownModel
+}
+
 type CapabilityStore interface {
 	Replace(context.Context, string, []store.ModelCapability) error
 	List(context.Context, string) ([]store.ModelCapability, error)

@@ -197,3 +197,35 @@ func TestCountTokensStableIncludesSearchAndMalformedError(t *testing.T) {
 		t.Fatalf("trailing JSON accepted: %v", trailingErr)
 	}
 }
+
+func TestCountTokenRequestInjectsSearchAndPreservesNumbers(t *testing.T) {
+	request, err := countTokenRequest("grok", []byte(`{"model":"grok","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"lookup","input_schema":{"type":"object","maximum":9007199254740993}}],"tool_choice":{"type":"none"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, ok := request["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools=%#v, want client tool plus x_search", request["tools"])
+	}
+	searchTool, ok := tools[1].(map[string]any)
+	if !ok || searchTool["type"] != "x_search" {
+		t.Fatalf("search tool=%#v", tools[1])
+	}
+	if request["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice=%#v, want auto", request["tool_choice"])
+	}
+	clientTool, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("client tool=%#v", tools[0])
+	}
+	parameters, ok := clientTool["parameters"].(map[string]any)
+	if !ok || parameters["maximum"] != json.Number("9007199254740993") {
+		t.Fatalf("parameters=%#v, want exact json.Number", clientTool["parameters"])
+	}
+}
+
+func TestCountTokenRequestRejectsInvalidRequest(t *testing.T) {
+	if _, err := countTokenRequest("grok", []byte(`{"messages":{}}`)); err == nil || err.Error() != "messages must be an array" {
+		t.Fatalf("invalid request error=%v", err)
+	}
+}

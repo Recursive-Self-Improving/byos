@@ -111,19 +111,21 @@ type Stream interface {
 	Close() error
 }
 
-// GenerationRequest remains canonical provider-neutral data. CanonicalBody
-// already contains Model.UpstreamName; clients must not resolve or overwrite it.
-// The selected GenerationClient alone converts it to provider wire format.
+// CanonicalRequest is the provider-neutral structured generation request.
+// Routing parses it once and owns model resolution; the selected client alone
+// serializes it to provider wire bytes.
+type CanonicalRequest map[string]any
+
 type GenerationRequest struct {
-	Model         ResolvedModel
-	CanonicalBody []byte
-	Credential    Credential
+	Model      ResolvedModel
+	Canonical  CanonicalRequest
+	Credential Credential
 }
 
-// RequestPolicy applies provider-owned canonical request policy before the
+// RequestPolicy mutates provider-owned canonical request policy before the
 // executor overwrites the public model with ResolvedModel.UpstreamName.
 type RequestPolicy interface {
-	Prepare(context.Context, ResolvedModel, []byte) ([]byte, error)
+	Prepare(context.Context, ResolvedModel, CanonicalRequest) error
 }
 
 // GenerationClient is the sole provider-wire serialization boundary.
@@ -136,6 +138,14 @@ type GenerationClient interface {
 // Shared callers may carry it but must not interpret its value.
 type Credential struct {
 	Value string
+}
+
+// CredentialUsability projects whether an account can yield a credential when
+// selected, without returning credential material or performing a refresh.
+// Routing may use this optional pre-scheduler check to exclude unusable
+// accounts; Credential remains the only operation allowed to refresh.
+type CredentialUsability interface {
+	CredentialUsable(context.Context, string) (bool, error)
 }
 
 // CredentialManager obtains usable credentials and performs provider-specific

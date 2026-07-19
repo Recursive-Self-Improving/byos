@@ -16,6 +16,7 @@ import (
 	"byos/internal/config"
 	appcrypto "byos/internal/crypto"
 	"byos/internal/models"
+	oauthxai "byos/internal/oauth/xai"
 	"byos/internal/provider"
 	"byos/internal/routing"
 	"byos/internal/store"
@@ -148,12 +149,19 @@ func TestPublicModelsAndReadinessAreProviderAware(t *testing.T) {
 				t.Fatal(err)
 			}
 			catalog := models.NewCatalog(capabilities, nil, []string{"fast", config.DefaultModel}, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
+			aliases := map[string]string{}
+			if _, resolveErr := static.Resolve(config.DefaultModel); resolveErr == nil {
+				aliases = map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel}
+			}
+			resolver, err := models.NewStaticCatalogOverlay(static, aliases)
+			if err != nil {
+				t.Fatal(err)
+			}
 			defaultModel := test.defaultModel
 			if defaultModel == "" {
 				defaultModel = test.entry.PublicName
 			}
-			resolver := legacyXAIModelResolver(static, catalog)
-			projection := newPublicCatalog(catalog, static, accountsRepo, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, defaultModel, resolver)
+			projection := newPublicCatalog(catalog, static, resolver, accountsRepo, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, defaultModel)
 			listed, err := projection.PublicModels(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -197,7 +205,11 @@ func TestAliasDefaultDoesNotChangeFiveModelPublicProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := models.NewCatalog(capabilities, nil, []string{"fast", config.DefaultModel}, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
-	projection := newPublicCatalog(catalog, static, accounts, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, "fast", legacyXAIModelResolver(static, catalog))
+	resolver, err := models.NewStaticCatalogOverlay(static, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := newPublicCatalog(catalog, static, resolver, accounts, store.NewCooldownRepository(database.DB), func() time.Time { return time.Now().UTC() }, "fast")
 	listed, err := projection.PublicModels(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +236,7 @@ func TestPublicCatalogCachesStaticSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projection := newPublicCatalog(nil, static, nil, nil, time.Now, "grok", nil)
+	projection := newPublicCatalog(nil, static, static, nil, nil, time.Now, "grok")
 	if len(projection.models) != 2 {
 		t.Fatalf("cached models=%+v", projection.models)
 	}
@@ -242,7 +254,7 @@ func TestPublicCatalogCachesStaticSnapshots(t *testing.T) {
 	}
 }
 
-func TestLegacyXAIExecutorResolverRejectsDevinModelsBeforeDispatch(t *testing.T) {
+func TestNeutralExecutorCompositionRejectsUnregisteredProvidersBeforeDispatch(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, t.TempDir())
 	if err != nil {
@@ -254,76 +266,64 @@ func TestLegacyXAIExecutorResolverRejectsDevinModelsBeforeDispatch(t *testing.T)
 		t.Fatal(err)
 	}
 	accounts := store.NewAccountRepository(database.DB, keys)
-	account, err := accounts.UpsertLogin(ctx, xaiRuntimeAccount("legacy-executor"))
+	account, err := accounts.UpsertLogin(ctx, xaiRuntimeAccount("neutral-executor"))
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("authorization=%q", got)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	defer upstream.Close()
-
-	capabilities := store.NewModelCapabilityRepository(database.DB)
-	cooldownStates := store.NewCooldownRepository(database.DB)
 	staticCatalog, err := models.NewStaticCatalog(config.Default().Models.Entries)
 	if err != nil {
 		t.Fatal(err)
 	}
-	newExecutor := func(allowlist []string, aliases map[string]string) *routing.Executor {
-		catalog := models.NewCatalog(capabilities, nil, allowlist, aliases)
-		return routing.NewExecutor(
-			routing.NewScheduler(),
-			xai.NewClient(xai.HTTPConfig{BaseURL: upstream.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second}),
-			nil,
-			routing.NewCooldownManager(cooldownStates, accounts),
-			accounts,
-			capabilities,
-			cooldownStates,
-			legacyXAIModelResolver(staticCatalog, catalog),
-		)
+	modelCatalog, err := models.NewStaticCatalogOverlay(staticCatalog, map[string]string{"grok": config.DefaultModel, "fast": config.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	variants := []struct {
-		name      string
-		allowlist []string
-		aliases   map[string]string
-		model     string
-	}{
-		{name: "unknown model", allowlist: []string{"grok-4.5"}, aliases: map[string]string{"grok": "grok-4.5"}, model: "unknown"},
-		{name: "Devin public name added to allowlist", allowlist: []string{"grok-4.5", "kimi-k2-7"}, aliases: map[string]string{"grok": "grok-4.5"}, model: "kimi-k2-7"},
-		{name: "Devin alias added to allowlist", allowlist: []string{"grok-4.5", "glm-5-2"}, aliases: map[string]string{"grok": "grok-4.5", "devin": "glm-5-2"}, model: "devin"},
-		{name: "xAI alias redirected to Devin", allowlist: []string{"grok-4.5", "swe-1-6-slow"}, aliases: map[string]string{"grok": "swe-1-6-slow"}, model: "grok"},
+	registry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{
+		Provider:  provider.XAI,
+		PolicyKey: "xai",
+		Capabilities: provider.Capabilities{
+			Policy:      xai.RequestPolicy{},
+			Generation:  xai.NewProviderClient(xai.NewClient(xai.HTTPConfig{BaseURL: upstream.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second})),
+			Credentials: oauthxai.NewProviderCredentialManager(accounts, nil),
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, variant := range variants {
-		t.Run(variant.name, func(t *testing.T) {
-			before := requests
-			executor := newExecutor(variant.allowlist, variant.aliases)
-			_, err := executor.Execute(ctx, routing.Request{Model: variant.model, Body: []byte(`{"input":"hello","tools":[{"type":"x_search"}]}`), PreferredAccountID: account.ID})
-			if !errors.Is(err, routing.ErrModelUnavailable) {
-				t.Fatalf("model %q error=%v, want ErrModelUnavailable", variant.model, err)
-			}
-			if requests != before {
-				t.Fatalf("model %q reached xAI client: requests=%d, want %d", variant.model, requests, before)
-			}
-		})
-	}
-
-	executor := newExecutor([]string{"grok-4.5"}, map[string]string{"grok": "grok-4.5", "fast": "grok-4.5"})
-	for _, model := range []string{"fast", "grok", "grok-4.5"} {
-		result, err := executor.Execute(ctx, routing.Request{Model: model, Body: []byte(`{"input":"hello","tools":[{"type":"x_search"}]}`), PreferredAccountID: account.ID})
-		if err != nil {
-			t.Fatalf("model %q: %v", model, err)
+	cooldownStates := store.NewCooldownRepository(database.DB)
+	executor := routing.NewExecutor(routing.NewScheduler(), modelCatalog, registry, routing.NewCooldownManager(cooldownStates, accounts), accounts, store.NewModelCapabilityRepository(database.DB), cooldownStates)
+	for _, model := range []string{"unknown", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+		before := requests
+		body := []byte(`{"model":"public","input":"hello"}`)
+		original := bytes.Clone(body)
+		_, err := executor.Execute(ctx, routing.Request{Model: model, Body: body, PreferredAccountID: account.ID})
+		if !errors.Is(err, routing.ErrModelUnavailable) {
+			t.Fatalf("model %q error=%v", model, err)
 		}
-		if result.Model != "grok-4.5" {
-			t.Fatalf("model %q resolved to %q", model, result.Model)
+		if requests != before {
+			t.Fatalf("model %q reached xAI client", model)
+		}
+		if !bytes.Equal(body, original) {
+			t.Fatalf("model %q mutated rejected request body: %s", model, body)
 		}
 	}
-	if requests != 3 {
-		t.Fatalf("legacy xAI models dispatched requests=%d, want 3", requests)
+
+	result, err := executor.Execute(ctx, routing.Request{Model: "fast", Body: []byte(`{"input":"hello"}`), PreferredAccountID: account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Model != config.DefaultModel || result.AccountID != account.ID || requests != 1 {
+		t.Fatalf("result=%+v requests=%d", result, requests)
 	}
 }
 

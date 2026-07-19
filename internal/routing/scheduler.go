@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"byos/internal/provider"
 )
 
 var ErrNoAvailableAccounts = errors.New("no available accounts")
@@ -14,6 +16,7 @@ var ErrModelUnavailable = errors.New("requested model is unavailable")
 
 type Candidate struct {
 	ID                string
+	Provider          provider.Kind
 	Enabled, Valid    bool
 	Capabilities      map[string]bool
 	CapabilitiesKnown bool
@@ -25,10 +28,25 @@ type Scheduler struct {
 }
 
 func NewScheduler() *Scheduler { return &Scheduler{cursors: make(map[string]uint64)} }
+
+// Order retains the provider-agnostic unit-test seam. Production routing uses OrderForProvider.
 func (s *Scheduler) Order(model string, accounts []Candidate, preferred string, now time.Time) ([]Candidate, error) {
-	known := make([]Candidate, 0)
-	unknown := make([]Candidate, 0)
+	return s.order("", model, accounts, preferred, now)
+}
+
+// OrderForProvider defensively removes candidates from other providers before capability
+// fallback, cooldown checks, affinity, or round-robin cursor mutation.
+func (s *Scheduler) OrderForProvider(kind provider.Kind, model string, accounts []Candidate, preferred string, now time.Time) ([]Candidate, error) {
+	return s.order(kind, model, accounts, preferred, now)
+}
+
+func (s *Scheduler) order(kind provider.Kind, model string, accounts []Candidate, preferred string, now time.Time) ([]Candidate, error) {
+	known := make([]Candidate, 0, len(accounts))
+	unknown := make([]Candidate, 0, len(accounts))
 	for _, account := range accounts {
+		if kind.Valid() && account.Provider != kind {
+			continue
+		}
 		if !account.Enabled || !account.Valid {
 			continue
 		}
@@ -60,9 +78,13 @@ func (s *Scheduler) Order(model string, accounts []Candidate, preferred string, 
 			break
 		}
 	}
+	cursorKey := model
+	if kind.Valid() {
+		cursorKey = kind.String() + "\x00" + model
+	}
 	s.mu.Lock()
-	cursor := s.cursors[model] % uint64(len(eligible))
-	s.cursors[model]++
+	cursor := s.cursors[cursorKey] % uint64(len(eligible))
+	s.cursors[cursorKey]++
 	s.mu.Unlock()
 	ordered := make([]Candidate, 0, len(eligible))
 	if preferredIndex >= 0 {

@@ -7,7 +7,6 @@ import (
 
 	"byos/internal/api"
 	"byos/internal/routing"
-	"byos/internal/search"
 	"byos/internal/sessions"
 	"byos/internal/translate/registry"
 )
@@ -47,12 +46,7 @@ func (h ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.OpenAIError(w, err)
 		return
 	}
-	prepared, err := search.Inject(reconstructed.Body)
-	if err != nil {
-		api.OpenAIError(w, api.Invalid(err))
-		return
-	}
-	request := routing.Request{Model: metadata.Model, Body: prepared, PreferredAccountID: reconstructed.PreferredAccountID}
+	request := routing.Request{Model: metadata.Model, Body: reconstructed.Body, PreferredAccountID: reconstructed.PreferredAccountID}
 	if !metadata.Stream {
 		result, err := h.Execute(r.Context(), request)
 		if err != nil {

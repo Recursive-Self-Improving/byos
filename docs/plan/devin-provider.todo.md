@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–2 complete**. Chunk 2 passed independent review and clean certification; the next implementation item is C3.1.
+> Status: **Chunks 1–3 complete; Chunk 4 not started**. C3.1–C3.7 have verified implementation, review, and evidence; the sequential commit was intentionally not created during this tracker-only closure.
 >
-> Current next item: **C3.1 — Move shared execution types out of xAI**.
+> Current next item: **C4.1 — Cut xAI OAuth and refresh over to provider capabilities**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -15,6 +15,14 @@
 > Chunk 2 implementation record (2026-07-19): C2.1–C2.5 are complete. Deterministic strict provider/model configuration and bounded Devin runtime settings feed one immutable static catalog; the catalog accepts the canonical `grok`/`grok-4.5` alias projection while rejecting duplicate public names and ambiguous upstream provider/policy registrations; public listing/readiness uses resolved-provider/account-provider equality with xAI-only backend-search semantics; `/v1/models` returns explicit ownership and fails closed on missing ownership.
 >
 > Chunk 2 review/fix record and final certification (2026-07-19): review corrected configuration ownership so provider model declarations remain provider-scoped, added the xAI resolver guard against cross-provider aliases, made readiness require an eligible account for the resolved provider, removed avoidable public-catalog projection allocation, and broke the `api[test] -> openai -> api` import cycle by moving server tests to external package `api_test`. Follow-up review certified the complete Chunk 2 configuration, catalog, routability, runtime/API behavior, and accounting scope **CLEAN**. This tracker-only closure did not rerun gates or create the sequential commit.
+>
+> Chunk 3 implementation record (2026-07-19): C3.1–C3.7 are complete. Shared generation events, streams, clients, credentials, policies, and error classifications are provider-neutral; execution resolves one immutable model and runtime capability before mutation, applies the real xAI search policy once on the public model, overwrites only to the upstream model, and filters account candidates by provider before scheduling and affinity. Managed Responses affinity remains an account ID and wrong-provider preferences safely fall back within the resolved provider. Runtime-capability dispatch, xAI transport parity, sole client wire marshal, retry/failover behavior, terminal recording, and local usage evidence are complete.
+>
+> Chunk 3 review/fix record (2026-07-19): review removed the remaining concrete routing error layer in favor of provider error classification, made cooldown and public API error mapping consume neutral classifications without leaking provider error bodies, and tightened preparation so unknown models or missing runtime capabilities stop before policy, account lookup, credentials, marshal, or client dispatch. The final structured-request fix migrated `RequestPolicy`, `GenerationRequest`, search, routing, xAI, and count-tokens call sites to one structured canonical request decoded with `UseNumber`; policy mutation and the upstream-model overwrite occur on that structure, and the selected xAI client owns the sole actual wire encode. Exact encoder-count and nested-number, function-schema, search-date, and HTML-escaping fidelity coverage cleared the remaining call-site fallout. The required recovery, classification, sanitized-error, stream-terminal, and exactly-once usage matrix remains proven; handler-level search injection and the legacy pre-marshaled xAI path are absent; C4 remains untouched.
+>
+> Chunk 3 alias disposition and final certification (2026-07-19): the fixed first-class public `grok` row intentionally preserves its distinct public metadata (`PublicName=grok`, `OwnedBy=byos`) while routing to canonical xAI upstream `grok-4.5`; additional aliases resolve to the exact canonical `grok-4.5` row. The contrary finding that every `grok` resolution must canonicalize its public metadata was discarded because it conflicted with this authoritative first-class metadata exception and would break the required five-model public projection. Independent structured single-encode, provider-adapter/routing, composition, alias/catalog, and Chunk 3 accounting reviews certified the final scope **CLEAN**.
+>
+> Chunk 3 final gate evidence (2026-07-19): focused structured/provider/routing/xAI certification gates, `go test ./...` (28 packages passed; 2 packages had no tests), and `git diff --check` all passed. This tracker-only closure did not rerun gates or create the sequential commit.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -124,7 +132,7 @@
   - Observable DoD: exact ownership metadata, valid canonical aliases, ambiguous-registration rejection, and fail-closed config behavior are proven; routability uses resolved provider/account provider equality; dynamic discovery is not a routing authority; no model-conflict machinery exists.
   - Sequential commit: `feat(models): add deterministic provider ownership`.
 
-- [ ] **C3.1 — Move shared execution types out of xAI**
+- [x] **C3.1 — Move shared execution types out of xAI**
   - Chunk owner: **Chunk 3 — Provider-neutral routing and complete xAI generation cutover**.
   - Depends on: C2.5.
   - Files: `internal/api/generation.go`, `internal/routing/execute.go`, `internal/routing/stream.go`, neutral provider types, tests.
@@ -132,7 +140,7 @@
   - Observable DoD: shared API/routing packages compile without importing `internal/xai` or `internal/oauth/xai`; existing translators can consume neutral events without behavioral conversion loss.
   - Verification: import-boundary assertion or focused build plus existing generation/routing tests.
 
-- [ ] **C3.2 — Resolve provider without mutating the canonical request**
+- [x] **C3.2 — Resolve provider without mutating the canonical request**
   - Chunk owner: **Chunk 3**.
   - Depends on: C3.1.
   - Files: `internal/routing/execute.go`, static catalog/runtime registry interfaces, generation handler seams.
@@ -140,7 +148,7 @@
   - Observable DoD: unknown models leave the canonical body byte-equivalent and invoke no capability/policy/account/marshal/client; retries cannot change provider/model; instrumented tests expose the call order.
   - Verification: non-stream and stream executor tests with instrumented catalog/capability/policy/account/marshal/client order.
 
-- [ ] **C3.3 — Implement the real xAI request policy and remove global mutation**
+- [x] **C3.3 — Implement the real xAI request policy and remove global mutation**
   - Chunk owner: **Chunk 3**.
   - Depends on: C3.2.
   - Files: xAI provider adapter, `internal/search`, `internal/api/openai/chat_completions.go`, `responses.go`, `internal/api/anthropic/messages.go`, tests.
@@ -148,7 +156,7 @@
   - Observable DoD: order is resolve → capability lookup → policy on public canonical model → upstream overwrite; every xAI request contains exactly one `x_search`; explicit `none` becomes `auto`; auto, required, and selected choices retain current xAI behavior; unknown/Devin models are never search-mutated; no handler imports/calls search mutation directly.
   - Verification: cross-protocol captured canonical-body/order tests plus existing `internal/search` tests.
 
-- [ ] **C3.4 — Filter candidates by provider before scheduling**
+- [x] **C3.4 — Filter candidates by provider before scheduling**
   - Chunk owner: **Chunk 3**.
   - Depends on: C3.3.
   - Files: `internal/routing/scheduler.go`, `execute.go`, candidate/account projections, tests.
@@ -156,15 +164,15 @@
   - Observable DoD: a body-capture fake receives the post-policy, upstream-named canonical request unchanged; an unknown capability snapshot cannot route to another provider; a preferred account with mismatched provider is ignored; disabled/invalid/expired accounts remain excluded as before.
   - Verification: scheduler/executor matrix includes exact resolve/policy/overwrite/filter order, body capture, known/unknown capabilities, mismatched affinity, and mixed account pools.
 
-- [ ] **C3.5 — Adapt xAI generation transport and dispatch through runtime capabilities**
+- [x] **C3.5 — Adapt xAI generation transport and dispatch through runtime capabilities**
   - Chunk owner: **Chunk 3**.
   - Depends on: C3.4.
   - Files: `internal/routing/execute.go`, `stream.go`, `errors.go`, `internal/xai/responses.go`, `headers.go`, xAI provider adapter, runtime capability registry/fakes, tests.
   - Work: construct the generation-complete xAI runtime capability entry with the real policy, generation credential access, generation client, and generation-error adapter. Adapt existing xAI Execute/Stream/events/errors without changing endpoint, headers, model override, stream/store flags, JSON escaping, retry classification, or `Retry-After`. The executor exclusively owns the canonical request until the xAI client performs the sole xAI wire marshal; remove the legacy/pre-marshaled path and permit no placeholder bytes, handler marshal, or double marshal.
   - Observable DoD: existing xAI generation works end to end in this committed chunk; xAI wire output/errors are byte/semantically equivalent at tested boundaries; `X-XAI-Token-Auth`, Grok version/user agent, `x-grok-model-override`, `stream=true`, `store=false`, and `SetEscapeHTML(false)` remain intact; same-account retry, pre-commit failover, cooldown, terminal recording, and local usage persist; all attempts stay within xAI and marshal once.
-  - Verification: xAI response/transport/header/body fixtures plus marshal-count and routing error/failover tests for 401, 403, 429, transient 5xx, cancellation, incomplete terminal, and post-commit failure.
+  - Verification: xAI response/transport/header/body fixtures plus marshal-count and routing error/failover tests cover 401 same-account fresh-credential retry and recovery failure, terminal 403, 429, transient 408/500/502/503/504 classification, cancellation, incomplete terminal, post-commit failure, and completed/incomplete streaming usage recorded exactly once.
 
-- [ ] **C3.6 — Preserve managed Responses affinity under provider routing**
+- [x] **C3.6 — Preserve managed Responses affinity under provider routing**
   - Chunk owner: **Chunk 3**.
   - Depends on: C3.5.
   - Files: `internal/api/openai/responses.go`, `internal/sessions/reconstruct.go`, routing tests.
@@ -172,7 +180,7 @@
   - Observable DoD: same-provider continuation prefers the prior account; provider/model mismatch safely falls back within the resolved provider; reconstructed transcripts remain unchanged.
   - Verification: continuation tests with same-provider, wrong-provider, deleted, disabled, and cooled-down preferred accounts.
 
-- [ ] **C3.7 — Review and commit Chunk 3**
+- [x] **C3.7 — Review and commit Chunk 3**
   - Chunk owner: **Chunk 3**.
   - Depends on: C3.6.
   - Observable DoD: call order is visibly resolve → runtime capability lookup → real provider policy on public canonical model → upstream overwrite → provider-filtered candidates → credentials/client/sole marshal; all handlers stopped direct search mutation; shared routing/API has no direct concrete-provider event/client import; xAI search and generation transport are real and covered; no legacy transport, temporary compatibility/no-op policy, placeholder payload, or double marshal exists.

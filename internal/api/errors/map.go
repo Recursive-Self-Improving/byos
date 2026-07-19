@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"byos/internal/provider"
 	"byos/internal/routing"
 	"byos/internal/sessions"
 )
@@ -23,6 +24,7 @@ const (
 )
 
 func KindOf(err error) Kind {
+	var upstream *provider.UpstreamError
 	switch {
 	case errors.Is(err, routing.ErrModelUnavailable), errors.Is(err, routing.ErrNoAvailableAccounts):
 		return ModelUnavailable
@@ -30,21 +32,23 @@ func KindOf(err error) Kind {
 		return ContextLimit
 	case errors.Is(err, sessions.ErrPreviousResponseNotFound):
 		return PreviousResponseNotFound
+	case errors.As(err, &upstream):
+		return FromClassification(upstream.Classification)
 	default:
 		return InternalFailure
 	}
 }
-func FromClassified(value routing.ClassifiedError) Kind {
+func FromClassification(value provider.ErrorClassification) Kind {
 	switch value.Class {
-	case routing.ClassValidation:
+	case provider.ClassValidation:
 		return Validation
-	case routing.ClassUnauthorized, routing.ClassInvalidGrant:
+	case provider.ClassUnauthorized, provider.ClassInvalidGrant:
 		return Authentication
-	case routing.ClassRateLimit, routing.ClassFreeUsageExhausted:
+	case provider.ClassRateLimit, provider.ClassFreeUsageExhausted:
 		return Cooldown
-	case routing.ClassPermission, routing.ClassTransient, routing.ClassConnection, routing.ClassUpstream:
+	case provider.ClassPermission, provider.ClassTransient, provider.ClassConnection, provider.ClassUpstream:
 		return UpstreamFailure
-	case routing.ClassCancelled:
+	case provider.ClassCancelled:
 		return InternalFailure
 	default:
 		return InternalFailure
@@ -70,6 +74,22 @@ func OpenAI(kind Kind, retry time.Duration) publicError {
 		return publicError{Status: 500, Type: "internal_error", Code: "internal_error", Message: "internal server error"}
 	}
 }
+
+// OpenAIClassification preserves sanitized provider metadata while retaining
+// the OpenAI error envelope and semantic type for the classified error.
+func OpenAIClassification(value provider.ErrorClassification, retry time.Duration) publicError {
+	result := OpenAI(FromClassification(value), retry)
+	if value.PublicStatus != 0 {
+		result.Status = value.PublicStatus
+	}
+	if value.PublicCode != "" {
+		result.Code = value.PublicCode
+	}
+	if value.PublicMessage != "" {
+		result.Message = value.PublicMessage
+	}
+	return result
+}
 func Anthropic(kind Kind, retry time.Duration) publicError {
 	switch kind {
 	case Validation, ContextLimit, PreviousResponseNotFound:
@@ -85,4 +105,17 @@ func Anthropic(kind Kind, retry time.Duration) publicError {
 	default:
 		return publicError{Status: http.StatusInternalServerError, Type: "api_error", Message: "internal server error"}
 	}
+}
+
+// AnthropicClassification preserves sanitized provider metadata while
+// retaining Anthropic's protocol-specific error envelope and semantic type.
+func AnthropicClassification(value provider.ErrorClassification, retry time.Duration) publicError {
+	result := Anthropic(FromClassification(value), retry)
+	if value.PublicStatus != 0 {
+		result.Status = value.PublicStatus
+	}
+	if value.PublicMessage != "" {
+		result.Message = value.PublicMessage
+	}
+	return result
 }

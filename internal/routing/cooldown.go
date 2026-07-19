@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -19,7 +20,7 @@ type CooldownManager struct {
 func NewCooldownManager(states *store.CooldownRepository, accounts *store.AccountRepository) *CooldownManager {
 	return &CooldownManager{states: states, accounts: accounts, now: func() time.Time { return time.Now().UTC() }}
 }
-func (m *CooldownManager) Apply(ctx context.Context, accountID, model string, classified ClassifiedError) error {
+func (m *CooldownManager) Apply(ctx context.Context, accountID, model string, classified provider.ErrorClassification) error {
 	now := m.now()
 	if classified.DisableAccount {
 		account, err := m.accounts.Get(ctx, accountID)
@@ -28,19 +29,22 @@ func (m *CooldownManager) Apply(ctx context.Context, accountID, model string, cl
 		}
 		return m.accounts.Update(ctx, accountID, account.Label, false)
 	}
-	if classified.Cooldown <= 0 && classified.Class != ClassRateLimit {
+	if classified.CooldownScope == provider.CooldownNone {
+		return nil
+	}
+	if classified.Cooldown <= 0 && classified.Class != provider.ClassRateLimit {
 		return nil
 	}
 	scope := model
-	if classified.AccountWide {
+	if classified.CooldownScope == provider.CooldownAccount {
 		scope = "*"
 	}
 	backoff := 0
 	duration := classified.Cooldown
-	if classified.Class == ClassRateLimit && classified.ExplicitRetryAfter && duration <= 0 {
+	if classified.Class == provider.ClassRateLimit && classified.ExplicitRetryAfter && duration <= 0 {
 		return nil
 	}
-	if classified.Class == ClassRateLimit && !classified.ExplicitRetryAfter {
+	if classified.Class == provider.ClassRateLimit && !classified.ExplicitRetryAfter {
 		_, err := m.states.AdvanceRateLimit(ctx, accountID, scope, string(classified.Class), now)
 		return err
 	}

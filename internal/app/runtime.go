@@ -103,17 +103,17 @@ func (r usageRecorder) Record(ctx context.Context, accountID string, delta routi
 }
 
 type publicCatalog struct {
-	catalog      *models.Catalog
-	models       []provider.ResolvedModel
-	accounts     *store.AccountRepository
-	cooldowns    *store.CooldownRepository
-	now          func() time.Time
-	defaultModel string
-	resolver     routing.ModelResolver
-	xaiModels    map[string]provider.ResolvedModel
+	catalog         *models.Catalog
+	models          []provider.ResolvedModel
+	accounts        *store.AccountRepository
+	cooldowns       *store.CooldownRepository
+	now             func() time.Time
+	defaultModel    string
+	catalogResolver provider.ModelCatalog
+	xaiModels       map[string]provider.ResolvedModel
 }
 
-func newPublicCatalog(catalog *models.Catalog, static *provider.StaticModelCatalog, accounts *store.AccountRepository, cooldowns *store.CooldownRepository, now func() time.Time, defaultModel string, resolver routing.ModelResolver) publicCatalog {
+func newPublicCatalog(catalog *models.Catalog, static *provider.StaticModelCatalog, resolver provider.ModelCatalog, accounts *store.AccountRepository, cooldowns *store.CooldownRepository, now func() time.Time, defaultModel string) publicCatalog {
 	models := static.Models()
 	xaiModels := make(map[string]provider.ResolvedModel)
 	for _, resolved := range models {
@@ -121,7 +121,7 @@ func newPublicCatalog(catalog *models.Catalog, static *provider.StaticModelCatal
 			xaiModels[resolved.UpstreamName] = resolved
 		}
 	}
-	return publicCatalog{catalog: catalog, models: models, accounts: accounts, cooldowns: cooldowns, now: now, defaultModel: defaultModel, resolver: resolver, xaiModels: xaiModels}
+	return publicCatalog{catalog: catalog, models: models, accounts: accounts, cooldowns: cooldowns, now: now, defaultModel: defaultModel, catalogResolver: resolver, xaiModels: xaiModels}
 }
 
 func (a publicCatalog) PublicModels(ctx context.Context) ([]apiopenai.Model, error) {
@@ -193,11 +193,11 @@ func (a publicCatalog) Ready(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	now := a.now()
-	upstream, err := a.resolver.Resolve(a.defaultModel)
+	resolvedDefault, err := a.catalogResolver.Resolve(a.defaultModel)
 	if err != nil {
 		return false, nil
 	}
-	resolved, ok := a.xaiModels[upstream]
+	resolved, ok := a.xaiModels[resolvedDefault.UpstreamName]
 	if !ok {
 		return false, nil
 	}
@@ -210,25 +210,6 @@ func deriveWebCSRFKey(sessionKey [32]byte) [32]byte {
 	copy(material[:], label)
 	copy(material[len(label):], sessionKey[:])
 	return sha256.Sum256(material[:])
-}
-
-func legacyXAIModelResolver(static *provider.StaticModelCatalog, catalog *models.Catalog) routing.ModelResolver {
-	xaiUpstreams := make(map[string]struct{})
-	for _, identity := range static.Models() {
-		if identity.Provider == provider.XAI {
-			xaiUpstreams[identity.UpstreamName] = struct{}{}
-		}
-	}
-	return routing.ResolverFunc(func(value string) (string, error) {
-		resolved, ok := catalog.Resolve(value)
-		if !ok {
-			return "", routing.ErrModelUnavailable
-		}
-		if _, ok := xaiUpstreams[resolved]; !ok {
-			return "", routing.ErrModelUnavailable
-		}
-		return resolved, nil
-	})
 }
 
 func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger *slog.Logger) (*Runtime, error) {
@@ -261,6 +242,10 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	if err != nil {
 		return fail(err)
 	}
+	modelCatalog, err := models.NewStaticCatalogOverlay(staticCatalog, cfg.Models.Aliases)
+	if err != nil {
+		return fail(err)
+	}
 	modelWorker := models.NewWorker(models.NewStoreAccountProvider(accountRepo), catalog, 15*time.Minute, cfg.Upstream.RequestTimeout.Duration(), 4)
 	usageService := usage.NewService(usage.NewBillingAdapter(upstream), usageRepo, localUsageRepo)
 	usageWorker := usage.NewWorker(usage.NewStoreAccountProvider(accountRepo), usageService, cfg.Usage.RefreshInterval.Duration(), cfg.Upstream.RequestTimeout.Duration(), 4)
@@ -273,8 +258,20 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	usageRefresher := usageRefresh{accountRepo, usageWorker}
 	accountService := accounts.NewService(accountRepo, oauthService, identity, refreshService, modelRefresher, usageRefresher)
 	cooldowns := routing.NewCooldownManager(cooldownRepo, accountRepo)
-	resolver := legacyXAIModelResolver(staticCatalog, catalog)
-	executor := routing.NewExecutor(routing.NewScheduler(), upstream, refreshService, cooldowns, accountRepo, capabilityRepo, cooldownRepo, resolver)
+	credentialManager := oauthxai.NewProviderCredentialManager(accountRepo, refreshService)
+	capabilityRegistry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{{
+		Provider:  provider.XAI,
+		PolicyKey: "xai",
+		Capabilities: provider.Capabilities{
+			Policy:      xai.RequestPolicy{},
+			Generation:  xai.NewProviderClient(upstream),
+			Credentials: credentialManager,
+		},
+	}})
+	if err != nil {
+		return fail(err)
+	}
+	executor := routing.NewExecutor(routing.NewScheduler(), modelCatalog, capabilityRegistry, cooldowns, accountRepo, capabilityRepo, cooldownRepo)
 	executor.SetUsageRecorder(usageRecorder{service: usageService})
 	transforms := translate.NewRegistry()
 	chatTransform, ok := transforms.Get(registry.OpenAIChat)
@@ -290,7 +287,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		return fail(errors.New("Anthropic translator is not registered"))
 	}
 	sessionService := sessions.NewService(responseRepo)
-	publicModels := newPublicCatalog(catalog, staticCatalog, accountRepo, cooldownRepo, func() time.Time { return time.Now().UTC() }, cfg.Models.Default, resolver)
+	publicModels := newPublicCatalog(catalog, staticCatalog, modelCatalog, accountRepo, cooldownRepo, func() time.Time { return time.Now().UTC() }, cfg.Models.Default)
 	handlers := api.ServerHandlers{Health: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), Ready: readyHandler(database.DB, publicModels), Models: apiopenai.ModelsHandler(publicModels), Chat: apiopenai.ChatHandler{Transform: chatTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {
 		return executor.Stream(ctx, request)
 	}}, Responses: apiopenai.ResponsesHandler{Transform: responsesTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {
