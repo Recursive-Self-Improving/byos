@@ -1,4 +1,4 @@
-package api
+package api_test
 
 import (
 	"bytes"
@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"byos/internal/accounts"
+	"byos/internal/api"
+	"byos/internal/api/openai"
 	"byos/internal/auththrottle"
 	"byos/internal/store"
 )
@@ -46,8 +48,8 @@ func TestServerRouteInventoryAndAuthScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handlers := ServerHandlers{Health: statusHandler(200), Ready: statusHandler(200), Models: statusHandler(204), Chat: statusHandler(204), Responses: statusHandler(204), Messages: statusHandler(204), CountTokens: statusHandler(204), Admin: statusHandler(204), Web: statusHandler(200)}
-	server := NewServer(ServerConfig{Handlers: handlers, ClientKeys: keys, AdminAPIKey: "admin", AdminAttempts: directAdminAttempts{}, AdminSources: fixedAdminSource{}})
+	handlers := api.ServerHandlers{Health: statusHandler(200), Ready: statusHandler(200), Models: statusHandler(204), Chat: statusHandler(204), Responses: statusHandler(204), Messages: statusHandler(204), CountTokens: statusHandler(204), Admin: statusHandler(204), Web: statusHandler(200)}
+	server := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: keys, AdminAPIKey: "admin", AdminAttempts: directAdminAttempts{}, AdminSources: fixedAdminSource{}})
 	tests := []struct {
 		method, path, auth string
 		want               int
@@ -75,6 +77,55 @@ func TestServerRouteInventoryAndAuthScopes(t *testing.T) {
 	}
 }
 
+func TestServerModelsPreserveExplicitOwnership(t *testing.T) {
+	database, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys := accounts.NewAPIKeyService(store.NewAPIKeyRepository(database.DB))
+	created, err := keys.Create(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := []openai.Model{
+		{ID: "grok", OwnedBy: "byos"},
+		{ID: "grok-4.5", OwnedBy: "xai"},
+		{ID: "kimi-k2-7", OwnedBy: "devin"},
+		{ID: "glm-5-2", OwnedBy: "devin"},
+		{ID: "swe-1-6-slow", OwnedBy: "devin"},
+	}
+	handlers := api.ServerHandlers{
+		Health:      statusHandler(http.StatusNotFound),
+		Ready:       statusHandler(http.StatusNotFound),
+		Models:      openai.ModelsHandler(serverModelCatalog{models: models}),
+		Chat:        statusHandler(http.StatusNotFound),
+		Responses:   statusHandler(http.StatusNotFound),
+		Messages:    statusHandler(http.StatusNotFound),
+		CountTokens: statusHandler(http.StatusNotFound),
+	}
+	server := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: keys})
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer "+created.Plaintext)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	want := `{"data":[{"created":0,"id":"grok","object":"model","owned_by":"byos"},{"created":0,"id":"grok-4.5","object":"model","owned_by":"xai"},{"created":0,"id":"kimi-k2-7","object":"model","owned_by":"devin"},{"created":0,"id":"glm-5-2","object":"model","owned_by":"devin"},{"created":0,"id":"swe-1-6-slow","object":"model","owned_by":"devin"}],"object":"list"}`
+	if strings.TrimSpace(response.Body.String()) != want {
+		t.Fatalf("body=%s", response.Body.String())
+	}
+}
+
+type serverModelCatalog struct {
+	models []openai.Model
+}
+
+func (c serverModelCatalog) PublicModels(context.Context) ([]openai.Model, error) {
+	return c.models, nil
+}
+
 func TestServerConfiguredBodyLimit(t *testing.T) {
 	database, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
@@ -93,15 +144,15 @@ func TestServerConfiguredBodyLimit(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handlers := ServerHandlers{Health: statusHandler(200), Ready: statusHandler(200), Models: statusHandler(200), Chat: reader, Responses: reader, Messages: reader, CountTokens: reader}
+	handlers := api.ServerHandlers{Health: statusHandler(200), Ready: statusHandler(200), Models: statusHandler(200), Chat: reader, Responses: reader, Messages: reader, CountTokens: reader}
 	for _, test := range []struct {
 		name  string
 		limit int64
 		body  string
 		want  int
-	}{{"exact", 8, "12345678", 204}, {"over", 8, "123456789", 413}, {"above old hard cap", DefaultMaxBody + 100, `{"value":"` + strings.Repeat("a", DefaultMaxBody) + `"}`, 204}} {
+	}{{"exact", 8, "12345678", 204}, {"over", 8, "123456789", 413}, {"above old hard cap", api.DefaultMaxBody + 100, `{"value":"` + strings.Repeat("a", api.DefaultMaxBody) + `"}`, 204}} {
 		t.Run(test.name, func(t *testing.T) {
-			server := NewServer(ServerConfig{Handlers: handlers, ClientKeys: keys, MaxBodyBytes: test.limit})
+			server := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: keys, MaxBodyBytes: test.limit})
 			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(test.body))
 			request.Header.Set("Authorization", "Bearer "+created.Plaintext)
 			response := httptest.NewRecorder()
@@ -117,8 +168,8 @@ func TestRecoveryDoesNotLeakPanicValue(t *testing.T) {
 	const secret = "panic-token-secret"
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	handlers := ServerHandlers{Health: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(secret) }), Ready: statusHandler(200)}
-	server := NewServer(ServerConfig{Handlers: handlers, Logger: logger})
+	handlers := api.ServerHandlers{Health: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(secret) }), Ready: statusHandler(200)}
+	server := api.NewServer(api.ServerConfig{Handlers: handlers, Logger: logger})
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), secret) || strings.Contains(logs.String(), secret) {

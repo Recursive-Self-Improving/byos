@@ -8,8 +8,27 @@ import (
 	"strings"
 	"time"
 
+	"byos/internal/config"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
+
+// NewStaticCatalog converts validated configuration entries into the single
+// immutable provider model catalog used for static model resolution.
+func NewStaticCatalog(entries []config.ModelEntry) (*provider.StaticModelCatalog, error) {
+	resolved := make([]provider.ResolvedModel, len(entries))
+	for i, entry := range entries {
+		kind, err := provider.ParseKind(string(entry.Provider))
+		if err != nil {
+			return nil, err
+		}
+		resolved[i] = provider.ResolvedModel{
+			PublicName: entry.PublicName, UpstreamName: entry.UpstreamName,
+			Provider: kind, OwnedBy: entry.OwnedBy, PolicyKey: entry.PolicyKey,
+		}
+	}
+	return provider.NewStaticModelCatalog(resolved)
+}
 
 type CapabilityStore interface {
 	Replace(context.Context, string, []store.ModelCapability) error
@@ -99,6 +118,33 @@ func (c *Catalog) Capabilities(ctx context.Context, accountID string) ([]Capabil
 		result = append(result, Capability{Model: Model{ID: value.Model, DisplayName: value.DisplayName, ContextWindow: value.ContextWindow, MaxOutputTokens: value.MaxOutputTokens, ReasoningEfforts: append([]string(nil), value.ReasoningEfforts...), SupportsBackendSearch: value.SupportsBackendSearch}, Supported: value.Supported, DiscoveredAt: value.DiscoveredAt, Stale: value.Stale})
 	}
 	return result, nil
+}
+
+// AccountSupports reports whether an account's capability snapshot permits the
+// resolved model. An absent snapshot is unknown and therefore routable. Search
+// capability is an xAI-only requirement; other providers keep their own
+// capability semantics independent of xAI discovery.
+func (c *Catalog) AccountSupports(ctx context.Context, accountID string, resolved provider.ResolvedModel) (bool, error) {
+	values, err := c.repository.List(ctx, accountID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return true, nil
+		}
+		return false, err
+	}
+	if len(values) == 0 {
+		return true, nil
+	}
+	for _, value := range values {
+		if value.Model != resolved.UpstreamName || !value.Supported {
+			continue
+		}
+		if resolved.Provider == provider.XAI && value.SupportsBackendSearch != nil && !*value.SupportsBackendSearch {
+			return false, nil
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // Public returns the configured allowlist intersected with at least one enabled

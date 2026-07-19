@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	appcrypto "byos/internal/crypto"
 	"byos/internal/models"
 	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/requestsource"
 	"byos/internal/routing"
 	"byos/internal/sessions"
@@ -102,71 +104,59 @@ func (r usageRecorder) Record(ctx context.Context, accountID string, delta routi
 
 type publicCatalog struct {
 	catalog      *models.Catalog
+	models       []provider.ResolvedModel
 	accounts     *store.AccountRepository
-	capabilities *store.ModelCapabilityRepository
 	cooldowns    *store.CooldownRepository
 	now          func() time.Time
 	defaultModel string
+	resolver     routing.ModelResolver
+	xaiModels    map[string]provider.ResolvedModel
+}
+
+func newPublicCatalog(catalog *models.Catalog, static *provider.StaticModelCatalog, accounts *store.AccountRepository, cooldowns *store.CooldownRepository, now func() time.Time, defaultModel string, resolver routing.ModelResolver) publicCatalog {
+	models := static.Models()
+	xaiModels := make(map[string]provider.ResolvedModel)
+	for _, resolved := range models {
+		if resolved.Provider == provider.XAI {
+			xaiModels[resolved.UpstreamName] = resolved
+		}
+	}
+	return publicCatalog{catalog: catalog, models: models, accounts: accounts, cooldowns: cooldowns, now: now, defaultModel: defaultModel, resolver: resolver, xaiModels: xaiModels}
 }
 
 func (a publicCatalog) PublicModels(ctx context.Context) ([]apiopenai.Model, error) {
-	values, err := a.accounts.List(ctx)
+	accounts, err := a.accounts.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	eligible := make([]store.Account, 0, len(values))
-	ids := make([]string, 0, len(values))
 	now := a.now()
-	for _, account := range values {
-		if account.Enabled && account.Status == "ready" && oauthxai.CredentialsUsable(account, now) {
-			eligible = append(eligible, account)
-			ids = append(ids, account.ID)
-		}
-	}
-	if len(eligible) == 0 {
-		return []apiopenai.Model{}, nil
-	}
-	public, err := a.catalog.Public(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]apiopenai.Model, 0, len(public))
-	for _, model := range public {
-		resolved, ok := a.catalog.Resolve(model.ID)
-		if !ok {
-			continue
-		}
-		routable, err := a.modelRoutable(ctx, eligible, resolved)
+	result := make([]apiopenai.Model, 0, len(a.models))
+	for _, resolved := range a.models {
+		routable, err := a.modelRoutable(ctx, accounts, resolved, now)
 		if err != nil {
 			return nil, err
 		}
 		if routable {
-			result = append(result, apiopenai.Model{ID: model.ID, OwnedBy: model.OwnedBy})
+			result = append(result, apiopenai.Model{ID: resolved.PublicName, OwnedBy: resolved.OwnedBy})
 		}
 	}
 	return result, nil
 }
 
-func (a publicCatalog) modelRoutable(ctx context.Context, accounts []store.Account, model string) (bool, error) {
-	now := a.now()
+func (a publicCatalog) modelRoutable(ctx context.Context, accounts []store.Account, resolved provider.ResolvedModel, now time.Time) (bool, error) {
 	for _, account := range accounts {
-		capabilities, err := a.capabilities.List(ctx, account.ID)
+		if !account.Enabled || account.Status != "ready" || account.Provider != resolved.Provider || !accountCredentialsUsable(account, now) {
+			continue
+		}
+		supported, err := a.catalog.AccountSupports(ctx, account.ID, resolved)
 		if err != nil {
 			return false, err
-		}
-		known := len(capabilities) > 0
-		supported := !known
-		for _, capability := range capabilities {
-			if capability.Model == model && capability.Supported && (capability.SupportsBackendSearch == nil || *capability.SupportsBackendSearch) {
-				supported = true
-				break
-			}
 		}
 		if !supported {
 			continue
 		}
 		cooling := false
-		for _, scope := range []string{model, "*"} {
+		for _, scope := range [...]string{resolved.UpstreamName, "*"} {
 			state, err := a.cooldowns.Get(ctx, account.ID, scope, now)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return false, err
@@ -182,17 +172,36 @@ func (a publicCatalog) modelRoutable(ctx context.Context, accounts []store.Accou
 	}
 	return false, nil
 }
+
+func accountCredentialsUsable(account store.Account, now time.Time) bool {
+	switch account.Provider {
+	case provider.XAI:
+		return oauthxai.CredentialsUsable(account, now)
+	case provider.Devin:
+		if strings.TrimSpace(account.Credentials.OpaqueToken) == "" {
+			return false
+		}
+		return account.Credentials.OpaqueTokenExpiresAt == nil || account.Credentials.OpaqueTokenExpiresAt.After(now)
+	default:
+		return false
+	}
+}
+
 func (a publicCatalog) Ready(ctx context.Context) (bool, error) {
-	values, err := a.PublicModels(ctx)
+	accounts, err := a.accounts.List(ctx)
 	if err != nil {
 		return false, err
 	}
-	for _, model := range values {
-		if model.ID == a.defaultModel {
-			return true, nil
-		}
+	now := a.now()
+	upstream, err := a.resolver.Resolve(a.defaultModel)
+	if err != nil {
+		return false, nil
 	}
-	return false, nil
+	resolved, ok := a.xaiModels[upstream]
+	if !ok {
+		return false, nil
+	}
+	return a.modelRoutable(ctx, accounts, resolved, now)
 }
 
 func deriveWebCSRFKey(sessionKey [32]byte) [32]byte {
@@ -201,6 +210,25 @@ func deriveWebCSRFKey(sessionKey [32]byte) [32]byte {
 	copy(material[:], label)
 	copy(material[len(label):], sessionKey[:])
 	return sha256.Sum256(material[:])
+}
+
+func legacyXAIModelResolver(static *provider.StaticModelCatalog, catalog *models.Catalog) routing.ModelResolver {
+	xaiUpstreams := make(map[string]struct{})
+	for _, identity := range static.Models() {
+		if identity.Provider == provider.XAI {
+			xaiUpstreams[identity.UpstreamName] = struct{}{}
+		}
+	}
+	return routing.ResolverFunc(func(value string) (string, error) {
+		resolved, ok := catalog.Resolve(value)
+		if !ok {
+			return "", routing.ErrModelUnavailable
+		}
+		if _, ok := xaiUpstreams[resolved]; !ok {
+			return "", routing.ErrModelUnavailable
+		}
+		return resolved, nil
+	})
 }
 
 func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger *slog.Logger) (*Runtime, error) {
@@ -229,6 +257,10 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	apiKeyService := accounts.NewAPIKeyService(store.NewAPIKeyRepository(database.DB))
 	upstream := xai.NewClient(xai.HTTPConfig{BaseURL: cfg.Upstream.CLIProxyBaseURL, ClientVersion: cfg.Upstream.GrokClientVersion, UserAgent: "byos", RequestTimeout: cfg.Upstream.RequestTimeout.Duration(), SSEIdleTimeout: cfg.Upstream.SSEIdleTimeout.Duration()})
 	catalog := models.NewCatalog(capabilityRepo, models.NewUpstream(upstream), cfg.Models.Allowlist, cfg.Models.Aliases)
+	staticCatalog, err := models.NewStaticCatalog(cfg.Models.Entries)
+	if err != nil {
+		return fail(err)
+	}
 	modelWorker := models.NewWorker(models.NewStoreAccountProvider(accountRepo), catalog, 15*time.Minute, cfg.Upstream.RequestTimeout.Duration(), 4)
 	usageService := usage.NewService(usage.NewBillingAdapter(upstream), usageRepo, localUsageRepo)
 	usageWorker := usage.NewWorker(usage.NewStoreAccountProvider(accountRepo), usageService, cfg.Usage.RefreshInterval.Duration(), cfg.Upstream.RequestTimeout.Duration(), 4)
@@ -241,13 +273,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	usageRefresher := usageRefresh{accountRepo, usageWorker}
 	accountService := accounts.NewService(accountRepo, oauthService, identity, refreshService, modelRefresher, usageRefresher)
 	cooldowns := routing.NewCooldownManager(cooldownRepo, accountRepo)
-	resolver := routing.ResolverFunc(func(value string) (string, error) {
-		resolved, ok := catalog.Resolve(value)
-		if !ok {
-			return "", routing.ErrModelUnavailable
-		}
-		return resolved, nil
-	})
+	resolver := legacyXAIModelResolver(staticCatalog, catalog)
 	executor := routing.NewExecutor(routing.NewScheduler(), upstream, refreshService, cooldowns, accountRepo, capabilityRepo, cooldownRepo, resolver)
 	executor.SetUsageRecorder(usageRecorder{service: usageService})
 	transforms := translate.NewRegistry()
@@ -264,8 +290,8 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		return fail(errors.New("Anthropic translator is not registered"))
 	}
 	sessionService := sessions.NewService(responseRepo)
-	publicModels := publicCatalog{catalog: catalog, accounts: accountRepo, capabilities: capabilityRepo, cooldowns: cooldownRepo, now: func() time.Time { return time.Now().UTC() }, defaultModel: cfg.Models.Default}
-	handlers := api.ServerHandlers{Health: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), Ready: readyHandler(database.DB, publicModels, cfg.Models.Default), Models: apiopenai.ModelsHandler(publicModels), Chat: apiopenai.ChatHandler{Transform: chatTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {
+	publicModels := newPublicCatalog(catalog, staticCatalog, accountRepo, cooldownRepo, func() time.Time { return time.Now().UTC() }, cfg.Models.Default, resolver)
+	handlers := api.ServerHandlers{Health: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), Ready: readyHandler(database.DB, publicModels), Models: apiopenai.ModelsHandler(publicModels), Chat: apiopenai.ChatHandler{Transform: chatTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {
 		return executor.Stream(ctx, request)
 	}}, Responses: apiopenai.ResponsesHandler{Transform: responsesTransform, Execute: executor.Execute, OpenStream: func(ctx context.Context, request routing.Request) (api.RoutedStream, error) {
 		return executor.Stream(ctx, request)
@@ -309,24 +335,18 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	return runtime, nil
 }
 
-func readyHandler(database *sql.DB, catalog apiopenai.ModelCatalog, defaultModel string) http.Handler {
+func readyHandler(database *sql.DB, readiness web.ReadinessService) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := database.PingContext(r.Context()); err != nil {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
-		values, err := catalog.PublicModels(r.Context())
-		if err != nil {
+		ready, err := readiness.Ready(r.Context())
+		if err != nil || !ready {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
-		for _, model := range values {
-			if model.ID == defaultModel {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-		}
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		w.WriteHeader(http.StatusOK)
 	})
 }
 func (r *Runtime) Run(ctx context.Context) error {

@@ -26,11 +26,11 @@ func ModelsHandler(catalog ModelCatalog) http.Handler {
 		}
 		data := make([]map[string]any, 0, len(models))
 		for _, model := range models {
-			owned := model.OwnedBy
-			if owned == "" {
-				owned = "xai"
+			if model.OwnedBy == "" {
+				apierrors.WriteOpenAI(w, apierrors.OpenAI(apierrors.InternalFailure, 0))
+				return
 			}
-			data = append(data, map[string]any{"id": model.ID, "object": "model", "created": model.Created, "owned_by": owned})
+			data = append(data, map[string]any{"id": model.ID, "object": "model", "created": model.Created, "owned_by": model.OwnedBy})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})

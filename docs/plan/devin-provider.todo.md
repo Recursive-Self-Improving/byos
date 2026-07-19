@@ -2,15 +2,19 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunk 1 complete**; all C1.1–C1.7 items are checked. No commit was created by this tracker update.
+> Status: **Chunks 1–2 complete**. Chunk 2 passed independent review and clean certification; the next implementation item is C3.1.
 >
-> Current next item: **C2.1 — Introduce deterministic provider-owned model configuration**.
+> Current next item: **C3.1 — Move shared execution types out of xAI**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
 > Chunk 1 gate evidence (2026-07-19): `go test -count=1 ./internal/provider ./internal/store ./internal/crypto ./internal/accounts ./internal/oauth/xai`; `go test -run '^$' ./...`; `go test -count=1 ./...`; `git diff --check` — all passed.
 >
 > Final independent certifications (2026-07-19): OAuth lifecycle/security review **CLEAN** after the exact-alias and pending-payload fixes; overall Chunk 1 migration, provider contracts, persistence, xAI compatibility, scope, and accounting review **CLEAN**.
+>
+> Chunk 2 implementation record (2026-07-19): C2.1–C2.5 are complete. Deterministic strict provider/model configuration and bounded Devin runtime settings feed one immutable static catalog; the catalog accepts the canonical `grok`/`grok-4.5` alias projection while rejecting duplicate public names and ambiguous upstream provider/policy registrations; public listing/readiness uses resolved-provider/account-provider equality with xAI-only backend-search semantics; `/v1/models` returns explicit ownership and fails closed on missing ownership.
+>
+> Chunk 2 review/fix record and final certification (2026-07-19): review corrected configuration ownership so provider model declarations remain provider-scoped, added the xAI resolver guard against cross-provider aliases, made readiness require an eligible account for the resolved provider, removed avoidable public-catalog projection allocation, and broke the `api[test] -> openai -> api` import cycle by moving server tests to external package `api_test`. Follow-up review certified the complete Chunk 2 configuration, catalog, routability, runtime/API behavior, and accounting scope **CLEAN**. This tracker-only closure did not rerun gates or create the sequential commit.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -82,7 +86,7 @@
   - Observable DoD: all Chunk 1 verification passes; the diff contains only neutral contracts, migration, repositories, and focused tests; historical plans and migrations 001–004 are unchanged.
   - Sequential commit: `feat(provider): persist provider identity and add neutral contracts`.
 
-- [ ] **C2.1 — Introduce deterministic provider-owned model configuration**
+- [x] **C2.1 — Introduce deterministic provider-owned model configuration**
   - Chunk owner: **Chunk 2 — Static model ownership and provider-aware configuration**.
   - Depends on: C1.7.
   - Files: `internal/config/config.go`, config fixtures/tests, example config surfaces as needed for compile-time behavior only.
@@ -90,7 +94,7 @@
   - Observable DoD: strict YAML rejects unknown provider fields, duplicate configured names, invalid kinds, attempted Grok ownership transfer, invalid callback/host values, zero/out-of-range size or idle limits, and invalid nonzero stream deadlines; defaults and caller-context/timeout semantics round-trip; serialized config contains no secrets.
   - Verification: expand `internal/config/config_test.go` default, boundary, override, round-trip, invalid, Railway, disabled-deadline/caller-context, and secret-absence cases.
 
-- [ ] **C2.2 — Build the immutable static model-resolution catalog**
+- [x] **C2.2 — Build the immutable static model-resolution catalog**
   - Chunk owner: **Chunk 2**.
   - Depends on: C2.1.
   - Files: `internal/provider` catalog/model files, `internal/models/catalog.go`, tests.
@@ -98,7 +102,7 @@
   - Observable DoD: the five public names resolve exactly as specified; the positive `grok`/`grok-4.5` alias pair constructs successfully and shares canonical `(grok-4.5,xai,xai)`; duplicate public names and ambiguous canonical upstream registrations fail construction; unknown names fail before capability/policy/account calls; no concrete runtime object, precedence, qualification, or conflict branch exists.
   - Verification: table tests assert public name, upstream name, provider, owner metadata, and stable policy key for every entry; include the positive `grok` plus `grok-4.5` fixture, duplicate-public negatives, and same-upstream/different-provider-or-policy ambiguity negatives. No other chunk owns static catalog construction or these registration tests.
 
-- [ ] **C2.3 — Make catalog routability provider-aware**
+- [x] **C2.3 — Make catalog routability provider-aware**
   - Chunk owner: **Chunk 2**.
   - Depends on: C2.2.
   - Files: `internal/models/catalog.go`, `internal/app/runtime.go` public-catalog projection seams, model tests.
@@ -106,7 +110,7 @@
   - Observable DoD: `grok` is listed/routable with a usable xAI account even though `OwnedBy=byos`; Devin models are not suppressed by missing xAI search support; unknown Devin capabilities may use Devin accounts only; an account matching owner text but not resolved provider cannot route; no usable account for the resolved provider means that provider's models are omitted.
   - Verification: catalog/readiness tests include a positive `grok` plus xAI-account fixture, a negative owner-text/provider-mismatch fixture, xAI known/unknown search capability, and Devin known/unknown capability independently.
 
-- [ ] **C2.4 — Return explicit public model ownership**
+- [x] **C2.4 — Return explicit public model ownership**
   - Chunk owner: **Chunk 2**.
   - Depends on: C2.3.
   - Files: `internal/api/openai/models.go`, model response tests, admin projection types if needed for the compile boundary.
@@ -114,7 +118,7 @@
   - Observable DoD: `/v1/models` returns `byos` for `grok`, `xai` for `grok-4.5`, and `devin` for each Devin model; `grok` remains routable through an xAI account; an incomplete internal model entry fails a test rather than silently becoming xAI.
   - Verification: focused OpenAI model handler tests separate displayed `owned_by` from provider-based eligibility and include the positive `grok`/xAI-account case.
 
-- [ ] **C2.5 — Review and commit Chunk 2**
+- [x] **C2.5 — Review and commit Chunk 2**
   - Chunk owner: **Chunk 2**.
   - Depends on: C2.4.
   - Observable DoD: exact ownership metadata, valid canonical aliases, ambiguous-registration rejection, and fail-closed config behavior are proven; routability uses resolved provider/account provider equality; dynamic discovery is not a routing authority; no model-conflict machinery exists.
