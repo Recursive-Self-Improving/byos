@@ -9,6 +9,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -79,7 +80,7 @@ func (s *Service) completeLogin(ctx context.Context, state string) (store.Accoun
 	if expires.IsZero() {
 		expires = s.now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
-	account, err := s.accounts.UpsertLogin(ctx, store.Account{Status: "ready", Credentials: store.AccountCredentials{Issuer: identity.Issuer, Subject: identity.Subject, Email: identity.Email, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken, TokenEndpoint: token.TokenEndpoint, RawIdentity: claims}, ExpiresAt: &expires})
+	account, err := s.accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Status: "ready", Credentials: store.AccountCredentials{Issuer: identity.Issuer, Subject: identity.Subject, Email: identity.Email, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken, TokenEndpoint: token.TokenEndpoint, RawIdentity: claims}, ExpiresAt: &expires})
 	if err != nil {
 		return store.Account{}, err
 	}

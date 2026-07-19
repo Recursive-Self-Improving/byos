@@ -15,6 +15,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -75,7 +76,7 @@ func TestStartDevicePersistsSafeNormalizedSession(t *testing.T) {
 	if strings.Contains(string(encoded), "device-secret") {
 		t.Fatal("device code exposed")
 	}
-	pending, err := service.sessions.ListPending(context.Background(), service.now())
+	pending, err := service.sessions.ListPending(context.Background(), provider.XAI, store.OAuthFlowDevice, service.now())
 	if err != nil || len(pending) != 1 || pending[0].DeviceCode != "device-secret" {
 		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
@@ -126,7 +127,7 @@ func TestPollTerminalAndCancellationPaths(t *testing.T) {
 			if !errors.As(err, &oauthErr) || oauthErr.Code != test.code {
 				t.Fatalf("error=%v", err)
 			}
-			if _, err := service.sessions.GetPending(context.Background(), flow.State, service.now()); err != sql.ErrNoRows {
+			if _, err := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now()); err != sql.ErrNoRows {
 				t.Fatalf("terminal resumed: %v", err)
 			}
 		})
@@ -183,7 +184,7 @@ func TestPollLeaderContextCancellationStopsWorkerAndPreservesPending(t *testing.
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("poll error=%v", err)
 	}
-	if _, err := service.sessions.GetPending(context.Background(), flow.State, service.now()); err != nil {
+	if _, err := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now()); err != nil {
 		t.Fatalf("pending lost=%v", err)
 	}
 }
@@ -194,7 +195,7 @@ func TestPollDoesNotExchangeAfterLocalExpiry(t *testing.T) {
 	current := time.Now().UTC().Truncate(time.Second)
 	service.now = func() time.Time { return current }
 	state := "short-lived"
-	if err := service.sessions.Create(context.Background(), store.OAuthSession{State: state, DeviceCode: "device", UserCode: "CODE", VerificationURI: "https://auth.x.ai/verify", TokenEndpoint: "https://auth.x.ai/token", PollInterval: MinimumPollInterval, ExpiresAt: current.Add(3 * time.Second)}); err != nil {
+	if err := service.sessions.Create(context.Background(), store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, State: state, DeviceCode: "device", UserCode: "CODE", VerificationURI: "https://auth.x.ai/verify", TokenEndpoint: "https://auth.x.ai/token", PollInterval: MinimumPollInterval, ExpiresAt: current.Add(3 * time.Second)}); err != nil {
 		t.Fatal(err)
 	}
 	var waits []time.Duration

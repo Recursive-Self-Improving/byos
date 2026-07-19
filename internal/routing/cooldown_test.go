@@ -9,6 +9,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -21,7 +22,7 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	}
 	keys, _ := appcrypto.DeriveKeys(bytes.Repeat([]byte{15}, 32))
 	accounts := store.NewAccountRepository(database.DB, keys)
-	account, err := accounts.UpsertLogin(ctx, store.Account{Credentials: store.AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cooldown", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+	account, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Credentials: store.AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cooldown", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

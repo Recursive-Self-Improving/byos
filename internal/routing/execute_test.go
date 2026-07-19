@@ -11,6 +11,7 @@ import (
 
 	appcrypto "byos/internal/crypto"
 	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/xai"
 )
@@ -85,7 +86,7 @@ func newExecutionFixture(t *testing.T, count int) (*executionFixture, []store.Ac
 	accounts := store.NewAccountRepository(database.DB, keys)
 	stored := make([]store.Account, 0, count)
 	for index := range count {
-		account, err := accounts.UpsertLogin(ctx, store.Account{Label: "account", Status: "ready", Credentials: store.AccountCredentials{Issuer: "issuer", Subject: string(rune('a' + index)), AccessToken: "token-" + string(rune('a'+index)), RefreshToken: "refresh", TokenEndpoint: "https://auth.invalid/token"}})
+		account, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Label: "account", Status: "ready", Credentials: store.AccountCredentials{Issuer: "issuer", Subject: string(rune('a' + index)), AccessToken: "token-" + string(rune('a'+index)), RefreshToken: "refresh", TokenEndpoint: "https://auth.invalid/token"}})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 )
 
 func openRepositories(t *testing.T) (*SQLite, appcrypto.Keys) {
@@ -33,7 +34,7 @@ func TestAccountPersistenceReloginAndPlaintextAbsence(t *testing.T) {
 	repo := NewAccountRepository(store.DB, keys)
 	expires := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	credentials := AccountCredentials{Issuer: "https://auth.x.ai", Subject: "subject-fixture", Email: "secret@example.com", AccessToken: "access-token-fixture", RefreshToken: "refresh-token-fixture", IDToken: "id-token-fixture", TokenEndpoint: "https://auth.x.ai/token", RawIdentity: json.RawMessage(`{"sub":"subject-fixture"}`)}
-	created, err := repo.UpsertLogin(ctx, Account{Label: "primary", Credentials: credentials, ExpiresAt: &expires})
+	created, err := repo.UpsertLogin(ctx, Account{Provider: provider.XAI, Label: "primary", Credentials: credentials, ExpiresAt: &expires})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,7 @@ func TestAccountPersistenceReloginAndPlaintextAbsence(t *testing.T) {
 		t.Fatal(err)
 	}
 	credentials.AccessToken = "rotated-access-token"
-	relogged, err := repo.UpsertLogin(ctx, Account{Label: "ignored", Credentials: credentials, ExpiresAt: &expires})
+	relogged, err := repo.UpsertLogin(ctx, Account{Provider: provider.XAI, Label: "ignored", Credentials: credentials, ExpiresAt: &expires})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestCapabilityAndCooldownSurviveReopen(t *testing.T) {
 	}
 	keys, _ := appcrypto.DeriveKeys(bytes.Repeat([]byte{8}, 32))
 	accounts := NewAccountRepository(first.DB, keys)
-	account, err := accounts.UpsertLogin(ctx, Account{Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cap-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+	account, err := accounts.UpsertLogin(ctx, Account{Provider: provider.XAI, Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cap-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,27 +131,31 @@ func TestEncryptedOAuthUsageAndResponseRepositories(t *testing.T) {
 	store, keys := openRepositories(t)
 	defer store.Close()
 	accounts := NewAccountRepository(store.DB, keys)
-	account, err := accounts.UpsertLogin(ctx, Account{Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "repo-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+	account, err := accounts.UpsertLogin(ctx, Account{Provider: provider.XAI, Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "repo-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	oauth := NewOAuthSessionRepository(store.DB, keys)
-	session := OAuthSession{State: "browser-state", DeviceCode: "device-secret", UserCode: "USER-CODE", VerificationURI: "https://auth.x.ai/device", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(time.Hour)}
+	session := OAuthSession{Provider: provider.XAI, FlowType: OAuthFlowDevice, State: "browser-state", DeviceCode: "device-secret", UserCode: "USER-CODE", VerificationURI: "https://auth.x.ai/device", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(time.Hour)}
 	if err := oauth.Create(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	got, err := oauth.GetPending(ctx, session.State, now)
+	got, err := oauth.GetPending(ctx, provider.XAI, OAuthFlowDevice, session.State, now)
 	if err != nil || got.DeviceCode != "device-secret" {
 		t.Fatalf("oauth = %+v, %v", got, err)
 	}
-	if err := oauth.Transition(ctx, session.State, "completed", ""); err != nil {
+	authorization := OAuthAuthorization{AccessToken: "oauth-access-token", AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := oauth.Authorize(ctx, provider.XAI, OAuthFlowDevice, session.State, authorization, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := oauth.GetPending(ctx, session.State, now); err != sql.ErrNoRows {
+	if err := oauth.Complete(ctx, provider.XAI, OAuthFlowDevice, session.State, account.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oauth.GetPending(ctx, provider.XAI, OAuthFlowDevice, session.State, now); err != sql.ErrNoRows {
 		t.Fatalf("terminal session resumed: %v", err)
 	}
-	if err := oauth.Transition(ctx, session.State, "failed", ""); err != sql.ErrNoRows {
+	if err := oauth.Fail(ctx, provider.XAI, OAuthFlowDevice, session.State, "", now); err != sql.ErrNoRows {
 		t.Fatalf("terminal session mutated: %v", err)
 	}
 	usage := NewUsageRepository(store.DB, keys)

@@ -2,9 +2,15 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: pre-implementation. Every implementation item is intentionally unchecked.
+> Status: **Chunk 1 complete**; all C1.1–C1.7 items are checked. No commit was created by this tracker update.
 >
-> Current next chunk: **Chunk 1 — Provider identity, neutral contracts, and schema migration**.
+> Current next item: **C2.1 — Introduce deterministic provider-owned model configuration**.
+>
+> Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
+>
+> Chunk 1 gate evidence (2026-07-19): `go test -count=1 ./internal/provider ./internal/store ./internal/crypto ./internal/accounts ./internal/oauth/xai`; `go test -run '^$' ./...`; `go test -count=1 ./...`; `git diff --check` — all passed.
+>
+> Final independent certifications (2026-07-19): OAuth lifecycle/security review **CLEAN** after the exact-alias and pending-payload fixes; overall Chunk 1 migration, provider contracts, persistence, xAI compatibility, scope, and accounting review **CLEAN**.
 >
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -21,7 +27,7 @@
 
 ## Flat dependency-ordered tracker
 
-- [ ] **C1.1 — Define provider kinds and resolved-model identity**
+- [x] **C1.1 — Define provider kinds and resolved-model identity**
   - Chunk owner: **Chunk 1 — Provider identity, neutral contracts, and schema migration**.
   - Depends on: none.
   - Files: create `internal/provider` core files and focused tests.
@@ -29,7 +35,7 @@
   - Observable DoD: invalid/empty provider values fail deterministically; valid values round-trip through text/DB-facing representations; static resolved-model identity contains no runtime implementation and no concrete xAI or Devin package is imported by `internal/provider`.
   - Verification: focused `internal/provider` tests prove accepted/rejected stable provider values and neutral static resolved-model identity.
 
-- [ ] **C1.2 — Define provider-neutral execution, credential, policy, discovery, and usage contracts**
+- [x] **C1.2 — Define provider-neutral execution, credential, policy, discovery, and usage contracts**
   - Chunk owner: **Chunk 1**.
   - Depends on: C1.1.
   - Files: `internal/provider/*`; identify later shared call sites without cutting them over yet.
@@ -37,7 +43,7 @@
   - Observable DoD: fake providers implement required runtime capabilities; optional capabilities can be absent without fake no-ops; the static catalog contains only resolution data/policy keys; the runtime registry contains capabilities only; no concrete registration table or pre-marshaled/placeholder payload is built in Chunk 1.
   - Verification: compile-time fakes and focused behavior tests cover neutral contracts, absent optional capabilities, static/runtime separation, and one-owner/one-marshal payload semantics. Concrete static catalog construction and duplicate model-name tests are deferred exclusively to C2.2.
 
-- [ ] **C1.3 — Add the ordered provider-identity migration**
+- [x] **C1.3 — Add the ordered provider-identity migration**
   - Chunk owner: **Chunk 1**.
   - Depends on: C1.2.
   - Files: create `migrations/005_provider_identity.sql`; update migration-count/schema assertions only.
@@ -45,7 +51,7 @@
   - Observable DoD: both fresh and populated v4 databases migrate atomically to v5; every legacy row reads `provider=xai`, every legacy OAuth row reads `flow_type=device`, IDs/foreign keys/status/timestamps/encrypted blobs are byte-preserved, and migration rollback leaves no partial schema.
   - Verification: extend `internal/store/sqlite_test.go` with fresh-schema and populated-v4 migration fixtures, foreign-key checks, migration count, and failure rollback.
 
-- [ ] **C1.4 — Make account persistence provider-typed**
+- [x] **C1.4 — Make account persistence provider-typed**
   - Chunk owner: **Chunk 1**.
   - Depends on: C1.3.
   - Files: `internal/store/accounts.go`, account repository callers/fixtures, persistence tests.
@@ -53,7 +59,7 @@
   - Observable DoD: xAI and Devin accounts round-trip provider across close/reopen; an update cannot change an account's provider accidentally; repository APIs never infer provider from model or token contents.
   - Verification: account CRUD/restart tests plus legacy-row migration coverage.
 
-- [ ] **C1.5 — Make OAuth-session persistence provider- and flow-typed**
+- [x] **C1.5 — Make OAuth-session persistence provider- and flow-typed**
   - Chunk owner: **Chunk 1**.
   - Depends on: C1.4.
   - Files: `internal/store/oauth_sessions.go`, lifecycle tests, resumable-session callers.
@@ -61,7 +67,7 @@
   - Observable DoD: restart dispatch can select the correct provider without decrypting every row; wrong-provider or wrong-flow completion/cancel/resume returns not-found/conflict and performs no mutation; consume exposes the verifier only in memory and cannot be replayed; consumed cannot return to pending or be cancelled/expired, only finalized completed or failed; completed/failed/expired/cancelled expose no decryptable pending secret and reject every mutation.
   - Verification: extend `internal/store/oauth_sessions_lifecycle_test.go` for both flow types, restart, atomic verifier-returning consume, pending-secret disposal, replay, exclusive consumed finalizations, restart finalization of interrupted consumed attempts as failed without re-exchange, immutable completed/failed/expired/cancelled states, and wrong-provider operations.
 
-- [ ] **C1.6 — Prove encrypted provider persistence and secret absence**
+- [x] **C1.6 — Prove encrypted provider persistence and secret absence**
   - Chunk owner: **Chunk 1**.
   - Depends on: C1.5.
   - Files: `internal/store/persistence_test.go`, crypto/store fixtures.
@@ -69,7 +75,7 @@
   - Observable DoD: durable secret fixtures are absent from plaintext DB/WAL/SHM; raw state, callback code, and per-request user JWT are absent from decoded account/session rows and raw DB/WAL/SHM; provider/flow/status/state hash remain queryable; consume leaves no decryptable pending verifier/redirect material after returning the verifier only in memory; completed/failed/expired/cancelled states remain immutable and secret-free; wrong master key and tampered envelopes fail closed without partial plaintext.
   - Verification: focused store/crypto persistence, negative-absence, consume/final-disposal, state-transition, and envelope tests; C5 repeats unique raw-state/callback-code absence, in-memory-only verifier return, exclusive consumed finalization, and pending-secret disposal after every success/failure path, and C6 proves user JWT is request-local only.
 
-- [ ] **C1.7 — Review and commit Chunk 1**
+- [x] **C1.7 — Review and commit Chunk 1**
   - Chunk owner: **Chunk 1**.
   - Depends on: C1.6.
   - Work: review the migration/core boundary for hidden provider inference, migration edits, plaintext, and compatibility shims.

@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -53,19 +54,19 @@ func NewService(discovery *DiscoveryClient, client *http.Client, sessions *store
 }
 
 func (s *Service) Session(ctx context.Context, state string) (store.OAuthSession, error) {
-	return s.sessions.Get(ctx, state)
+	return s.sessions.Get(ctx, provider.XAI, store.OAuthFlowDevice, state)
 }
 
 func (s *Service) Resumable(ctx context.Context) ([]store.OAuthSession, error) {
-	return s.sessions.ListResumable(ctx, s.now())
+	return s.sessions.ListResumable(ctx, provider.XAI, store.OAuthFlowDevice, s.now())
 }
 
 func (s *Service) Complete(ctx context.Context, state, accountID string) error {
-	return s.sessions.Complete(ctx, state, accountID, s.now())
+	return s.sessions.Complete(ctx, provider.XAI, store.OAuthFlowDevice, state, accountID, s.now())
 }
 
 func (s *Service) Fail(ctx context.Context, state, sanitized string) error {
-	return s.sessions.Transition(ctx, state, "failed", sanitized)
+	return s.sessions.Fail(ctx, provider.XAI, store.OAuthFlowDevice, state, sanitized, s.now())
 }
 func (s *Service) StartDevice(ctx context.Context) (DeviceAuthorization, error) {
 	discovery, err := s.discovery.Discover(ctx)
@@ -112,7 +113,7 @@ func (s *Service) StartDevice(ctx context.Context) (DeviceAuthorization, error) 
 	if expires.After(max) {
 		expires = max
 	}
-	session := store.OAuthSession{State: state, DeviceCode: payload.DeviceCode, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, TokenEndpoint: discovery.TokenEndpoint, PollInterval: interval, ExpiresAt: expires}
+	session := store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, State: state, DeviceCode: payload.DeviceCode, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, TokenEndpoint: discovery.TokenEndpoint, PollInterval: interval, ExpiresAt: expires}
 	if err := s.sessions.Create(ctx, session); err != nil {
 		return DeviceAuthorization{}, err
 	}

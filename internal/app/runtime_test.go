@@ -15,6 +15,7 @@ import (
 	"byos/internal/config"
 	appcrypto "byos/internal/crypto"
 	"byos/internal/models"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -74,7 +75,7 @@ func TestPublicModelsAndReadinessRequireRoutableSearchAccount(t *testing.T) {
 				t.Fatal(err)
 			}
 			accountsRepo := store.NewAccountRepository(database.DB, keys)
-			account, err := accountsRepo.UpsertLogin(ctx, store.Account{Status: test.status, ExpiresAt: test.expires, Credentials: store.AccountCredentials{Issuer: "issuer", Subject: test.name, AccessToken: "token", RefreshToken: test.refresh, TokenEndpoint: "https://auth.x.ai/token"}})
+			account, err := accountsRepo.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Status: test.status, ExpiresAt: test.expires, Credentials: store.AccountCredentials{Issuer: "issuer", Subject: test.name, AccessToken: "token", RefreshToken: test.refresh, TokenEndpoint: "https://auth.x.ai/token"}})
 			if err != nil {
 				t.Fatal(err)
 			}

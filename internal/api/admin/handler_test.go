@@ -15,6 +15,7 @@ import (
 	"byos/internal/accounts"
 	"byos/internal/models"
 	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
 )
@@ -176,7 +177,7 @@ func decodeMap(t *testing.T, response *httptest.ResponseRecorder) map[string]any
 func TestOAuthDeviceLifecycleAndSafeProjection(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	account := store.Account{
-		ID: "acct_1", Label: "primary", Enabled: true, Status: "ready",
+		ID: "acct_1", Provider: provider.XAI, Label: "primary", Enabled: true, Status: "ready",
 		Credentials: store.AccountCredentials{Email: "owner@example.com", Subject: "private-subject", AccessToken: "private-access", RefreshToken: "private-refresh", IDToken: "private-id", RawIdentity: json.RawMessage(`{"secret":"claim"}`)},
 		CreatedAt:   now, UpdatedAt: now,
 	}
@@ -184,7 +185,7 @@ func TestOAuthDeviceLifecycleAndSafeProjection(t *testing.T) {
 		flow:      oauthxai.DeviceAuthorization{State: "opaque-state", UserCode: "ABCD-EFGH", VerificationURI: "https://accounts.x.ai/device", VerificationURIComplete: "https://accounts.x.ai/device?user_code=ABCD-EFGH", ExpiresAt: now.Add(10 * time.Minute), PollInterval: 5 * time.Second},
 		completed: account,
 	}
-	oauthService := &fakeOAuth{session: store.OAuthSession{Status: "completed", AccountID: "acct_1"}}
+	oauthService := &fakeOAuth{session: store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, Status: "completed", AccountID: "acct_1"}}
 	handler := NewHandler(Services{Accounts: accountsService, OAuth: oauthService})
 
 	started := request(t, handler, http.MethodPost, basePath+"/oauth/xai/device", "")
@@ -219,7 +220,7 @@ func TestOAuthDeviceLifecycleAndSafeProjection(t *testing.T) {
 }
 
 func TestOAuthErrorsAreSanitized(t *testing.T) {
-	handler := NewHandler(Services{Accounts: &fakeAccounts{}, OAuth: &fakeOAuth{session: store.OAuthSession{Status: "failed", SanitizedError: "private upstream tenant and token"}}})
+	handler := NewHandler(Services{Accounts: &fakeAccounts{}, OAuth: &fakeOAuth{session: store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, Status: "failed", SanitizedError: "private upstream tenant and token"}}})
 	response := request(t, handler, http.MethodGet, basePath+"/oauth/xai/device/state", "")
 	requireStatus(t, response, http.StatusConflict)
 	if strings.Contains(response.Body.String(), "private upstream") || !strings.Contains(response.Body.String(), "device authorization failed") {
@@ -240,7 +241,7 @@ func TestOAuthErrorsAreSanitized(t *testing.T) {
 
 func TestAccountMutationDeleteRefreshAndSafeProjection(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	stored := store.Account{ID: "acct_1", Label: "old", Enabled: true, Status: "ready", Credentials: store.AccountCredentials{Email: "owner@example.com", Subject: "subject-secret", AccessToken: "token-secret", RawIdentity: json.RawMessage(`{"raw":"secret"}`)}, CreatedAt: now, UpdatedAt: now}
+	stored := store.Account{ID: "acct_1", Provider: provider.XAI, Label: "old", Enabled: true, Status: "ready", Credentials: store.AccountCredentials{Email: "owner@example.com", Subject: "subject-secret", AccessToken: "token-secret", RawIdentity: json.RawMessage(`{"raw":"secret"}`)}, CreatedAt: now, UpdatedAt: now}
 	accountsService := &fakeAccounts{values: []store.Account{stored}, completed: stored}
 	cooldownUntil := now.Add(15 * time.Minute)
 	modelService := &fakeModels{values: map[string][]models.Capability{"acct_1": {{Model: models.Model{ID: "grok-4"}}}}, status: map[string]models.RefreshStatus{"acct_1": {LastSuccess: now.Add(-time.Minute), Stale: true}}}
@@ -294,7 +295,7 @@ func TestAccountMutationDeleteRefreshAndSafeProjection(t *testing.T) {
 
 func TestUsageEndpointsReturnStaleNormalizedDataWithoutRawBilling(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	accountsService := &fakeAccounts{values: []store.Account{{ID: "acct_1", Enabled: true, Credentials: store.AccountCredentials{AccessToken: "usage-refresh-secret"}}}}
+	accountsService := &fakeAccounts{values: []store.Account{{ID: "acct_1", Provider: provider.XAI, Enabled: true, Credentials: store.AccountCredentials{AccessToken: "usage-refresh-secret"}}}}
 	usageService := &fakeUsage{
 		values: map[string]usage.Snapshot{"acct_1": {AccountID: "acct_1", Monthly: &usage.Monthly{Remaining: 42}, FetchedAt: now, Error: "upstream raw billing detail"}},
 		errors: map[string]error{}, refresh: map[string]error{"acct_1": errors.New("private billing endpoint")},
@@ -332,7 +333,7 @@ func TestUsageEndpointsReturnStaleNormalizedDataWithoutRawBilling(t *testing.T) 
 
 func TestModelsListPreservesStaleStateAndRefreshesEnabledAccounts(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	accountsService := &fakeAccounts{values: []store.Account{{ID: "enabled", Enabled: true, Credentials: store.AccountCredentials{AccessToken: "model-refresh-secret"}}, {ID: "disabled", Enabled: false}}}
+	accountsService := &fakeAccounts{values: []store.Account{{ID: "enabled", Provider: provider.XAI, Enabled: true, Credentials: store.AccountCredentials{AccessToken: "model-refresh-secret"}}, {ID: "disabled", Provider: provider.XAI, Enabled: false}}}
 	search := true
 	modelService := &fakeModels{values: map[string][]models.Capability{
 		"enabled":  {{Model: models.Model{ID: "grok-4", DisplayName: "Grok 4", SupportsBackendSearch: &search, ReasoningEfforts: []string{"high"}}, DiscoveredAt: now, Stale: true}},
@@ -408,7 +409,7 @@ func TestOAuthPollProjectsPersistedStatusesWithoutBlocking(t *testing.T) {
 		want   int
 	}{{"pending", http.StatusAccepted}, {"authorized", http.StatusAccepted}, {"completed", http.StatusOK}, {"cancelled", http.StatusConflict}, {"failed", http.StatusConflict}, {"expired", http.StatusGone}} {
 		t.Run(test.status, func(t *testing.T) {
-			session := store.OAuthSession{Status: test.status, UserCode: "CODE", VerificationURI: "https://auth.x.ai/device", ExpiresAt: expires, AccountID: "acct"}
+			session := store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, Status: test.status, UserCode: "CODE", VerificationURI: "https://auth.x.ai/device", ExpiresAt: expires, AccountID: "acct"}
 			response := request(t, NewHandler(Services{Accounts: &fakeAccounts{}, OAuth: &fakeOAuth{session: session}}), http.MethodGet, basePath+"/oauth/xai/device/state", "")
 			requireStatus(t, response, test.want)
 			body := decodeMap(t, response)

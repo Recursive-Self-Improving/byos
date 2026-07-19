@@ -11,6 +11,7 @@ import (
 
 	appcrypto "byos/internal/crypto"
 	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -34,7 +35,7 @@ func TestRefreshWorkerRunsMetadataHooksAfterSuccessfulRotation(t *testing.T) {
 	}
 	repo := store.NewAccountRepository(database.DB, keys)
 	expires := time.Now().Add(time.Minute)
-	account, err := repo.UpsertLogin(ctx, store.Account{ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: "issuer", Subject: "subject", AccessToken: "old", RefreshToken: "refresh", TokenEndpoint: "https://auth.x.ai/token"}})
+	account, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.XAI, ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: "issuer", Subject: "subject", AccessToken: "old", RefreshToken: "refresh", TokenEndpoint: "https://auth.x.ai/token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

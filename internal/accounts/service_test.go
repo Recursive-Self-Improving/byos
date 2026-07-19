@@ -10,6 +10,7 @@ import (
 
 	appcrypto "byos/internal/crypto"
 	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -42,10 +43,10 @@ func TestCompleteLoginSingleflightsAndPersistsAccountID(t *testing.T) {
 	sessionRepository := store.NewOAuthSessionRepository(database.DB, keys)
 	now := time.Now().UTC().Truncate(time.Second)
 	state := "deduplicated-completion"
-	if err := sessionRepository.Create(ctx, store.OAuthSession{State: state, DeviceCode: "device", UserCode: "CODE", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(10 * time.Minute)}); err != nil {
+	if err := sessionRepository.Create(ctx, store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, State: state, DeviceCode: "device", UserCode: "CODE", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(10 * time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sessionRepository.Authorize(ctx, state, store.OAuthAuthorization{AccessToken: "access", RefreshToken: "refresh", IDToken: "identity", TokenType: "Bearer", ExpiresIn: 3600, AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}, now); err != nil {
+	if err := sessionRepository.Authorize(ctx, provider.XAI, store.OAuthFlowDevice, state, store.OAuthAuthorization{AccessToken: "access", RefreshToken: "refresh", IDToken: "identity", TokenType: "Bearer", ExpiresIn: 3600, AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}, now); err != nil {
 		t.Fatal(err)
 	}
 	oauthService := oauthxai.NewService(nil, nil, sessionRepository, oauthxai.Options{})
@@ -117,10 +118,10 @@ func TestCompleteLoginCancellationKeepsAuthorizationResumable(t *testing.T) {
 	sessions := store.NewOAuthSessionRepository(database.DB, keys)
 	now := time.Now().UTC().Truncate(time.Second)
 	state := "cancelled-completion"
-	if err := sessions.Create(ctx, store.OAuthSession{State: state, DeviceCode: "device", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(time.Minute)}); err != nil {
+	if err := sessions.Create(ctx, store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, State: state, DeviceCode: "device", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sessions.Authorize(ctx, state, store.OAuthAuthorization{AccessToken: "access", IDToken: "identity", AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}, now); err != nil {
+	if err := sessions.Authorize(ctx, provider.XAI, store.OAuthFlowDevice, state, store.OAuthAuthorization{AccessToken: "access", IDToken: "identity", AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}, now); err != nil {
 		t.Fatal(err)
 	}
 	oauthService := oauthxai.NewService(nil, nil, sessions, oauthxai.Options{})

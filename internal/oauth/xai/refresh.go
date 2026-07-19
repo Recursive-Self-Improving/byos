@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -86,7 +87,7 @@ func (s *RefreshService) refresh(ctx context.Context, accountID string) (store.A
 	}
 	if payload.Error == "invalid_grant" {
 		oauthErr := &OAuthError{Code: "invalid_grant", Description: payload.Description}
-		return store.Account{}, errors.Join(oauthErr, s.accounts.MarkReloginRequired(ctx, account.ID))
+		return store.Account{}, errors.Join(oauthErr, s.accounts.MarkReloginRequired(ctx, account.ID, provider.XAI))
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || payload.AccessToken == "" {
 		return store.Account{}, fmt.Errorf("xAI refresh returned HTTP %d", response.StatusCode)

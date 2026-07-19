@@ -20,6 +20,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -141,7 +142,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		expires := token.ExpiresAt
-		account, err := accounts.UpsertLogin(context.Background(), store.Account{Status: "ready", ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: identity.Issuer, Subject: identity.Subject, Email: identity.Email, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken, TokenEndpoint: token.TokenEndpoint}})
+		account, err := accounts.UpsertLogin(context.Background(), store.Account{Provider: provider.XAI, Status: "ready", ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: identity.Issuer, Subject: identity.Subject, Email: identity.Email, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken, TokenEndpoint: token.TokenEndpoint}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +179,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 			if !errors.As(err, &oauthErr) || oauthErr.Code != terminal.code {
 				t.Fatalf("error=%v", err)
 			}
-			stored, err := sessions.Get(context.Background(), flow.State)
+			stored, err := sessions.Get(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State)
 			if err != nil || stored.Status != terminal.status {
 				t.Fatalf("session=%+v err=%v", stored, err)
 			}
@@ -199,7 +200,7 @@ func TestCompleteFakeIssuerEndToEnd(t *testing.T) {
 		database, _, accounts, _ := fakeOAuthRepositories(t)
 		defer database.Close()
 		expires := time.Now().Add(-time.Hour)
-		account, err := accounts.UpsertLogin(context.Background(), store.Account{ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: Issuer, Subject: "invalid", AccessToken: "old", RefreshToken: "refresh", TokenEndpoint: Issuer + "/token"}})
+		account, err := accounts.UpsertLogin(context.Background(), store.Account{Provider: provider.XAI, ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: Issuer, Subject: "invalid", AccessToken: "old", RefreshToken: "refresh", TokenEndpoint: Issuer + "/token"}})
 		if err != nil {
 			t.Fatal(err)
 		}

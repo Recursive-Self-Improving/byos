@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"byos/internal/provider"
+	"byos/internal/store"
 )
 
 func TestAuthorizedPollResultResumesWithoutTokenReexchange(t *testing.T) {
@@ -73,7 +76,7 @@ func TestStopLeavesActivePollPersistedForRestart(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("stopped poll error = %v", err)
 	}
-	pending, err := service.sessions.GetPending(context.Background(), flow.State, service.now())
+	pending, err := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now())
 	if err != nil || pending.Status != "pending" || pending.DeviceCode == "" {
 		t.Fatalf("stopped session = %+v, %v", pending, err)
 	}
@@ -104,7 +107,7 @@ func TestTerminalOAuthErrorsPersistOnlySafeMessages(t *testing.T) {
 	if strings.Contains(terminal.SanitizedError, "tenant secret") || terminal.Authorization != nil {
 		t.Fatalf("unsafe terminal session = %+v", terminal)
 	}
-	if _, err := service.sessions.GetResumable(context.Background(), flow.State, service.now()); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := service.sessions.GetResumable(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now()); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("terminal session remained resumable: %v", err)
 	}
 }

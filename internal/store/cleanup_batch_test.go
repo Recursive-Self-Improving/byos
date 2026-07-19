@@ -9,6 +9,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 )
 
 func TestCleanupRepositoriesUseFixedBatches(t *testing.T) {
@@ -25,7 +26,7 @@ func TestCleanupRepositoriesUseFixedBatches(t *testing.T) {
 				t.Fatal(err)
 			}
 			now := time.Now().UTC()
-			account, err := NewAccountRepository(database.DB, keys).UpsertLogin(ctx, Account{Credentials: AccountCredentials{Issuer: "issuer", Subject: name, AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+			account, err := NewAccountRepository(database.DB, keys).UpsertLogin(ctx, Account{Provider: provider.XAI, Credentials: AccountCredentials{Issuer: "issuer", Subject: name, AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -38,7 +39,7 @@ func TestCleanupRepositoriesUseFixedBatches(t *testing.T) {
 				case "responses":
 					_, err = tx.ExecContext(ctx, `INSERT INTO response_sessions(response_id,model,input_encrypted,output_encrypted,store,created_at,expires_at) VALUES(?,?,?,?,1,?,?)`, fmt.Sprintf("r%d", index), "grok", "encrypted", "encrypted", now.Add(-2*time.Hour).Unix(), now.Add(-time.Hour).Unix())
 				case "oauth":
-					_, err = tx.ExecContext(ctx, `INSERT INTO oauth_sessions(state_hash,payload_encrypted,status,poll_interval_seconds,expires_at,created_at,updated_at) VALUES(?,?,'pending',5,?,?,?)`, []byte(fmt.Sprintf("state-%d", index)), "encrypted", now.Add(-time.Hour).Unix(), now.Add(-2*time.Hour).Unix(), now.Add(-2*time.Hour).Unix())
+					_, err = tx.ExecContext(ctx, `INSERT INTO oauth_sessions(state_hash,provider,flow_type,payload_encrypted,status,poll_interval_seconds,expires_at,created_at,updated_at) VALUES(?,?,?,?,'pending',5,?,?,?)`, []byte(fmt.Sprintf("state-%d", index)), provider.XAI, OAuthFlowDevice, "encrypted", now.Add(-time.Hour).Unix(), now.Add(-2*time.Hour).Unix(), now.Add(-2*time.Hour).Unix())
 				case "admin":
 					_, err = tx.ExecContext(ctx, `INSERT INTO admin_sessions(id_hash,csrf_secret_encrypted,created_at,expires_at) VALUES(?,?,?,?)`, []byte(fmt.Sprintf("admin-%d", index)), "encrypted", now.Add(-2*time.Hour).Unix(), now.Add(-time.Hour).Unix())
 				case "usage":

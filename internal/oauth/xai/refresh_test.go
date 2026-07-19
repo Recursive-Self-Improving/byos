@@ -12,6 +12,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -25,7 +26,7 @@ func TestRefreshSingleflightRotationAndInvalidGrant(t *testing.T) {
 	keys, _ := appcrypto.DeriveKeys(bytes.Repeat([]byte{12}, 32))
 	accounts := store.NewAccountRepository(database.DB, keys)
 	expires := time.Now().Add(time.Minute)
-	account, err := accounts.UpsertLogin(ctx, store.Account{Label: "account", Credentials: store.AccountCredentials{Issuer: Issuer, Subject: "refresh-sub", AccessToken: "old", RefreshToken: "refresh", TokenEndpoint: "https://auth.x.ai/token"}, ExpiresAt: &expires})
+	account, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Label: "account", Credentials: store.AccountCredentials{Issuer: Issuer, Subject: "refresh-sub", AccessToken: "old", RefreshToken: "refresh", TokenEndpoint: "https://auth.x.ai/token"}, ExpiresAt: &expires})
 	if err != nil {
 		t.Fatal(err)
 	}

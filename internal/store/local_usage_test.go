@@ -7,6 +7,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 )
 
 func TestLocalUsageCountersPersistAcrossRestart(t *testing.T) {
@@ -20,7 +21,7 @@ func TestLocalUsageCountersPersistAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	account, err := NewAccountRepository(first.DB, keys).UpsertLogin(ctx, Account{Credentials: AccountCredentials{Issuer: "issuer", Subject: "subject", AccessToken: "token", TokenEndpoint: "endpoint"}})
+	account, err := NewAccountRepository(first.DB, keys).UpsertLogin(ctx, Account{Provider: provider.XAI, Credentials: AccountCredentials{Issuer: "issuer", Subject: "subject", AccessToken: "token", TokenEndpoint: "endpoint"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestModelCapabilityStaleSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	account, err := NewAccountRepository(first.DB, keys).UpsertLogin(ctx, Account{Credentials: AccountCredentials{Issuer: "issuer", Subject: "model-subject", AccessToken: "token", TokenEndpoint: "endpoint"}})
+	account, err := NewAccountRepository(first.DB, keys).UpsertLogin(ctx, Account{Provider: provider.XAI, Credentials: AccountCredentials{Issuer: "issuer", Subject: "model-subject", AccessToken: "token", TokenEndpoint: "endpoint"}})
 	if err != nil {
 		t.Fatal(err)
 	}
