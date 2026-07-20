@@ -131,6 +131,114 @@ func TestGenerationStreamAdaptsCancellationAndIncompleteEOF(t *testing.T) {
 	}
 }
 
+// TestProviderClientClassifiesConnectEndStreamErrorBeforeFirstEvent proves a
+// Connect EndStream error arriving before any data event surfaces through the
+// real transport as a typed provider.UpstreamError whose classification
+// metadata (RetryNext, ReloginRequired, DisableAccount, CooldownScope) is what
+// routing consumes to fail over, cool down, and persist relogin — without ever
+// emitting a partial response. This is the routing-facing contract: the
+// EndStream error path must produce the same typed classification as the HTTP
+// status path.
+func TestProviderClientClassifiesConnectEndStreamErrorBeforeFirstEvent(t *testing.T) {
+	cases := []struct {
+		code      string
+		class     provider.ErrorClass
+		retryNext bool
+		relogin   bool
+		disable   bool
+		scope     provider.CooldownScope
+	}{
+		{"unavailable", provider.ClassTransient, true, false, false, provider.CooldownModel},
+		{"internal", provider.ClassTransient, true, false, false, provider.CooldownModel},
+		{"resource_exhausted", provider.ClassRateLimit, true, false, false, provider.CooldownModel},
+		{"unauthenticated", provider.ClassUnauthorized, true, true, true, provider.CooldownAccount},
+		{"permission_denied", provider.ClassPermission, false, false, false, provider.CooldownAccount},
+		{"invalid_argument", provider.ClassValidation, false, false, false, provider.CooldownNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			var calls atomic.Int32
+			// The stream body is a single EndStream error frame: the error
+			// arrives before any data event, so Execute must return the typed
+			// classification without emitting events.
+			body := connectFrame(2, []byte(`{"error":{"code":"`+tc.code+`","message":"upstream detail"}}`))
+			client := generationTestClient(t, body, http.StatusOK, &calls)
+			adapter := NewProviderClient(client)
+			adapter.newResponseID = func() (string, error) { return "resp_test", nil }
+
+			events, err := adapter.Execute(context.Background(), generationRequest())
+			if len(events) != 0 {
+				t.Fatalf("expected no events before first-event error; got %d", len(events))
+			}
+			var upstream *provider.UpstreamError
+			if !errors.As(err, &upstream) {
+				t.Fatalf("err = %v; want typed UpstreamError", err)
+			}
+			c := upstream.Classification
+			if upstream.Provider != provider.Devin || c.Class != tc.class || c.RetryNext != tc.retryNext || c.ReloginRequired != tc.relogin || c.DisableAccount != tc.disable || c.CooldownScope != tc.scope {
+				t.Fatalf("%s: upstream=%+v", tc.code, upstream)
+			}
+			// The upstream detail must not leak into the sanitized public
+			// message that routing surfaces to callers.
+			if c.PublicMessage == "upstream detail" {
+				t.Fatalf("%s: upstream detail leaked into public message %q", tc.code, c.PublicMessage)
+			}
+		})
+	}
+
+	// A structurally invalid Connect error (null error object) surfaces as a
+	// generic upstream error via adaptGenerationError, never as a partial
+	// response, and does not carry failover metadata.
+	var calls atomic.Int32
+	client := generationTestClient(t, connectFrame(2, []byte(`{"error":null}`)), http.StatusOK, &calls)
+	adapter := NewProviderClient(client)
+	adapter.newResponseID = func() (string, error) { return "resp_test", nil }
+	events, err := adapter.Execute(context.Background(), generationRequest())
+	if len(events) != 0 {
+		t.Fatalf("expected no events for malformed error; got %d", len(events))
+	}
+	var upstream *provider.UpstreamError
+	if !errors.As(err, &upstream) || upstream.Classification.Class != provider.ClassUpstream {
+		t.Fatalf("malformed error = %v; want typed ClassUpstream", err)
+	}
+
+	// A present-but-null message is structurally invalid even when the code
+	// would otherwise classify (here "unavailable" -> ClassTransient with a
+	// model-scoped cooldown). The malformed message must be rejected before
+	// the code is classified, so routing never sees the code-specific
+	// failover/cooldown metadata: the error surfaces as the same generic
+	// ClassUpstream that a wholly-null error object produces, never as
+	// ClassTransient, and no partial response is emitted. This is the routing
+	// no-classification contract for the optional message field.
+	var nullMsgCalls atomic.Int32
+	nullMsgClient := generationTestClient(t, connectFrame(2, []byte(`{"error":{"code":"unavailable","message":null}}`)), http.StatusOK, &nullMsgCalls)
+	nullMsgAdapter := NewProviderClient(nullMsgClient)
+	nullMsgAdapter.newResponseID = func() (string, error) { return "resp_test", nil }
+	nullMsgEvents, nullMsgErr := nullMsgAdapter.Execute(context.Background(), generationRequest())
+	if len(nullMsgEvents) != 0 {
+		t.Fatalf("expected no events for null-message error; got %d", len(nullMsgEvents))
+	}
+	var nullMsgUpstream *provider.UpstreamError
+	if !errors.As(nullMsgErr, &nullMsgUpstream) {
+		t.Fatalf("null-message error = %v; want typed UpstreamError", nullMsgErr)
+	}
+	// The code "unavailable" would classify as ClassTransient; rejecting the
+	// null message before classification means the generic ClassUpstream
+	// (same as a wholly-null error object) is surfaced instead.
+	if nullMsgUpstream.Classification.Class != provider.ClassUpstream {
+		t.Fatalf("null-message class = %s; want ClassUpstream (no code classification)", nullMsgUpstream.Classification.Class)
+	}
+	if nullMsgUpstream.Classification.Class == provider.ClassTransient {
+		t.Fatalf("null-message error must not be classified as the code's ClassTransient; got %+v", nullMsgUpstream.Classification)
+	}
+	// The null-message path must match the wholly-null error object path:
+	// both are malformed terminations and produce identical generic
+	// classifications, so routing treats them identically.
+	if nullMsgUpstream.Classification != upstream.Classification {
+		t.Fatalf("null-message classification = %+v; want identical to null-error %+v", nullMsgUpstream.Classification, upstream.Classification)
+	}
+}
+
 type testProviderStream struct {
 	next   func(context.Context) (provider.Event, error)
 	closed atomic.Bool

@@ -240,9 +240,11 @@ func TestStreamTerminalUsageRecordedExactlyOnce(t *testing.T) {
 		data      []byte
 		input     int64
 		output    int64
+		cacheRead int64
 	}{
-		{name: "normal completion", eventType: "response.completed", data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":13}}}`), input: 11, output: 13},
-		{name: "incomplete response", eventType: "response.incomplete", data: []byte(`{"type":"response.incomplete","response":{"usage":{"input_tokens":17,"output_tokens":19}}}`), input: 17, output: 19},
+		{name: "normal completion", eventType: "response.completed", data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":13,"input_tokens_details":{"cached_tokens":7}}}}`), input: 11, output: 13, cacheRead: 7},
+		{name: "incomplete response", eventType: "response.incomplete", data: []byte(`{"type":"response.incomplete","response":{"usage":{"input_tokens":17,"output_tokens":19,"input_tokens_details":{"cached_tokens":3}}}}`), input: 17, output: 19, cacheRead: 3},
+		{name: "no cache-read reported", eventType: "response.completed", data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":23,"output_tokens":29}}}`), input: 23, output: 29, cacheRead: 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -267,7 +269,7 @@ func TestStreamTerminalUsageRecordedExactlyOnce(t *testing.T) {
 			if stream.Model() != "grok-4.5" || !stream.Committed() {
 				t.Fatalf("model=%q committed=%v", stream.Model(), stream.Committed())
 			}
-			want := usageRecord{accountID: stream.AccountID(), delta: LocalUsageDelta{Requests: 1, InputTokens: test.input, OutputTokens: test.output}}
+			want := usageRecord{accountID: stream.AccountID(), delta: LocalUsageDelta{Requests: 1, InputTokens: test.input, OutputTokens: test.output, CacheReadTokens: test.cacheRead}}
 			if len(*f.usage) != 1 || (*f.usage)[0] != want {
 				t.Fatalf("usage=%+v, want [%+v]", *f.usage, want)
 			}

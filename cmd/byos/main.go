@@ -260,12 +260,29 @@ func loginDevin(ctx context.Context, runtime *app.Runtime, output, stderr io.Wri
 // It is a package var so tests can shorten it without touching real timers.
 var pollInterval = 2 * time.Second
 
+// consumedExchangeTimeout bounds how long the wait loop keeps polling after
+// the session transitions to consumed, when the OAuth token exchange is in
+// flight on the server. The original pending ExpiresAt no longer applies
+// once the callback is accepted: the exchange must be allowed to finish to
+// completed/failed even if that deadline has already passed. This safety
+// bound prevents a stuck exchange from hanging the CLI forever. It is a
+// package var so tests can shorten it without touching real timers.
+var consumedExchangeTimeout = 5 * time.Minute
+
 func waitForDevinCompletion(ctx context.Context, runtime *app.Runtime, authorization provider.Authorization, output io.Writer, serveErr <-chan error) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	deadline := authorization.ExpiresAt
 	hasDeadline := !deadline.IsZero()
+	// exchangeTimer is armed the first time the session is observed
+	// consumed; while nil its channel is nil and never selected.
+	var exchangeTimer *time.Timer
+	defer func() {
+		if exchangeTimer != nil {
+			exchangeTimer.Stop()
+		}
+	}()
 	for {
 		session, err := runtime.Accounts.LoginStatus(ctx, provider.Devin, authorization.SessionID)
 		if err != nil {
@@ -275,6 +292,7 @@ func waitForDevinCompletion(ctx context.Context, runtime *app.Runtime, authoriza
 			}
 			return err
 		}
+		consumed := false
 		switch session.Status {
 		case provider.AuthorizationCompleted:
 			if session.AccountID == "" {
@@ -289,18 +307,35 @@ func waitForDevinCompletion(ctx context.Context, runtime *app.Runtime, authoriza
 			return errors.New("Devin authorization expired")
 		case provider.AuthorizationCancelled:
 			return errors.New("Devin authorization was cancelled")
-		case provider.AuthorizationPending, provider.AuthorizationConsumed, provider.AuthorizationAuthorized:
-			// still in progress; keep waiting
+		case provider.AuthorizationConsumed:
+			// The callback was accepted and the OAuth token exchange is now
+			// in flight. The original pending ExpiresAt no longer applies:
+			// allow the bounded exchange to finish to completed/failed even
+			// if that deadline has already passed. Arm a one-shot safety
+			// bound so a stuck exchange cannot hang the CLI forever.
+			consumed = true
+			if exchangeTimer == nil {
+				exchangeTimer = time.NewTimer(consumedExchangeTimeout)
+			}
+		case provider.AuthorizationPending, provider.AuthorizationAuthorized:
+			// still waiting for the callback; the pending ExpiresAt applies
 		default:
 			bestEffortCancelDevin(runtime, authorization.SessionID)
 			return errors.New("Devin authorization entered an unexpected state")
 		}
-		if hasDeadline {
+		// Apply the pending expiry only while the session has not yet been
+		// consumed. Once consumed, the in-flight exchange runs under its own
+		// bounded timeout and must be allowed to finish past ExpiresAt.
+		if hasDeadline && !consumed {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				bestEffortCancelDevin(runtime, authorization.SessionID)
 				return errors.New("Devin authorization expired")
 			}
+		}
+		var exchangeC <-chan time.Time
+		if exchangeTimer != nil {
+			exchangeC = exchangeTimer.C
 		}
 		select {
 		case <-ctx.Done():
@@ -313,6 +348,11 @@ func waitForDevinCompletion(ctx context.Context, runtime *app.Runtime, authoriza
 			// has already exited, so the post-wait drain will not block.
 			bestEffortCancelDevin(runtime, authorization.SessionID)
 			return errors.New("Devin callback listener stopped unexpectedly")
+		case <-exchangeC:
+			// The exchange safety bound elapsed without a terminal status.
+			// Cancel best-effort so the stuck attempt does not orphan.
+			bestEffortCancelDevin(runtime, authorization.SessionID)
+			return errors.New("Devin authorization exchange timed out")
 		case <-ticker.C:
 		}
 	}
@@ -320,8 +360,10 @@ func waitForDevinCompletion(ctx context.Context, runtime *app.Runtime, authoriza
 
 // bestEffortCancelDevin attempts a provider-bound CancelLogin using a short
 // detached context so cleanup never replaces the primary wait error. It is
-// only invoked on external termination or a terminal failure status; a
-// consumed session (in-flight exchange) is intentionally left alone.
+// invoked on external termination (context cancel, listener failure) or a
+// terminal failure status. A consumed session (in-flight exchange) is left
+// alone while the exchange is progressing; the only exception is the
+// consumedExchangeTimeout safety bound, which cancels a stuck exchange.
 func bestEffortCancelDevin(runtime *app.Runtime, sessionID provider.SessionID) {
 	if runtime == nil || sessionID == "" {
 		return

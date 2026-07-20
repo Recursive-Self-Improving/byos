@@ -26,7 +26,7 @@ type cooldownSource interface {
 	Get(context.Context, string, string, time.Time) (store.Cooldown, error)
 }
 
-type LocalUsageDelta struct{ Requests, Failures, InputTokens, OutputTokens int64 }
+type LocalUsageDelta struct{ Requests, Failures, InputTokens, OutputTokens, CacheReadTokens int64 }
 type UsageRecorder interface {
 	Record(context.Context, string, LocalUsageDelta) error
 }
@@ -65,21 +65,24 @@ func (e *Executor) record(ctx context.Context, accountID string, delta LocalUsag
 
 func terminalUsage(event provider.Event) (LocalUsageDelta, bool) {
 	if event.Usage != (provider.Usage{}) {
-		return LocalUsageDelta{Requests: 1, InputTokens: event.Usage.InputTokens, OutputTokens: event.Usage.OutputTokens}, true
+		return LocalUsageDelta{Requests: 1, InputTokens: event.Usage.InputTokens, OutputTokens: event.Usage.OutputTokens, CacheReadTokens: event.Usage.CacheReadTokens}, true
 	}
 	var raw struct {
 		Type     string `json:"type"`
 		Response struct {
 			Usage struct {
-				InputTokens  int64 `json:"input_tokens"`
-				OutputTokens int64 `json:"output_tokens"`
+				InputTokens        int64 `json:"input_tokens"`
+				OutputTokens       int64 `json:"output_tokens"`
+				InputTokensDetails struct {
+					CachedTokens int64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
 			} `json:"usage"`
 		} `json:"response"`
 	}
 	if json.Unmarshal(event.Data, &raw) != nil || (raw.Type != "response.completed" && raw.Type != "response.incomplete") {
 		return LocalUsageDelta{}, false
 	}
-	return LocalUsageDelta{Requests: 1, InputTokens: raw.Response.Usage.InputTokens, OutputTokens: raw.Response.Usage.OutputTokens}, true
+	return LocalUsageDelta{Requests: 1, InputTokens: raw.Response.Usage.InputTokens, OutputTokens: raw.Response.Usage.OutputTokens, CacheReadTokens: raw.Response.Usage.InputTokensDetails.CachedTokens}, true
 }
 func completedUsage(events []provider.Event) LocalUsageDelta {
 	for index := len(events) - 1; index >= 0; index-- {

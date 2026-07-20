@@ -26,10 +26,10 @@ func TestLocalUsageCountersPersistAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := NewLocalUsageRepository(first.DB)
-	if err := repository.Add(ctx, account.ID, LocalUsageCounters{Requests: 2, Failures: 1, InputTokens: 20, OutputTokens: 5}); err != nil {
+	if err := repository.Add(ctx, account.ID, LocalUsageCounters{Requests: 2, Failures: 1, InputTokens: 20, OutputTokens: 5, CacheReadTokens: 9}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Add(ctx, account.ID, LocalUsageCounters{Requests: 1, InputTokens: 2}); err != nil {
+	if err := repository.Add(ctx, account.ID, LocalUsageCounters{Requests: 1, InputTokens: 2, CacheReadTokens: 4}); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(); err != nil {
@@ -41,7 +41,7 @@ func TestLocalUsageCountersPersistAcrossRestart(t *testing.T) {
 	}
 	defer second.Close()
 	value, err := NewLocalUsageRepository(second.DB).Get(ctx, account.ID)
-	if err != nil || value.Requests != 3 || value.Failures != 1 || value.InputTokens != 22 || value.OutputTokens != 5 {
+	if err != nil || value.Requests != 3 || value.Failures != 1 || value.InputTokens != 22 || value.OutputTokens != 5 || value.CacheReadTokens != 13 {
 		t.Fatalf("value=%+v err=%v", value, err)
 	}
 }

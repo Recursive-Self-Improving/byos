@@ -146,6 +146,7 @@ func (m *memoryCounters) Add(_ context.Context, id string, d store.LocalUsageCou
 	v.Failures += d.Failures
 	v.InputTokens += d.InputTokens
 	v.OutputTokens += d.OutputTokens
+	v.CacheReadTokens += d.CacheReadTokens
 	m.values[id] = v
 	return nil
 }
@@ -199,6 +200,57 @@ func TestServiceStaleFallbackAndUnknown(t *testing.T) {
 	restartedUnknown, err := NewService(snapshots, counters).Latest(context.Background(), "missing")
 	if err != nil || !restartedUnknown.Unknown || !restartedUnknown.Stale || restartedUnknown.Error != "usage refresh failed" || restartedUnknown.Monthly != nil || restartedUnknown.Weekly != nil || !restartedUnknown.FetchedAt.Equal(observedAt) || restartedUnknown.Local.Requests != 7 || restartedUnknown.Local.Failures != 2 || restartedUnknown.Local.InputTokens != 11 || restartedUnknown.Local.OutputTokens != 13 {
 		t.Fatalf("restarted unknown=%+v err=%v", restartedUnknown, err)
+	}
+}
+
+func TestServiceRecordAndCountersThreadCacheReadTokens(t *testing.T) {
+	snapshots := &memorySnapshots{values: map[string][]store.UsageSnapshot{}}
+	counters := &memoryCounters{values: map[string]store.LocalUsageCounters{}}
+	service := NewService(snapshots, counters)
+
+	// Record a terminal delta carrying nonzero cache-read tokens. Cache-read
+	// is a local proxy counter only; it must accumulate like the other
+	// counters without being treated as upstream billing quota.
+	if err := service.Record(context.Background(), "acct-cache", Delta{Requests: 1, InputTokens: 17, OutputTokens: 23, CacheReadTokens: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Record(context.Background(), "acct-cache", Delta{Requests: 1, InputTokens: 4, CacheReadTokens: 8}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := service.Counters(context.Background(), "acct-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (Counters{Requests: 2, Failures: 0, InputTokens: 21, OutputTokens: 23, CacheReadTokens: 13}) {
+		t.Fatalf("counters=%+v, want {Requests:2 InputTokens:21 OutputTokens:23 CacheReadTokens:13}", got)
+	}
+
+	// Latest projects the accumulated local counters (including cache-read)
+	// alongside an upstream snapshot without conflating them with quota.
+	reset := time.Now().UTC().Truncate(time.Second)
+	if _, err := service.ApplyUsage(context.Background(), "acct-cache", provider.UsageSnapshot{Monthly: &provider.MonthlyUsage{Limit: 100, Used: 40, Remaining: 60, ResetAt: reset}, FetchedAt: reset}, nil); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := service.Latest(context.Background(), "acct-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Local != (Counters{Requests: 2, Failures: 0, InputTokens: 21, OutputTokens: 23, CacheReadTokens: 13}) {
+		t.Fatalf("latest local=%+v, want accumulated counters with cache-read", latest.Local)
+	}
+	if latest.Monthly == nil || latest.Monthly.Remaining != 60 {
+		t.Fatalf("latest monthly=%+v, want upstream quota preserved independently", latest.Monthly)
+	}
+
+	// An account with no recorded cache-read reports zero, proving the
+	// counter is always populated rather than absent.
+	empty, err := service.Counters(context.Background(), "acct-empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty != (Counters{}) {
+		t.Fatalf("empty counters=%+v, want zero value with CacheReadTokens=0", empty)
 	}
 }
 

@@ -88,11 +88,11 @@ type c9publicRuntime struct {
 	executor       *routing.Executor
 	sessionService *sessions.Service
 
-	xaiClient   *c9xaiRecordingClient
-	devinClient *c9devinRecordingClient
-	xaiCreds    *c9countingXaiCreds
-	devinCreds  *c9countingDevinCreds
-	xaiAccount  store.Account
+	xaiClient    *c9xaiRecordingClient
+	devinClient  *c9devinRecordingClient
+	xaiCreds     *c9countingXaiCreds
+	devinCreds   *c9countingDevinCreds
+	xaiAccount   store.Account
 	devinAccount store.Account
 }
 
@@ -579,8 +579,8 @@ type c9recordingClient interface {
 	streamRequest() provider.GenerationRequest
 }
 
-func (c *c9xaiRecordingClient) executeCount() int                     { return len(c.executes) }
-func (c *c9xaiRecordingClient) streamCount() int                      { return len(c.streams) }
+func (c *c9xaiRecordingClient) executeCount() int { return len(c.executes) }
+func (c *c9xaiRecordingClient) streamCount() int  { return len(c.streams) }
 func (c *c9xaiRecordingClient) executeRequest() provider.GenerationRequest {
 	if len(c.executes) == 0 {
 		return provider.GenerationRequest{}
@@ -594,8 +594,8 @@ func (c *c9xaiRecordingClient) streamRequest() provider.GenerationRequest {
 	return c.streams[0].request
 }
 
-func (c *c9devinRecordingClient) executeCount() int                     { return len(c.executes) }
-func (c *c9devinRecordingClient) streamCount() int                      { return len(c.streams) }
+func (c *c9devinRecordingClient) executeCount() int { return len(c.executes) }
+func (c *c9devinRecordingClient) streamCount() int  { return len(c.streams) }
 func (c *c9devinRecordingClient) executeRequest() provider.GenerationRequest {
 	if len(c.executes) == 0 {
 		return provider.GenerationRequest{}

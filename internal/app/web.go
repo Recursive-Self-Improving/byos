@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -324,9 +325,10 @@ func projectWebUsage(account store.Account, snapshot usage.Snapshot, quotaAvaila
 		QuotaAvailable: quotaAvailable,
 		CanRefresh:     quotaAvailable,
 		Local: web.LocalUsage{
-			Requests:     nonnegativeCounter(snapshot.Local.Requests),
-			InputTokens:  nonnegativeCounter(snapshot.Local.InputTokens),
-			OutputTokens: nonnegativeCounter(snapshot.Local.OutputTokens),
+			Requests:        nonnegativeCounter(snapshot.Local.Requests),
+			InputTokens:     nonnegativeCounter(snapshot.Local.InputTokens),
+			OutputTokens:    nonnegativeCounter(snapshot.Local.OutputTokens),
+			CacheReadTokens: nonnegativeCounter(snapshot.Local.CacheReadTokens),
 		},
 	}
 	if !quotaAvailable {
@@ -474,6 +476,16 @@ type activeOAuthCompletion struct {
 	done   chan struct{}
 }
 
+// cachedAuthorizationURL retains only the safe, necessary authorization URL a
+// browser may re-request, paired with the session ExpiresAt so the cache can be
+// evicted independently of any browser poll. Raw OAuth state is never stored
+// outside the URL itself; the cache is in-memory only and never persisted or
+// logged.
+type cachedAuthorizationURL struct {
+	url       string
+	expiresAt time.Time
+}
+
 type webOAuthAdapter struct {
 	ctx      context.Context
 	accounts webOAuthAccountManager
@@ -481,16 +493,22 @@ type webOAuthAdapter struct {
 
 	mu                sync.Mutex
 	active            map[string]*activeOAuthCompletion
-	authorizationURLs map[string]string
+	authorizationURLs map[string]cachedAuthorizationURL
 	closed            bool
+	// sweepInterval bounds the independent expiry/completion sweeper. Zero
+	// defaults to oauthURLSweepInterval in Run.
+	sweepInterval time.Duration
 }
+
+const oauthURLSweepInterval = time.Minute
 
 func newWebOAuthAdapter(ctx context.Context, accountService webOAuthAccountManager) *webOAuthAdapter {
 	return &webOAuthAdapter{
 		ctx: ctx, accounts: accountService,
 		now:               func() time.Time { return time.Now().UTC() },
 		active:            make(map[string]*activeOAuthCompletion),
-		authorizationURLs: make(map[string]string),
+		authorizationURLs: make(map[string]cachedAuthorizationURL),
+		sweepInterval:     oauthURLSweepInterval,
 	}
 }
 
@@ -509,7 +527,7 @@ func (a *webOAuthAdapter) Start(ctx context.Context, selected web.Provider) (web
 	}
 	flow := projectWebOAuthFlow(selected, provider.AuthorizationSession{Authorization: value, Status: provider.AuthorizationPending}, a.now())
 	if flow.AuthorizationURL != "" && !webOAuthFlowTerminal(flow.Status) {
-		a.rememberAuthorizationURL(kind, sessionID, flow.AuthorizationURL)
+		a.rememberAuthorizationURL(kind, sessionID, flow.AuthorizationURL, value.ExpiresAt)
 	}
 	if kind == provider.XAI {
 		a.resume(kind, sessionID)
@@ -567,10 +585,23 @@ func (a *webOAuthAdapter) Run(ctx context.Context) error {
 	if _, err := a.accounts.ResumeLogins(ctx, provider.Devin); err != nil && ctx.Err() == nil {
 		return err
 	}
-	if ctx.Err() == nil {
-		<-ctx.Done()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return ctx.Err()
+	interval := a.sweepInterval
+	if interval <= 0 {
+		interval = oauthURLSweepInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			a.sweep(ctx)
+		}
+	}
 }
 
 func (a *webOAuthAdapter) shutdown() {
@@ -632,13 +663,13 @@ func oauthCompletionKey(kind provider.Kind, sessionID string) string {
 	return string(kind) + "\x00" + sessionID
 }
 
-func (a *webOAuthAdapter) rememberAuthorizationURL(kind provider.Kind, sessionID, value string) {
+func (a *webOAuthAdapter) rememberAuthorizationURL(kind provider.Kind, sessionID, value string, expiresAt time.Time) {
 	a.mu.Lock()
 	if !a.closed {
 		if a.authorizationURLs == nil {
-			a.authorizationURLs = make(map[string]string)
+			a.authorizationURLs = make(map[string]cachedAuthorizationURL)
 		}
-		a.authorizationURLs[oauthCompletionKey(kind, sessionID)] = value
+		a.authorizationURLs[oauthCompletionKey(kind, sessionID)] = cachedAuthorizationURL{url: value, expiresAt: expiresAt}
 	}
 	a.mu.Unlock()
 }
@@ -646,13 +677,82 @@ func (a *webOAuthAdapter) rememberAuthorizationURL(kind provider.Kind, sessionID
 func (a *webOAuthAdapter) authorizationURL(kind provider.Kind, sessionID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.authorizationURLs[oauthCompletionKey(kind, sessionID)]
+	if a.authorizationURLs == nil {
+		return ""
+	}
+	return a.authorizationURLs[oauthCompletionKey(kind, sessionID)].url
 }
 
 func (a *webOAuthAdapter) forgetAuthorizationURL(kind provider.Kind, sessionID string) {
 	a.mu.Lock()
 	delete(a.authorizationURLs, oauthCompletionKey(kind, sessionID))
 	a.mu.Unlock()
+}
+
+// sweep is the independent expiry/completion sweeper invoked from Run's
+// bounded ticker. It is the sole eviction authority when the browser never
+// polls, and it clears cached URLs on exact callback completion without
+// relying on Web Get/Cancel:
+//
+//   - Expired entries are evicted by their own ExpiresAt metadata, independent
+//     of any provider lookup, so an abandoned flow whose lifecycle is gone
+//     still frees its cache slot.
+//   - Remaining entries are probed via LoginStatus; any terminal status
+//     (completed/cancelled/denied/expired/failed) — including a Devin callback
+//     completion that arrived out-of-band through the admin callback handler —
+//     is cleared. xAI sessions that report authorized/consumed (or pending past
+//     ExpiresAt) are proactively resumed so a no-poll completion does not
+//     strand the URL until the next Get.
+//
+// The sweeper is bounded: one ticker, no per-session timers, and shutdown
+// drains it via ctx cancellation. Raw OAuth state is never persisted or logged;
+// only the safe URL and ExpiresAt are held in memory.
+func (a *webOAuthAdapter) sweep(ctx context.Context) {
+	now := a.now()
+	var probes []sweepTarget
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return
+	}
+	for key, cached := range a.authorizationURLs {
+		if !cached.expiresAt.IsZero() && !now.Before(cached.expiresAt) {
+			delete(a.authorizationURLs, key)
+			continue
+		}
+		probes = append(probes, sweepTarget{key: key})
+	}
+	a.mu.Unlock()
+	for _, target := range probes {
+		if ctx.Err() != nil {
+			return
+		}
+		kind, sessionID, ok := splitOAuthCompletionKey(target.key)
+		if !ok {
+			continue
+		}
+		value, err := a.accounts.LoginStatus(ctx, kind, provider.SessionID(sessionID))
+		if err != nil {
+			continue
+		}
+		if webOAuthFlowTerminal(string(value.Status)) {
+			a.forgetAuthorizationURL(kind, sessionID)
+			continue
+		}
+		if kind == provider.XAI && (value.Status == provider.AuthorizationAuthorized || value.Status == provider.AuthorizationConsumed || (value.Status == provider.AuthorizationPending && !a.now().Before(value.ExpiresAt))) {
+			a.resume(kind, sessionID)
+		}
+	}
+}
+
+type sweepTarget struct{ key string }
+
+func splitOAuthCompletionKey(key string) (provider.Kind, string, bool) {
+	idx := strings.Index(key, "\x00")
+	if idx <= 0 || idx == len(key)-1 {
+		return "", "", false
+	}
+	return provider.Kind(key[:idx]), key[idx+1:], true
 }
 
 func webOAuthFlowTerminal(status string) bool {

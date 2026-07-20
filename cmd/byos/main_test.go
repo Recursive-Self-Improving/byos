@@ -683,6 +683,115 @@ func TestCLILoginDevinWaitPendingConsumedCompleted(t *testing.T) {
 	}
 }
 
+// TestCLILoginDevinConsumedSurvivesPendingExpiry proves the consumed-session
+// fix: once the callback is accepted (status -> consumed) just before the
+// pending ExpiresAt, the wait loop must let the bounded OAuth exchange
+// finish to completed even though the original pending expiry passes. The
+// callback completion is deliberately delayed to after ExpiresAt but before
+// consumedExchangeTimeout, and the flow must succeed with no premature
+// CancelLogin or listener shutdown.
+func TestCLILoginDevinConsumedSurvivesPendingExpiry(t *testing.T) {
+	lifecycle := newCLILifecycle()
+	accountsSvc, _, seededID, closeDB := cliAccounts(t, lifecycle, true)
+	defer closeDB()
+	lifecycle.accountID = seededID
+	// First Status observes pending, then flips to consumed (callback
+	// accepted) on the same poll; completion is driven later by the
+	// delayed callback GET below.
+	lifecycle.nextStatus = provider.AuthorizationConsumed
+
+	// Pending expiry is near; the consumed exchange must outlive it.
+	lifecycle.sessionSeed.ExpiresAt = time.Now().Add(50 * time.Millisecond)
+
+	cfg := cliDevinConfig(t, "127.0.0.1:0")
+	listenFn, addr := captureListener(t)
+	runtime := cliRuntime(cfg, accountsSvc)
+
+	oldPoll := pollInterval
+	pollInterval = 5 * time.Millisecond
+	defer func() { pollInterval = oldPoll }()
+	oldExchange := consumedExchangeTimeout
+	consumedExchangeTimeout = 200 * time.Millisecond
+	defer func() { consumedExchangeTimeout = oldExchange }()
+
+	openFn := func(_ string) error {
+		// Delay the callback so completion arrives AFTER the pending
+		// ExpiresAt (50ms) but BEFORE the exchange timeout (200ms). This
+		// is the crux: a consumed session completing past its original
+		// pending expiry must still succeed.
+		go func() {
+			time.Sleep(80 * time.Millisecond)
+			state := lifecycle.sessionSeed.Ref.State
+			code := "cli-callback-code-secret"
+			callbackURL := fmt.Sprintf("http://%s%s?state=%s&code=%s", addr.String(), cfg.Devin.OAuth.CallbackPath, state, code)
+			resp, err := http.Get(callbackURL)
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+		return nil
+	}
+
+	// Bound the whole flow so a regression cannot hang the suite.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var output, stderr bytes.Buffer
+	err := loginDevin(ctx, runtime, &output, &stderr, listenFn, openFn)
+	if err != nil {
+		t.Fatalf("loginDevin error: %v", err)
+	}
+	if !strings.Contains(output.String(), "Account connected: "+seededID) {
+		t.Errorf("output missing connected account; got:\n%s", output.String())
+	}
+	// No premature CancelLogin: the consumed exchange was left alone.
+	lifecycle.mu.Lock()
+	cancels := lifecycle.cancelCalls[lifecycle.sessionSeed.SessionID]
+	gotCode := lifecycle.completeCode["cli-state-secret"]
+	lifecycle.mu.Unlock()
+	if cancels != 0 {
+		t.Errorf("cancelCalls=%d want 0 (consumed exchange must not be cancelled)", cancels)
+	}
+	if gotCode != "cli-callback-code-secret" {
+		t.Errorf("complete code=%q want cli-callback-code-secret", gotCode)
+	}
+}
+
+// TestCLILoginDevinPendingExpiryCancels proves the pending ExpiresAt still
+// applies while the session remains pending/authorized: once the deadline
+// passes with no callback, the wait loop cancels the pending attempt and
+// surfaces the expired error. This guards against the consumed-session fix
+// accidentally weakening the pending-expiry path.
+func TestCLILoginDevinPendingExpiryCancels(t *testing.T) {
+	lifecycle := newCLILifecycle()
+	// Keep status pending so the wait loop never observes consumed.
+	lifecycle.nextStatus = provider.AuthorizationPending
+	// Near pending expiry; the loop must trip the deadline check.
+	lifecycle.sessionSeed.ExpiresAt = time.Now().Add(30 * time.Millisecond)
+	accountsSvc, _, _, closeDB := cliAccounts(t, lifecycle, false)
+	defer closeDB()
+	cfg := cliDevinConfig(t, "127.0.0.1:0")
+	listenFn, _ := captureListener(t)
+	runtime := cliRuntime(cfg, accountsSvc)
+
+	oldPoll := pollInterval
+	pollInterval = 5 * time.Millisecond
+	defer func() { pollInterval = oldPoll }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var output, stderr bytes.Buffer
+	err := loginDevin(ctx, runtime, &output, &stderr, listenFn, func(string) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("error=%v want expired", err)
+	}
+	lifecycle.mu.Lock()
+	cancels := lifecycle.cancelCalls[lifecycle.sessionSeed.SessionID]
+	lifecycle.mu.Unlock()
+	if cancels != 1 {
+		t.Errorf("cancelCalls=%d want 1 (pending expiry must best-effort cancel)", cancels)
+	}
+}
+
 // TestCLILoginDevinFailedStatusIsTerminal asserts AuthorizationFailed is a
 // terminal state that triggers best-effort CancelLogin and returns promptly.
 func TestCLILoginDevinFailedStatusIsTerminal(t *testing.T) {

@@ -87,7 +87,7 @@ func (u *c9xAIUpstream) handler(t *testing.T) http.Handler {
 				"id":     responseID,
 				"status": "completed",
 				"model":  "grok-4.5",
-				"usage":  map[string]any{"input_tokens": 31, "output_tokens": 47},
+				"usage":  map[string]any{"input_tokens": 31, "output_tokens": 47, "input_tokens_details": map[string]any{"cached_tokens": 12}},
 				"output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "persisted"}}}},
 			},
 		}
@@ -236,7 +236,7 @@ func (g *c9noOpDevinGeneration) Stream(context.Context, provider.GenerationReque
 type c9usageRecorder struct{ service *usage.Service }
 
 func (r c9usageRecorder) Record(ctx context.Context, accountID string, delta routing.LocalUsageDelta) error {
-	return r.service.Record(ctx, accountID, usage.Delta{Requests: delta.Requests, Failures: delta.Failures, InputTokens: delta.InputTokens, OutputTokens: delta.OutputTokens})
+	return r.service.Record(ctx, accountID, usage.Delta{Requests: delta.Requests, Failures: delta.Failures, InputTokens: delta.InputTokens, OutputTokens: delta.OutputTokens, CacheReadTokens: delta.CacheReadTokens})
 }
 
 // c9credentialLedger records per-account Credential() calls so tests can
@@ -534,8 +534,8 @@ func TestC9Persistence_ManagedResponsesContinuationPersistsPreferredAccountAcros
 	if err != nil {
 		t.Fatalf("counters B after continuation: %v", err)
 	}
-	if aAfterCont != (usage.Counters{Requests: 2, Failures: 0, InputTokens: 62, OutputTokens: 94}) {
-		t.Fatalf("A counters after continuation=%+v want {Requests:2, Failures:0, InputTokens:62, OutputTokens:94} (initial+continuation, terminal token delta accumulated)", aAfterCont)
+	if aAfterCont != (usage.Counters{Requests: 2, Failures: 0, InputTokens: 62, OutputTokens: 94, CacheReadTokens: 24}) {
+		t.Fatalf("A counters after continuation=%+v want {Requests:2, Failures:0, InputTokens:62, OutputTokens:94, CacheReadTokens:24} (initial+continuation, terminal token delta accumulated)", aAfterCont)
 	}
 	if bAfterCont != (usage.Counters{}) {
 		t.Fatalf("B counters changed by continuation=%+v want zero (continuation must attribute to A only)", bAfterCont)
@@ -1053,8 +1053,8 @@ func TestC9Persistence_TerminalUsagePersistedOnceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("counters selected: %v", err)
 	}
-	if counters != (usage.Counters{Requests: 1, Failures: 0, InputTokens: 31, OutputTokens: 47}) {
-		t.Fatalf("selected counters=%+v want {Requests:1, Failures:0, InputTokens:31, OutputTokens:47} (exactly one terminal dispatch with terminal token delta)", counters)
+	if counters != (usage.Counters{Requests: 1, Failures: 0, InputTokens: 31, OutputTokens: 47, CacheReadTokens: 12}) {
+		t.Fatalf("selected counters=%+v want {Requests:1, Failures:0, InputTokens:31, OutputTokens:47, CacheReadTokens:12} (exactly one terminal dispatch with terminal token delta)", counters)
 	}
 	otherCounters, err := first.usageService.Counters(ctx, other.ID)
 	if err != nil {
@@ -1096,8 +1096,8 @@ func TestC9Persistence_TerminalUsagePersistedOnceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen counters selected: %v", err)
 	}
-	if reopenedSelected != (usage.Counters{Requests: 1, Failures: 0, InputTokens: 31, OutputTokens: 47}) {
-		t.Fatalf("reopen selected counters=%+v want {Requests:1, Failures:0, InputTokens:31, OutputTokens:47} (persisted counters survive reopen)", reopenedSelected)
+	if reopenedSelected != (usage.Counters{Requests: 1, Failures: 0, InputTokens: 31, OutputTokens: 47, CacheReadTokens: 12}) {
+		t.Fatalf("reopen selected counters=%+v want {Requests:1, Failures:0, InputTokens:31, OutputTokens:47, CacheReadTokens:12} (persisted counters survive reopen)", reopenedSelected)
 	}
 	reopenedOther, err := second.usageService.Counters(ctx, other.ID)
 	if err != nil {
@@ -1147,8 +1147,8 @@ func TestC9Persistence_TerminalUsagePersistedOnceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("after-second counters: %v", err)
 	}
-	if afterSecond != (usage.Counters{Requests: 2, Failures: 0, InputTokens: 62, OutputTokens: 94}) {
-		t.Fatalf("after-second counters=%+v want {Requests:2, Failures:0, InputTokens:62, OutputTokens:94} (exactly one more terminal dispatch, no replay/double-count)", afterSecond)
+	if afterSecond != (usage.Counters{Requests: 2, Failures: 0, InputTokens: 62, OutputTokens: 94, CacheReadTokens: 24}) {
+		t.Fatalf("after-second counters=%+v want {Requests:2, Failures:0, InputTokens:62, OutputTokens:94, CacheReadTokens:24} (exactly one more terminal dispatch, no replay/double-count)", afterSecond)
 	}
 	// Provider-local counters: the Devin account still has zero counters
 	// after the second xAI dispatch.

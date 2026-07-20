@@ -79,7 +79,7 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err := second.DB.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 6 {
+	if count != 7 {
 		t.Fatalf("migration count = %d", count)
 	}
 }
@@ -166,7 +166,7 @@ func TestProviderIdentityMigrationFreshSchema(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 6 {
+	if count != 7 {
 		t.Fatalf("migration count = %d", count)
 	}
 	for _, column := range []struct {
@@ -247,7 +247,7 @@ func TestProviderIdentityMigrationPreservesPopulatedV4(t *testing.T) {
 		t.Fatal("foreign_key_check reported a violation")
 	}
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil || count != 6 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil || count != 7 {
 		t.Fatalf("migration count = %d, %v", count, err)
 	}
 }
@@ -301,6 +301,71 @@ INSERT INTO table_that_does_not_exist VALUES (1);`)},
 		if count != 0 {
 			t.Fatalf("partial index %s remained", index)
 		}
+	}
+}
+
+func TestLocalUsageCacheReadMigrationPreservesPopulatedRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := openUnmigratedTestDB(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	// Apply migrations up to v6 (before cache_read_tokens was added) and seed
+	// a populated local_usage_counters row with the pre-v7 column set.
+	if err := Migrate(ctx, db, migrationFS(t, 6)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO accounts(id, identity_fingerprint, label, enabled, status, credentials_encrypted, expires_at, last_refresh_at, last_error, created_at, updated_at) VALUES('acct-cache', X'00FF1080', 'cache account', 1, 'ready', 'enc', 1700000001, 1700000002, '', 1700000003, 1700000004)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO local_usage_counters(account_id, requests, failures, input_tokens, output_tokens, updated_at) VALUES('acct-cache', 5, 1, 111, 222, 1700000040)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Forward-migrate to the current schema, adding cache_read_tokens.
+	if err := Migrate(ctx, db, migrations.FS); err != nil {
+		t.Fatal(err)
+	}
+
+	// Existing counters are preserved; the new column defaults to zero.
+	var requests, failures, inputTokens, outputTokens, cacheRead int64
+	if err := db.QueryRowContext(ctx, `SELECT requests, failures, input_tokens, output_tokens, cache_read_tokens FROM local_usage_counters WHERE account_id='acct-cache'`).Scan(&requests, &failures, &inputTokens, &outputTokens, &cacheRead); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 5 || failures != 1 || inputTokens != 111 || outputTokens != 222 || cacheRead != 0 {
+		t.Fatalf("migrated counters = req=%d fail=%d in=%d out=%d cache=%d, want preserved with cache=0", requests, failures, inputTokens, outputTokens, cacheRead)
+	}
+
+	// The new column is writable and accumulates across writes, proving the
+	// schema constraint and upsert path treat cache-read as a first-class
+	// local counter rather than billing quota.
+	repo := NewLocalUsageRepository(db)
+	if err := repo.Add(ctx, "acct-cache", LocalUsageCounters{Requests: 1, InputTokens: 3, OutputTokens: 4, CacheReadTokens: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Add(ctx, "acct-cache", LocalUsageCounters{CacheReadTokens: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT requests, failures, input_tokens, output_tokens, cache_read_tokens FROM local_usage_counters WHERE account_id='acct-cache'`).Scan(&requests, &failures, &inputTokens, &outputTokens, &cacheRead); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 6 || failures != 1 || inputTokens != 114 || outputTokens != 226 || cacheRead != 12 {
+		t.Fatalf("accumulated counters = req=%d fail=%d in=%d out=%d cache=%d, want req=6 fail=1 in=114 out=226 cache=12", requests, failures, inputTokens, outputTokens, cacheRead)
+	}
+
+	// A negative cache-read delta is rejected by the same guard as the other
+	// local counters, so the column cannot go negative and corrupt accounting.
+	if err := repo.Add(ctx, "acct-cache", LocalUsageCounters{CacheReadTokens: -1}); err == nil {
+		t.Fatal("negative cache-read delta accepted")
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil || count != 7 {
+		t.Fatalf("migration count = %d, %v", count, err)
 	}
 }
 

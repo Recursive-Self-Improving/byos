@@ -392,7 +392,7 @@ func TestExecuteRecordsTerminalUsageExactlyOnce(t *testing.T) {
 	defer f.close()
 	f.client.steps = []executeStep{{events: []provider.Event{
 		{Event: "response.output_text.delta", Data: []byte(`{"type":"response.output_text.delta"}`)},
-		{Event: "response.completed", Data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":17,"output_tokens":23}}}`)},
+		{Event: "response.completed", Data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":17,"output_tokens":23,"input_tokens_details":{"cached_tokens":5}}}}`)},
 	}}}
 
 	result, err := f.executor.Execute(context.Background(), Request{Model: "grok", Body: []byte(`{"model":"grok"}`)})
@@ -405,7 +405,7 @@ func TestExecuteRecordsTerminalUsageExactlyOnce(t *testing.T) {
 	if len(*f.usage) != 1 {
 		t.Fatalf("usage records=%+v", *f.usage)
 	}
-	want := usageRecord{accountID: result.AccountID, delta: LocalUsageDelta{Requests: 1, InputTokens: 17, OutputTokens: 23}}
+	want := usageRecord{accountID: result.AccountID, delta: LocalUsageDelta{Requests: 1, InputTokens: 17, OutputTokens: 23, CacheReadTokens: 5}}
 	if (*f.usage)[0] != want {
 		t.Fatalf("usage=%+v, want %+v", (*f.usage)[0], want)
 	}
@@ -895,6 +895,47 @@ func TestExecuteDevinTransientFailoverAppliesModelCooldownAndStaysProviderLocal(
 	if len(f.devinClient.requests) != 2 || len(f.xaiClient.requests) != 0 {
 		t.Fatalf("devin requests=%d xai requests=%d", len(f.devinClient.requests), len(f.xaiClient.requests))
 	}
+	for _, req := range f.devinClient.requests {
+		if req.Model.Provider != provider.Devin {
+			t.Fatalf("cross-provider failover: %+v", req.Model)
+		}
+	}
+}
+
+// TestExecuteDevinConnectEndStreamUnavailableFailsOver proves a Connect
+// EndStream error classified before the first event drives routing failover.
+// The classification mirrors what the Devin transport produces for a Connect
+// `unavailable` EndStream code (ClassTransient, RetryNext, model-scoped
+// cooldown): the first account fails with that typed error, routing applies the
+// model cooldown and fails over to a second Devin account without crossing to
+// xAI, and no partial response is emitted.
+func TestExecuteDevinConnectEndStreamUnavailableFailsOver(t *testing.T) {
+	f := newMultiProviderFixture(t)
+	defer f.close()
+	ctx := context.Background()
+	secondExpiry := time.Now().Add(time.Hour)
+	second, err := f.accounts.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Label: "d2", Status: "ready", ExpiresAt: &secondExpiry, Credentials: store.AccountCredentials{OpaqueToken: "devin-second", OpaqueTokenExpiresAt: &secondExpiry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.devinCreds.values[second.ID] = "devin-second"
+	// This is the exact classification the Devin Connect EndStream path emits
+	// for code "unavailable" (see internal/devin classifyConnectError).
+	f.devinClient.steps = []executeStep{
+		{err: &provider.UpstreamError{Provider: provider.Devin, Status: http.StatusServiceUnavailable, Classification: provider.ErrorClassification{Class: provider.ClassTransient, RetryNext: true, CooldownScope: provider.CooldownModel, Cooldown: time.Minute, PublicStatus: http.StatusServiceUnavailable, PublicCode: "provider_unavailable"}}},
+		{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}},
+	}
+	result, err := f.executor.Execute(ctx, Request{Model: "glm-5-2", Body: []byte(`{"model":"glm-5-2"}`), PreferredAccountID: f.devinAccount.ID})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if result.AccountID != second.ID {
+		t.Fatalf("account=%q want failover to %q", result.AccountID, second.ID)
+	}
+	if len(f.devinClient.requests) != 2 || len(f.xaiClient.requests) != 0 {
+		t.Fatalf("devin requests=%d xai requests=%d", len(f.devinClient.requests), len(f.xaiClient.requests))
+	}
+	// Failover stayed provider-local: both attempts targeted a Devin model.
 	for _, req := range f.devinClient.requests {
 		if req.Model.Provider != provider.Devin {
 			t.Fatalf("cross-provider failover: %+v", req.Model)

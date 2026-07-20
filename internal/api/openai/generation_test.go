@@ -114,8 +114,8 @@ func TestGenerationHandlersPassCanonicalBodyUnchangedBeforeRouting(t *testing.T)
 	sessionService := sessions.NewService(store.NewResponseRepository(database.DB, keys))
 	for _, test := range []struct {
 		name, model, path, body string
-		kind registry.Format
-		responses bool
+		kind                    registry.Format
+		responses               bool
 	}{
 		{name: "chat unknown", model: "unknown-model", path: "/v1/chat/completions", body: `{"model":"unknown-model","messages":[{"role":"user","content":"news"}]}`, kind: registry.OpenAIChat},
 		{name: "responses devin", model: "kimi-k2-7", path: "/v1/responses", body: `{"model":"kimi-k2-7","input":"news"}`, kind: registry.OpenAIResponses, responses: true},

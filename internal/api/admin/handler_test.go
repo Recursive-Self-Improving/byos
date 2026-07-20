@@ -598,6 +598,27 @@ func TestDevinUsageSuppressesUpstreamQuotaEvenWithLegacyXAISnapshot(t *testing.T
 	}
 }
 
+func TestUsageProjectionIncludesCacheReadTokens(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	accountsService := &fakeAccounts{values: []store.Account{{ID: "acct_cache", Provider: provider.XAI, Enabled: true}}}
+	usageService := &fakeUsage{
+		values: map[string]usage.Snapshot{"acct_cache": {AccountID: "acct_cache", Monthly: &usage.Monthly{Remaining: 42}, Local: usage.Counters{Requests: 1, InputTokens: 17, OutputTokens: 23, CacheReadTokens: 9}, FetchedAt: now}},
+	}
+	handler := NewHandler(Services{Accounts: accountsService, Usage: usageService})
+
+	response := request(t, handler, http.MethodGet, basePath+"/accounts/acct_cache/usage", "")
+	requireStatus(t, response, http.StatusOK)
+	body := response.Body.String()
+	// Cache-read is projected as a local counter alongside the upstream quota,
+	// not conflated with billing quota.
+	if !strings.Contains(body, `"cache_read_tokens":9`) {
+		t.Fatalf("usage missing cache_read_tokens local counter: %s", body)
+	}
+	if !strings.Contains(body, `"remaining":42`) {
+		t.Fatalf("usage missing upstream monthly quota: %s", body)
+	}
+}
+
 func TestModelsProjectProviderFromOwningAccount(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	accountsService := &fakeAccounts{values: []store.Account{

@@ -149,7 +149,7 @@ func TestWebAdaptersProjectOnlySafeManagementData(t *testing.T) {
 		},
 	}}}
 	capabilities := adapterCapabilities{values: []models.Capability{{Model: models.Model{ID: "grok-4.5", DisplayName: "Grok 4.5", ReasoningEfforts: []string{"low"}}, Supported: true, DiscoveredAt: now}}}
-	usageReader := adapterUsage{value: usage.Snapshot{AccountID: "acct_safe", Monthly: &usage.Monthly{Used: 25, Limit: 100}, Weekly: &usage.Weekly{UsedPercent: 40}, Local: usage.Counters{Requests: 2, InputTokens: 10, OutputTokens: 4}, FetchedAt: now, Stale: true, Error: "raw billing endpoint secret"}}
+	usageReader := adapterUsage{value: usage.Snapshot{AccountID: "acct_safe", Monthly: &usage.Monthly{Used: 25, Limit: 100}, Weekly: &usage.Weekly{UsedPercent: 40}, Local: usage.Counters{Requests: 2, InputTokens: 10, OutputTokens: 4, CacheReadTokens: 6}, FetchedAt: now, Stale: true, Error: "raw billing endpoint secret"}}
 	staticModels := adapterStaticModels{{PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"}}
 	registry := adapterRegistry{values: map[provider.Kind]provider.Capabilities{provider.XAI: {CredentialRefresher: adapterCredentialRefresher{}, ModelDiscoverer: adapterDiscoverer{}, UsageFetcher: adapterUsageFetcher{}}}}
 	accountAdapter := &webAccountAdapter{accounts: accountManager, models: capabilities, static: staticModels, registry: registry, usage: usageReader, cooldowns: adapterCooldowns{value: store.Cooldown{Until: &cooldownUntil, LastErrorClass: "raw provider error secret"}}, now: func() time.Time { return now }}
@@ -190,7 +190,7 @@ func TestWebAdaptersProjectOnlySafeManagementData(t *testing.T) {
 	if details.SanitizedError != "Account refresh failed." || len(details.Cooldowns) != 1 || details.Cooldowns[0].LastErrorClass != "upstream" {
 		t.Fatalf("safe account detail = %+v", details)
 	}
-	if len(usageValues) != 1 || usageValues[0].SanitizedStatus != "Usage data may be stale." || usageValues[0].Monthly.Percent == nil || *usageValues[0].Monthly.Percent != 25 {
+	if len(usageValues) != 1 || usageValues[0].SanitizedStatus != "Usage data may be stale." || usageValues[0].Monthly.Percent == nil || *usageValues[0].Monthly.Percent != 25 || usageValues[0].Local.CacheReadTokens != 6 {
 		t.Fatalf("safe usage = %+v", usageValues)
 	}
 	label := "Renamed"
@@ -710,8 +710,8 @@ func TestWebOAuthCompletionExitForgetsAuthorizationURL(t *testing.T) {
 	completion := adapter.active[key]
 	cached := adapter.authorizationURLs[key]
 	adapter.mu.Unlock()
-	if completion == nil || cached == "" {
-		t.Fatalf("active completion=%v cached URL=%q", completion != nil, cached)
+	if completion == nil || cached.url == "" {
+		t.Fatalf("active completion=%v cached URL=%q", completion != nil, cached.url)
 	}
 	close(accountsService.release)
 	<-completion.done
@@ -756,8 +756,8 @@ func TestWebOAuthRunRecoversConsumedDevinWithoutBackgroundCompletion(t *testing.
 func TestWebOAuthRunShutdownClearsAuthorizationState(t *testing.T) {
 	accountsService := &adapterOAuthAccounts{sessions: make(map[string]provider.AuthorizationSession), resumeSignal: make(chan provider.Kind, 2)}
 	adapter := newWebOAuthAdapter(context.Background(), accountsService)
-	adapter.rememberAuthorizationURL(provider.XAI, "xai_session", "https://accounts.x.ai/device?state=xai-shutdown-canary")
-	adapter.rememberAuthorizationURL(provider.Devin, "devin_session", "https://app.devin.ai/oauth/authorize?state=devin-shutdown-canary")
+	adapter.rememberAuthorizationURL(provider.XAI, "xai_session", "https://accounts.x.ai/device?state=xai-shutdown-canary", time.Now().UTC().Add(time.Minute))
+	adapter.rememberAuthorizationURL(provider.Devin, "devin_session", "https://app.devin.ai/oauth/authorize?state=devin-shutdown-canary", time.Now().UTC().Add(time.Minute))
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- adapter.Run(runCtx) }()
@@ -775,8 +775,244 @@ func TestWebOAuthRunShutdownClearsAuthorizationState(t *testing.T) {
 	if !closed || !activeNil || !URLsNil {
 		t.Fatalf("shutdown state closed=%t activeNil=%t URLsNil=%t", closed, activeNil, URLsNil)
 	}
-	adapter.rememberAuthorizationURL(provider.Devin, "late_session", "https://app.devin.ai/oauth/authorize?state=late-canary")
+	adapter.rememberAuthorizationURL(provider.Devin, "late_session", "https://app.devin.ai/oauth/authorize?state=late-canary", time.Now().UTC().Add(time.Minute))
 	if adapter.authorizationURL(provider.Devin, "late_session") != "" {
 		t.Fatal("closed adapter retained a late authorization URL")
+	}
+}
+
+// TestWebOAuthSweepClearsOnCallbackCompletionWithoutPoll proves the cached
+// authorization URL is cleared on exact callback completion even when the
+// browser never calls Web Get or Cancel. The admin callback handler completes
+// Devin out-of-band via accountService.CompleteLogin; the independent sweeper
+// observes the terminal status through LoginStatus and evicts the cache entry.
+func TestWebOAuthSweepClearsOnCallbackCompletionWithoutPoll(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	const sessionID = "sweep_completion_session"
+	const authorizationURL = "https://app.devin.ai/oauth/authorize?state=sweep-completion-canary"
+	accountsService := &adapterOAuthAccounts{
+		sessions: map[string]provider.AuthorizationSession{
+			sessionID: webTestAuthorizationSession(provider.Devin, sessionID, authorizationURL, provider.AuthorizationPending, now.Add(10*time.Minute)),
+		},
+	}
+	adapter := newWebOAuthAdapter(context.Background(), accountsService)
+	adapter.now = func() time.Time { return now }
+	if _, err := adapter.Start(context.Background(), web.ProviderDevin); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.authorizationURL(provider.Devin, sessionID) != authorizationURL {
+		t.Fatalf("cached URL = %q, want %q", adapter.authorizationURL(provider.Devin, sessionID), authorizationURL)
+	}
+	// Simulate the admin callback handler completing Devin out-of-band, with
+	// no Web Get/Cancel involved.
+	accountsService.mu.Lock()
+	completed := accountsService.sessions[sessionID]
+	completed.Status = provider.AuthorizationCompleted
+	completed.AccountID = "acct_devin_sweep"
+	accountsService.sessions[sessionID] = completed
+	accountsService.mu.Unlock()
+	// No Get/Cancel call — drive the sweeper directly.
+	adapter.sweep(context.Background())
+	if adapter.authorizationURL(provider.Devin, sessionID) != "" {
+		t.Fatal("sweep did not clear the callback-completed Devin authorization URL without a poll")
+	}
+	if accountsService.calls.Load() != 0 {
+		t.Fatalf("sweep spawned %d background completions for Devin", accountsService.calls.Load())
+	}
+}
+
+// TestWebOAuthSweepEvictsAbandonedExpiry proves the cached authorization URL
+// is evicted at ExpiresAt by the independent sweeper even when the browser
+// never polls and the lifecycle session is gone (LoginStatus returns
+// not-found). Expiry is driven solely by the cached ExpiresAt metadata.
+func TestWebOAuthSweepEvictsAbandonedExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	const sessionID = "sweep_abandoned_session"
+	const authorizationURL = "https://app.devin.ai/oauth/authorize?state=sweep-abandoned-canary"
+	accountsService := &adapterOAuthAccounts{
+		sessions: map[string]provider.AuthorizationSession{
+			sessionID: webTestAuthorizationSession(provider.Devin, sessionID, authorizationURL, provider.AuthorizationPending, now.Add(time.Minute)),
+		},
+	}
+	adapter := newWebOAuthAdapter(context.Background(), accountsService)
+	adapter.now = func() time.Time { return now }
+	if _, err := adapter.Start(context.Background(), web.ProviderDevin); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.authorizationURL(provider.Devin, sessionID) != authorizationURL {
+		t.Fatalf("cached URL = %q, want %q", adapter.authorizationURL(provider.Devin, sessionID), authorizationURL)
+	}
+	// Abandon: advance time past ExpiresAt and drop the lifecycle session so
+	// LoginStatus cannot resolve it. The sweeper must still evict by metadata.
+	afterExpiry := now.Add(2 * time.Minute)
+	adapter.now = func() time.Time { return afterExpiry }
+	accountsService.mu.Lock()
+	delete(accountsService.sessions, sessionID)
+	accountsService.mu.Unlock()
+	adapter.sweep(context.Background())
+	if adapter.authorizationURL(provider.Devin, sessionID) != "" {
+		t.Fatal("sweep did not evict the abandoned expired authorization URL by ExpiresAt metadata")
+	}
+}
+
+// TestWebOAuthSweepResumesNoPollXAICompletion proves the sweeper proactively
+// completes an xAI session that the provider reports authorized without the
+// browser polling, so the cached URL is cleared by the completion exit path
+// rather than stranded until the next Get.
+func TestWebOAuthSweepResumesNoPollXAICompletion(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	const sessionID = "sweep_xai_no_poll"
+	const authorizationURL = "https://accounts.x.ai/device?state=sweep-xai-canary"
+	accountsService := &adapterOAuthAccounts{
+		sessions: map[string]provider.AuthorizationSession{
+			sessionID: webTestAuthorizationSession(provider.XAI, sessionID, authorizationURL, provider.AuthorizationAuthorized, now.Add(10*time.Minute)),
+		},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	adapter := newWebOAuthAdapter(rootCtx, accountsService)
+	adapter.now = func() time.Time { return now }
+	if _, err := adapter.Start(context.Background(), web.ProviderXAI); err != nil {
+		t.Fatal(err)
+	}
+	// Start already resumed the xAI completion; wait for it to register, then
+	// release it so the goroutine exits and clears the URL.
+	<-accountsService.started
+	close(accountsService.release)
+	key := oauthCompletionKey(provider.XAI, sessionID)
+	adapter.mu.Lock()
+	completion := adapter.active[key]
+	adapter.mu.Unlock()
+	if completion == nil {
+		t.Fatal("xAI completion goroutine was not registered by Start")
+	}
+	<-completion.done
+	if adapter.authorizationURL(provider.XAI, sessionID) != "" {
+		t.Fatal("xAI completion exit did not clear the authorization URL")
+	}
+}
+
+// TestWebOAuthAuthorizationURLMapBoundedAndCleared proves the cache map is
+// bounded by eviction: completed, cancelled, and expired entries are all
+// cleared so the map never grows unbounded across flows, and shutdown nils it.
+func TestWebOAuthAuthorizationURLMapBoundedAndCleared(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	accountsService := &adapterOAuthAccounts{sessions: map[string]provider.AuthorizationSession{}}
+	adapter := newWebOAuthAdapter(context.Background(), accountsService)
+	adapter.now = func() time.Time { return now }
+	// Seed three cached URLs with distinct fates.
+	adapter.rememberAuthorizationURL(provider.Devin, "completed_session", "https://app.devin.ai/oauth/authorize?state=completed-canary", now.Add(time.Minute))
+	adapter.rememberAuthorizationURL(provider.Devin, "cancelled_session", "https://app.devin.ai/oauth/authorize?state=cancelled-canary", now.Add(time.Minute))
+	adapter.rememberAuthorizationURL(provider.Devin, "expired_session", "https://app.devin.ai/oauth/authorize?state=expired-canary", now.Add(time.Minute))
+	accountsService.mu.Lock()
+	accountsService.sessions["completed_session"] = webTestAuthorizationSession(provider.Devin, "completed_session", "", provider.AuthorizationCompleted, now.Add(time.Minute))
+	accountsService.sessions["cancelled_session"] = webTestAuthorizationSession(provider.Devin, "cancelled_session", "", provider.AuthorizationCancelled, now.Add(time.Minute))
+	accountsService.sessions["expired_session"] = webTestAuthorizationSession(provider.Devin, "expired_session", "", provider.AuthorizationExpired, now.Add(time.Minute))
+	accountsService.mu.Unlock()
+	adapter.sweep(context.Background())
+	adapter.mu.Lock()
+	count := len(adapter.authorizationURLs)
+	adapter.mu.Unlock()
+	if count != 0 {
+		remaining := make([]string, 0)
+		adapter.mu.Lock()
+		for key := range adapter.authorizationURLs {
+			remaining = append(remaining, key)
+		}
+		adapter.mu.Unlock()
+		t.Fatalf("sweep left %d cached URLs: %v", count, remaining)
+	}
+}
+
+// TestWebOAuthRunSweepTickerEvictsExpiredWithoutPoll proves the Run loop's
+// bounded ticker independently evicts an expired cached URL when the browser
+// never polls, exercising the real sweeper path under Run with a short sweep
+// interval.
+func TestWebOAuthRunSweepTickerEvictsExpiredWithoutPoll(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	const sessionID = "run_sweep_expired"
+	const authorizationURL = "https://app.devin.ai/oauth/authorize?state=run-sweep-canary"
+	accountsService := &adapterOAuthAccounts{
+		sessions: map[string]provider.AuthorizationSession{
+			sessionID: webTestAuthorizationSession(provider.Devin, sessionID, authorizationURL, provider.AuthorizationPending, now.Add(20*time.Millisecond)),
+		},
+		resumeSignal: make(chan provider.Kind, 2),
+	}
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	adapter := newWebOAuthAdapter(rootCtx, accountsService)
+	adapter.sweepInterval = 10 * time.Millisecond
+	var current atomic.Value
+	current.Store(now)
+	adapter.now = func() time.Time { return current.Load().(time.Time) }
+	if _, err := adapter.Start(context.Background(), web.ProviderDevin); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- adapter.Run(runCtx) }()
+	<-accountsService.resumeSignal
+	<-accountsService.resumeSignal
+	current.Store(now.Add(time.Minute))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if adapter.authorizationURL(provider.Devin, sessionID) == "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancelRun()
+	_ = <-done
+	if adapter.authorizationURL(provider.Devin, sessionID) != "" {
+		t.Fatal("Run sweep ticker did not evict the expired authorization URL without a poll")
+	}
+}
+
+// TestWebOAuthShutdownCleansUpSweepAndURLsRace proves shutdown clears the
+// cache and drains the active completion goroutines without leaking, even when
+// a sweep is concurrent with shutdown. Run with -race to detect data races.
+func TestWebOAuthShutdownCleansUpSweepAndURLsRace(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	const sessionID = "shutdown_race_session"
+	const authorizationURL = "https://app.devin.ai/oauth/authorize?state=shutdown-race-canary"
+	accountsService := &adapterOAuthAccounts{
+		sessions: map[string]provider.AuthorizationSession{
+			sessionID: webTestAuthorizationSession(provider.Devin, sessionID, authorizationURL, provider.AuthorizationPending, now.Add(10*time.Minute)),
+		},
+		resumeSignal: make(chan provider.Kind, 2),
+	}
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	adapter := newWebOAuthAdapter(rootCtx, accountsService)
+	adapter.sweepInterval = 5 * time.Millisecond
+	adapter.now = func() time.Time { return now }
+	if _, err := adapter.Start(context.Background(), web.ProviderDevin); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- adapter.Run(runCtx) }()
+	<-accountsService.resumeSignal
+	<-accountsService.resumeSignal
+	// Let a few sweep ticks fire concurrently with shutdown.
+	time.Sleep(20 * time.Millisecond)
+	cancelRun()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v", err)
+	}
+	adapter.mu.Lock()
+	closed := adapter.closed
+	activeNil := adapter.active == nil
+	urlsNil := adapter.authorizationURLs == nil
+	adapter.mu.Unlock()
+	if !closed || !activeNil || !urlsNil {
+		t.Fatalf("shutdown state closed=%t activeNil=%t urlsNil=%t", closed, activeNil, urlsNil)
+	}
+	// A late remember after shutdown must not re-populate the cache.
+	adapter.rememberAuthorizationURL(provider.Devin, "late_shutdown_session", "https://app.devin.ai/oauth/authorize?state=late-shutdown-canary", now.Add(time.Minute))
+	if adapter.authorizationURL(provider.Devin, "late_shutdown_session") != "" {
+		t.Fatal("closed adapter retained a late authorization URL after shutdown race")
 	}
 }

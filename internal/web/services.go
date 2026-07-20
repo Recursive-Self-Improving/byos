@@ -156,9 +156,10 @@ type UsagePeriod struct {
 }
 
 type LocalUsage struct {
-	Requests     uint64
-	InputTokens  uint64
-	OutputTokens uint64
+	Requests        uint64
+	InputTokens     uint64
+	OutputTokens    uint64
+	CacheReadTokens uint64
 }
 
 type ModelService interface {

@@ -21,10 +21,11 @@ type Weekly struct {
 }
 
 type Counters struct {
-	Requests     int64 `json:"requests"`
-	Failures     int64 `json:"failures"`
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	Requests        int64 `json:"requests"`
+	Failures        int64 `json:"failures"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
 }
 
 type Delta Counters

@@ -105,7 +105,7 @@ func (a usageRefresh) Refresh(ctx context.Context, id string) error {
 type usageRecorder struct{ service *usage.Service }
 
 func (r usageRecorder) Record(ctx context.Context, accountID string, delta routing.LocalUsageDelta) error {
-	return r.service.Record(ctx, accountID, usage.Delta{Requests: delta.Requests, Failures: delta.Failures, InputTokens: delta.InputTokens, OutputTokens: delta.OutputTokens})
+	return r.service.Record(ctx, accountID, usage.Delta{Requests: delta.Requests, Failures: delta.Failures, InputTokens: delta.InputTokens, OutputTokens: delta.OutputTokens, CacheReadTokens: delta.CacheReadTokens})
 }
 
 type publicCatalog struct {
@@ -540,12 +540,32 @@ func ignoreCancellation(err error) error {
 }
 
 // validateCallbackPath rejects a configured Devin callback path that would
-// collide with or shadow the health, readiness, public API, or Web subtrees,
-// or that contains Go 1.22 ServeMux metacharacters ({, }, $) which would
-// broaden the unauthenticated exception into a wildcard. The exact-callback
-// dispatcher matches a literal GET+path, so the callback may live under
-// /admin/api/v1/ as long as it does not equal a registered admin route. The
-// /admin/ Web subtree is reserved separately so the callback cannot shadow it.
+// collide with or shadow the health, readiness, public API, Web/admin UI, or
+// admin API routes, or that contains Go 1.22 ServeMux metacharacters ({, }, $)
+// which would broaden the unauthenticated exception into a wildcard. The
+// exact-callback dispatcher matches a literal GET+path, so the callback may
+// live under /admin/api/v1/ as long as it does not equal — or dynamically
+// match — a registered route.
+//
+// The collision rules mirror the server mux registrations: the top-level
+// system and public API routes in internal/api/server.go, the Web/admin UI
+// routes in internal/web/handler.go, and the admin API routes in
+// internal/api/admin/handler.go. The registered list below MUST be updated
+// whenever a route is added to any of those muxes.
+//
+// A collision is detected with accurate Go 1.22 ServeMux segment semantics
+// rather than a literal prefix check, so a callback path that merely shares a
+// prefix with a dynamic route (e.g. /admin/oauth/devin/callback vs.
+// /admin/oauth/{provider}/authorize/{session}) is NOT rejected unless the
+// segment counts and literal segments actually line up. Matching rules:
+//   - a literal segment matches exactly,
+//   - {name} matches exactly one non-empty segment,
+//   - the total segment count must match (a trailing {name...} wildcard, if
+//     ever present, matches the remaining path; {$}, if ever present, anchors
+//     the pattern to its exact segment count),
+//   - subtree patterns ending in '/' are handled by the reserved-subtree rule
+//     below, not by segment matching, so a callback may safely live under the
+//     intentionally-unauthenticated /admin/ subtree.
 func validateCallbackPath(callbackPath string) error {
 	if callbackPath == "" {
 		return nil
@@ -559,29 +579,54 @@ func validateCallbackPath(callbackPath string) error {
 	if strings.ContainsAny(callbackPath, "{}$") {
 		return fmt.Errorf("Devin callback path must not contain ServeMux metacharacters: %q", callbackPath)
 	}
-	// Reserved exact routes and subtrees the callback must not equal or shadow.
-	// /admin/ (the Web subtree) is reserved as an exact match, but
-	// /admin/api/v1/ is allowed because the callback is an exact-match
-	// exception within the admin API subtree, secured by AdminAuth for every
-	// non-callback path. The outer dispatcher matches a literal GET+path, so a
-	// callback under /admin/api/v1/ cannot shadow the Web subtree or bypass
-	// admin auth for any neighboring route.
-	for _, reserved := range []string{"/healthz", "/readyz", "/v1/models", "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens", "/admin/"} {
-		if callbackPath == reserved {
-			return fmt.Errorf("Devin callback path %q collides with a reserved route", callbackPath)
-		}
-	}
+	// Reserved subtrees the callback must not equal or live under. /admin/ and
+	// /admin/api/v1/ are NOT reserved as subtrees here: the exact dispatcher
+	// only intercepts a literal GET on callbackPath, so a callback under either
+	// is safe as long as it does not collide with a registered route (checked
+	// below). /admin and /admin/ are still rejected as exact registered routes.
 	for _, subtree := range []string{"/healthz/", "/readyz/", "/v1/"} {
 		if callbackPath == subtree || strings.HasPrefix(callbackPath, subtree) {
 			return fmt.Errorf("Devin callback path %q collides with a reserved subtree", callbackPath)
 		}
 	}
-	// Reject collisions with registered admin API routes. Fixed routes are
-	// compared exactly. Dynamic routes (containing {param}) are converted to
-	// a prefix so a concrete callback path that would match the pattern — e.g.
-	// /admin/api/v1/oauth/devin/status/abc hijacking the status route — is
-	// rejected, not just the literal pattern string.
-	adminRoutes := []string{
+	// Registered routes the exact GET callback must not shadow. The list is
+	// path-only (method is irrelevant: reusing a registered path for the
+	// unauthenticated callback is forbidden even when the route's method is
+	// not GET). Order does not matter; every entry is checked for exact
+	// equality and, when it is a concrete pattern, for a ServeMux segment
+	// match against the callback path.
+	registeredRoutes := []string{
+		// Top-level system and public API routes (internal/api/server.go).
+		"/healthz",
+		"/readyz",
+		"/v1/models",
+		"/v1/chat/completions",
+		"/v1/responses",
+		"/v1/messages",
+		"/v1/messages/count_tokens",
+		// Web/admin UI routes (internal/web/handler.go), mounted under /admin/.
+		"/admin",
+		"/admin/",
+		"/admin/login",
+		"/admin/logout",
+		"/admin/accounts",
+		"/admin/accounts/{id}",
+		"/admin/accounts/{id}/label",
+		"/admin/accounts/{id}/enabled",
+		"/admin/accounts/{id}/refresh",
+		"/admin/accounts/{id}/delete",
+		"/admin/oauth/new",
+		"/admin/oauth/{provider}/authorize/{session}",
+		"/admin/oauth/{provider}/status/{session}",
+		"/admin/oauth/{provider}/cancel/{session}",
+		"/admin/usage",
+		"/admin/usage/{id}/refresh",
+		"/admin/models",
+		"/admin/models/{id}/refresh",
+		"/admin/api-keys",
+		"/admin/api-keys/{id}/revoke",
+		"/admin/static/{file}",
+		// Admin API routes (internal/api/admin/handler.go), mounted under /admin/api/v1/.
 		"/admin/api/v1/oauth/xai/device",
 		"/admin/api/v1/oauth/xai/device/{state}",
 		"/admin/api/v1/oauth/devin/start",
@@ -598,16 +643,93 @@ func validateCallbackPath(callbackPath string) error {
 		"/admin/api/v1/api-keys",
 		"/admin/api/v1/api-keys/{id}",
 	}
-	for _, route := range adminRoutes {
+	for _, route := range registeredRoutes {
 		if callbackPath == route {
-			return fmt.Errorf("Devin callback path %q collides with an admin route", callbackPath)
+			return fmt.Errorf("Devin callback path %q collides with a registered route", callbackPath)
 		}
-		if idx := strings.Index(route, "{"); idx > 0 {
-			prefix := route[:idx]
-			if strings.HasPrefix(callbackPath, prefix) {
-				return fmt.Errorf("Devin callback path %q collides with a dynamic admin route %q", callbackPath, route)
-			}
+		// Subtree registrations (ending in '/') are reserved-subtree concerns,
+		// not segment-match concerns: the only one, /admin/, is intentionally
+		// safe for a concrete callback to live under because the exact
+		// dispatcher intercepts only the literal callback path.
+		if strings.HasSuffix(route, "/") {
+			continue
+		}
+		if routeMatchesCallback(route, callbackPath) {
+			return fmt.Errorf("Devin callback path %q collides with a dynamic route %q", callbackPath, route)
 		}
 	}
 	return nil
+}
+
+// routeMatchesCallback reports whether the concrete callback path matches the
+// registered ServeMux route pattern under Go 1.22 segment semantics. The
+// callback path is concrete (no wildcards, no trailing slash, leading '/'),
+// so this is a one-way pattern match.
+//
+//   - A literal segment matches exactly.
+//   - {name} matches exactly one non-empty segment.
+//   - The total segment count must match, unless the pattern ends with a
+//     {name...} tail wildcard, which matches the remaining path (zero or more
+//     segments).
+//   - {$} anchors the pattern to its exact segment count (no subtree tail);
+//     it is stripped before matching, which is conservative.
+func routeMatchesCallback(route, callbackPath string) bool {
+	// Strip a {$} end-anchor (e.g. /admin{$} -> /admin). Conservative: the
+	// resulting pattern is matched with an exact segment count.
+	if i := strings.Index(route, "{$}"); i >= 0 {
+		route = strings.TrimSuffix(route[:i], "/") + strings.TrimPrefix(route[i+len("{$}"):], "/")
+	}
+	routeSegs := strings.Split(strings.TrimPrefix(route, "/"), "/")
+	cbSegs := strings.Split(strings.TrimPrefix(callbackPath, "/"), "/")
+
+	// {name...} tail wildcard: every preceding segment must match, then the
+	// wildcard absorbs the rest of the callback path.
+	if n := len(routeSegs); n > 0 && isTailWildcard(routeSegs[n-1]) {
+		prefix := routeSegs[:n-1]
+		if len(cbSegs) < len(prefix) {
+			return false
+		}
+		for i, rs := range prefix {
+			if !segmentMatches(rs, cbSegs[i]) {
+				return false
+			}
+		}
+		return true
+	}
+
+	if len(routeSegs) != len(cbSegs) {
+		return false
+	}
+	for i, rs := range routeSegs {
+		if !segmentMatches(rs, cbSegs[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// segmentMatches reports whether a single route segment matches a single
+// concrete callback segment. {name} matches any non-empty segment; a literal
+// segment matches only itself.
+func segmentMatches(routeSeg, cbSeg string) bool {
+	if isSingleWildcard(routeSeg) {
+		return cbSeg != ""
+	}
+	return routeSeg == cbSeg
+}
+
+// isSingleWildcard reports whether seg is a Go 1.22 ServeMux single-segment
+// wildcard of the form {name} (excluding {$} and {name...}).
+func isSingleWildcard(seg string) bool {
+	return len(seg) >= 3 &&
+		seg[0] == '{' &&
+		seg[len(seg)-1] == '}' &&
+		!strings.HasSuffix(seg, "...}") &&
+		seg != "{$}"
+}
+
+// isTailWildcard reports whether seg is a Go 1.22 ServeMux tail wildcard of
+// the form {name...}.
+func isTailWildcard(seg string) bool {
+	return strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "...}")
 }
