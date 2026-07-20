@@ -1165,6 +1165,12 @@ select:focus {
   font-size: 1.375rem;
   font-weight: 500;
 }
+.usage-number-label {
+  color: var(--ink-muted);
+  font-size: var(--text-placard);
+  font-weight: 400;
+  margin-right: var(--space-1);
+}
 
 /* fuel gauge — Firefox/degradation path is a plain phosphor bar in a
    framed sunken well (M6) */
