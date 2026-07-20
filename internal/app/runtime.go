@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -281,9 +282,37 @@ func deriveWebCSRFKey(sessionKey [32]byte) [32]byte {
 	return sha256.Sum256(material[:])
 }
 
+// automaticDevinCallbackOrigin makes the default local service usable without
+// a separate public callback configuration. It advertises only a browser
+// loopback address and only when the server listens on a loopback or wildcard
+// TCP address. Remote/non-loopback deployments must configure explicit HTTPS.
+func automaticDevinCallbackOrigin(listen string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return ""
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return ""
+	}
+	normalizedHost := strings.ToLower(strings.TrimSpace(host))
+	ip := net.ParseIP(normalizedHost)
+	if normalizedHost != "" && normalizedHost != "localhost" && (ip == nil || (!ip.IsLoopback() && !ip.IsUnspecified())) {
+		return ""
+	}
+	callbackHost := "127.0.0.1"
+	if ip != nil && ip.To4() == nil {
+		callbackHost = "::1"
+	}
+	return "http://" + net.JoinHostPort(callbackHost, port)
+}
+
 func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger *slog.Logger) (*Runtime, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if cfg.Devin.OAuth.CallbackOrigin == "" {
+		cfg.Devin.OAuth.CallbackOrigin = automaticDevinCallbackOrigin(cfg.Server.Listen)
 	}
 	masterKey := secrets.MasterKey()
 	keys, err := appcrypto.DeriveKeys(masterKey[:])

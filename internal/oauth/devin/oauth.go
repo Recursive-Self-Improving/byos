@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -58,11 +59,13 @@ func generateState(random io.Reader) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// CallbackURL constructs and validates the configured HTTPS callback URL.
+// CallbackURL constructs and validates the configured callback URL. HTTPS is
+// accepted for deployed services; plain HTTP is accepted only for loopback
+// callbacks, matching Devin's native CLI OAuth flow.
 func CallbackURL(config OAuthConfig) (string, error) {
 	originText := strings.TrimSuffix(config.CallbackOrigin, "/")
 	origin, err := url.Parse(originText)
-	if err != nil || origin.Scheme != "https" || origin.Host == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
+	if err != nil || !validCallbackOrigin(origin) || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
 		return "", ErrInvalidCallback
 	}
 	path, err := url.Parse(config.CallbackPath)
@@ -73,10 +76,29 @@ func CallbackURL(config OAuthConfig) (string, error) {
 	return origin.String(), nil
 }
 
+func validCallbackOrigin(origin *url.URL) bool {
+	if origin == nil || origin.Host == "" || origin.User != nil {
+		return false
+	}
+	switch origin.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := origin.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	default:
+		return false
+	}
+}
+
 // AuthorizationURL builds the exact Devin browser authorization request.
 func AuthorizationURL(callbackURL, state, challenge string) (string, error) {
 	callback, err := url.Parse(callbackURL)
-	if err != nil || callback.Scheme != "https" || callback.Host == "" || callback.User != nil || callback.Fragment != "" {
+	if err != nil || !validCallbackOrigin(callback) || callback.Fragment != "" {
 		return "", ErrInvalidCallback
 	}
 	if state == "" || challenge == "" {

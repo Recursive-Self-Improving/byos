@@ -42,35 +42,50 @@ func TestChallengeS256KnownVector(t *testing.T) {
 }
 
 func TestAuthorizationURLExactQueryAndConfiguredCallback(t *testing.T) {
-	for _, origin := range []string{"https://byos.example.test", "https://byos.example.test/"} {
-		callback, err := CallbackURL(OAuthConfig{CallbackOrigin: origin, CallbackPath: "/admin/api/v1/oauth/devin/callback"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if callback != "https://byos.example.test/admin/api/v1/oauth/devin/callback" {
-			t.Fatalf("callback=%q", callback)
-		}
-		raw, err := AuthorizationURL(callback, "state", "challenge")
-		if err != nil {
-			t.Fatal(err)
-		}
-		parsed, err := url.Parse(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if parsed.Scheme != "https" || parsed.Host != "app.devin.ai" || parsed.Path != "/auth/cli/continue" {
-			t.Fatalf("endpoint=%s", parsed)
-		}
-		want := url.Values{"redirect_uri": {callback}, "state": {"state"}, "prompt": {"select_account"}, "code_challenge": {"challenge"}, "code_challenge_method": {"S256"}}
-		if !reflect.DeepEqual(parsed.Query(), want) {
-			t.Fatalf("query=%v want=%v", parsed.Query(), want)
-		}
+	tests := []struct {
+		origin string
+		want   string
+	}{
+		{origin: "https://byos.example.test", want: "https://byos.example.test/admin/api/v1/oauth/devin/callback"},
+		{origin: "https://byos.example.test/", want: "https://byos.example.test/admin/api/v1/oauth/devin/callback"},
+		{origin: "http://127.0.0.1:59653", want: "http://127.0.0.1:59653/admin/api/v1/oauth/devin/callback"},
+		{origin: "http://localhost:59653", want: "http://localhost:59653/admin/api/v1/oauth/devin/callback"},
+		{origin: "http://[::1]:59653", want: "http://[::1]:59653/admin/api/v1/oauth/devin/callback"},
+	}
+	for _, test := range tests {
+		t.Run(test.origin, func(t *testing.T) {
+			callback, err := CallbackURL(OAuthConfig{CallbackOrigin: test.origin, CallbackPath: "/admin/api/v1/oauth/devin/callback"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if callback != test.want {
+				t.Fatalf("callback=%q want=%q", callback, test.want)
+			}
+			raw, err := AuthorizationURL(callback, "state", "challenge")
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := url.Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Scheme != "https" || parsed.Host != "app.devin.ai" || parsed.Path != "/auth/cli/continue" {
+				t.Fatalf("endpoint=%s", parsed)
+			}
+			want := url.Values{"redirect_uri": {callback}, "state": {"state"}, "prompt": {"select_account"}, "code_challenge": {"challenge"}, "code_challenge_method": {"S256"}}
+			if !reflect.DeepEqual(parsed.Query(), want) {
+				t.Fatalf("query=%v want=%v", parsed.Query(), want)
+			}
+		})
 	}
 }
 
 func TestCallbackURLRejectsUnsafeConfiguration(t *testing.T) {
 	for _, config := range []OAuthConfig{
 		{}, {CallbackOrigin: "http://byos.example.test", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://127.0.0.1.evil.test", CallbackPath: "/callback"},
+		{CallbackOrigin: "ftp://127.0.0.1", CallbackPath: "/callback"},
+
 		{CallbackOrigin: "https://user@byos.example.test", CallbackPath: "/callback"},
 		{CallbackOrigin: "https://byos.example.test/base", CallbackPath: "/callback"},
 		{CallbackOrigin: "https://byos.example.test", CallbackPath: "callback"},

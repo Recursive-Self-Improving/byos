@@ -229,14 +229,27 @@ func TestStreamDeadlineOnlyShortensCallerContext(t *testing.T) {
 	}
 }
 
-func TestDevinActivationRequiresExplicitPublicOrigin(t *testing.T) {
+func TestDevinActivationAcceptsPublicHTTPSAndLoopbackHTTP(t *testing.T) {
 	cfg := Default()
 	if err := cfg.Devin.ValidateEnabled(); err == nil {
 		t.Fatal("unset callback origin activated Devin")
 	}
-	cfg.Devin.OAuth.CallbackOrigin = "https://byos.example.com"
-	if err := cfg.Devin.ValidateEnabled(); err != nil {
-		t.Fatal(err)
+	for _, origin := range []string{
+		"https://byos.example.com",
+		"http://localhost:8080",
+		"http://127.0.0.1:8080",
+		"http://[::1]:8080",
+	} {
+		cfg.Devin.OAuth.CallbackOrigin = origin
+		if err := cfg.Devin.ValidateEnabled(); err != nil {
+			t.Fatalf("origin %q: %v", origin, err)
+		}
+	}
+	for _, origin := range []string{"http://byos.example.com", "ftp://127.0.0.1:8080"} {
+		cfg.Devin.OAuth.CallbackOrigin = origin
+		if err := cfg.Devin.ValidateEnabled(); err == nil {
+			t.Fatalf("unsafe origin %q accepted", origin)
+		}
 	}
 }
 

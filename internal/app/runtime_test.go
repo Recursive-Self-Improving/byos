@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"sync"
 	"testing"
@@ -60,6 +61,58 @@ func TestRuntimeHealthAndReadinessWithoutAccounts(t *testing.T) {
 		runtime.Server.Handler.ServeHTTP(response, request)
 		if response.Code != test.want {
 			t.Fatalf("%s status=%d body=%s", test.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestRuntimeDefaultDevinOAuthStartsWithLoopbackCallback(t *testing.T) {
+	t.Setenv("BYOS_MASTER_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
+	t.Setenv("BYOS_ADMIN_PASSWORD", "password")
+	t.Setenv("BYOS_ADMIN_API_KEY", "admin-key")
+	secrets, err := config.LoadSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Server.Listen = "0.0.0.0:18080"
+	cfg.DataDir = t.TempDir()
+	runtime, err := New(t.Context(), cfg, secrets, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if got, want := runtime.Config.Devin.OAuth.CallbackOrigin, "http://127.0.0.1:18080"; got != want {
+		t.Fatalf("callback origin=%q want=%q", got, want)
+	}
+	authorization, err := runtime.Accounts.StartLogin(t.Context(), provider.Devin)
+	if err != nil {
+		t.Fatalf("start Devin login: %v", err)
+	}
+	parsed, err := url.Parse(authorization.VerificationURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := parsed.Query().Get("redirect_uri"), "http://127.0.0.1:18080/admin/api/v1/oauth/devin/callback"; got != want {
+		t.Fatalf("redirect_uri=%q want=%q", got, want)
+	}
+	if parsed.Host != "app.devin.ai" || parsed.Path != "/auth/cli/continue" || parsed.Query().Get("code_challenge_method") != "S256" {
+		t.Fatalf("authorization URL=%s", parsed)
+	}
+}
+
+func TestAutomaticDevinCallbackOriginRejectsNonLoopbackListeners(t *testing.T) {
+	tests := map[string]string{
+		"127.0.0.1:8080": "http://127.0.0.1:8080",
+		"0.0.0.0:8080":   "http://127.0.0.1:8080",
+		"[::1]:8080":     "http://[::1]:8080",
+		"[::]:8080":      "http://[::1]:8080",
+		"192.0.2.1:8080": "",
+		"127.0.0.1:0":    "",
+		"not-an-address": "",
+	}
+	for listen, want := range tests {
+		if got := automaticDevinCallbackOrigin(listen); got != want {
+			t.Errorf("listen=%q origin=%q want=%q", listen, got, want)
 		}
 	}
 }

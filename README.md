@@ -137,7 +137,7 @@ curl --fail http://127.0.0.1:8080/healthz
 2. Sign in with `BYOS_ADMIN_PASSWORD`.
 3. Connect at least one provider account:
    - **xAI** uses the device authorization flow: the UI displays a verification link and user code.
-   - **Devin** uses a browser callback flow: the UI displays the Devin authorization URL. The callback must be reachable over HTTPS at the configured `devin.oauth.callback_origin` (see [Devin provider setup](#devin-provider-setup)). To enable Devin under Compose, edit `deploy/compose.yaml` on the host (bind-mounted read-only at `/etc/byos/compose.yaml` in the container), uncomment `devin.oauth.callback_origin`, and set it to your public HTTPS origin; then restart with `docker compose restart byos`. `callback_origin` is required to start new Devin OAuth callback login flows, not a runtime provider activation gate: existing usable Devin accounts persisted in `/data` remain routable while it is unset, so this step is fresh empty deployment/login setup rather than a runtime Devin enablement switch.
+   - **Devin** uses a browser callback flow: the UI displays the Devin authorization URL. Local/source runs and the default Compose deployment need no Devin OAuth setting: when `devin.oauth.callback_origin` is empty and `server.listen` is a loopback or wildcard TCP address with a fixed port, BYOS advertises a native-style HTTP loopback callback on that port (for default Compose, `http://127.0.0.1:8080`). For a remote or publicly hosted service, configure the public HTTPS origin explicitly as described in [Devin provider setup](#devin-provider-setup).
 4. Open **API keys**, create a downstream key, and copy it immediately. Its plaintext is shown once.
 5. Wait for `/readyz` to return HTTP `200` before sending generation requests. Readiness requires at least one enabled, authenticated account that can serve the configured default model.
 
@@ -175,12 +175,13 @@ The default model is `grok-4.5`. The `grok` alias resolves to the same canonical
 
 ### Devin provider setup
 
-Devin accounts authenticate through a browser callback OAuth flow with S256 PKCE. Unlike xAI device flow, Devin requires a publicly reachable HTTPS callback URL that the browser redirects to after authorization.
+Devin accounts authenticate through a browser callback OAuth flow with S256 PKCE. Like Devin's CLI, BYOS supports an HTTP loopback redirect for local use; remote deployments use an explicit public HTTPS callback.
 
-1. Set `devin.oauth.callback_origin` to the public HTTPS origin where the callback is reachable, for example `https://byos.example.com`. The origin must be an HTTPS URL with a public DNS hostname (no IP literal or `localhost`); an optional port is allowed, and the path may be empty or a single root slash (`/`), but userinfo, query, and fragment are rejected. The callback path defaults to `/admin/api/v1/oauth/devin/callback` and can be overridden with `devin.oauth.callback_path`.
-2. Ensure the reverse proxy forwards the callback request to the service. Only an exact `GET` on the configured callback path bypasses admin authentication; every other method or path under `/admin/api/v1/` requires the admin API key.
-3. Start the Devin login from the admin Web UI (**Connect account → Devin**) or the CLI (`byos login --provider devin`). The CLI runs a bounded callback-only HTTP listener on the configured `server.listen` address and requires the normal service to be stopped so the port is free.
-4. After the browser completes authorization, BYOS exchanges the callback code for an opaque Devin token, persists encrypted account credentials, and marks the OAuth session completed. The token is never written to a plaintext file or environment variable.
+1. For a local/source run or the default Compose deployment, leave `devin.oauth.callback_origin` unset. When `server.listen` uses a loopback or wildcard address and a fixed nonzero port, BYOS automatically advertises `http://127.0.0.1:<port>` (or the IPv6 loopback equivalent). The browser must run where that loopback address reaches BYOS; the default Compose port publication satisfies this on the Docker host.
+2. For Railway, a remote server, or any browser that cannot reach the service through local loopback, set `devin.oauth.callback_origin` to the public HTTPS origin, for example `https://byos.example.com`. Explicit HTTP origins are accepted only for `localhost` or a loopback IP. Origins reject userinfo, query, fragment, and non-root paths; the callback path defaults to `/admin/api/v1/oauth/devin/callback` and can be overridden with `devin.oauth.callback_path`.
+3. Ensure the callback path reaches the service. Only an exact `GET` on that configured path bypasses admin authentication; every other method or path under `/admin/api/v1/` requires the admin API key.
+4. Start the Devin login from the admin Web UI (**Connect account → Devin**) or the CLI (`byos login --provider devin`). The CLI runs a bounded callback-only HTTP listener on the configured `server.listen` address and requires the normal service to be stopped so the port is free.
+5. After the browser completes authorization, BYOS exchanges the callback code for an opaque Devin token, persists encrypted account credentials, and marks the OAuth session completed. The token is never written to a plaintext file or environment variable.
 
 Devin credentials do not refresh. When a Devin token expires or the upstream returns `401`/`403`, the account transitions to a relogin-required state; reconnect it through the same callback flow. xAI refresh, billing, and backend-search endpoints never receive Devin credentials, and Devin never fabricates xAI-shaped billing or quota fields. Devin usage is recorded as local proxy counters only; upstream Devin quota and statistics are unavailable and not reported.
 
@@ -249,7 +250,7 @@ Keep `BYOS_MASTER_KEY` stable for the lifetime of the volume and back it up outs
 1. Trigger a deployment or run `railway up`.
 2. In **Settings → Networking**, generate a Railway domain or attach a custom domain.
 3. Confirm `https://<your-domain>/healthz` returns HTTP `200`.
-4. Open `https://<your-domain>/admin/login`, connect a provider account, and create a downstream API key. To use Devin, set `devin.oauth.callback_origin` to `https://<your-domain>`. Because `Dockerfile.railway` copies `deploy/railway.yaml` into the image at `/etc/byos/railway.yaml` at build time and `railway.json`'s start command passes `--config /etc/byos/railway.yaml`, add the `devin.oauth.callback_origin` setting to `deploy/railway.yaml` before triggering the image build/deploy (see [Devin provider setup](#devin-provider-setup)). Alternatively, mount your own YAML config file at a different path and override the Railway start command to pass `--config <your-path>`.
+4. Open `https://<your-domain>/admin/login`, connect a provider account, and create a downstream API key. To use Devin on Railway, explicitly set `devin.oauth.callback_origin` to `https://<your-domain>`; the automatic loopback callback is only for a browser that can reach BYOS on the same machine. Because `Dockerfile.railway` copies `deploy/railway.yaml` into the image at `/etc/byos/railway.yaml` at build time and `railway.json`'s start command passes `--config /etc/byos/railway.yaml`, add the setting to `deploy/railway.yaml` before triggering the image build/deploy (see [Devin provider setup](#devin-provider-setup)). Alternatively, mount your own YAML config file at a different path and override the Railway start command to pass `--config <your-path>`.
 5. Confirm `https://<your-domain>/readyz` returns HTTP `200`.
 
 `deploy/railway.yaml` trusts Railway proxy peers in `100.0.0.0/8`, allowing secure administrator cookies when Railway terminates HTTPS and forwards `X-Forwarded-Proto: https`. Do not copy that trusted-proxy range to unrelated hosting environments.
@@ -281,9 +282,9 @@ byos login [--provider xai|devin] [--config path] [--listen address] [--data-dir
 byos version
 ```
 
-`byos login` defaults to `--provider xai` (device flow). With `--provider devin`, it runs the same persisted callback-PKCE lifecycle as the admin UI through a bounded callback-only HTTP listener on the configured listen address; the normal `serve` process must be stopped first so the port is free.
+`byos login` defaults to `--provider xai` (device flow). With `--provider devin`, it runs the same persisted callback-PKCE lifecycle as the admin UI through a bounded callback-only HTTP listener on the configured listen address; the normal `serve` process must be stopped first so the port is free. An unset callback origin is automatically resolved from a loopback or wildcard listen address with a fixed port.
 
-A YAML file can override server, upstream, OAuth, Devin, model, limit, usage, and retention settings. Unknown YAML fields and invalid values fail closed. The defaults are xAI-compatible without any Devin configuration; new Devin OAuth callback login flows can be started only when `devin.oauth.callback_origin` is set to a valid public HTTPS origin. This gates fresh empty deployment/login setup, not runtime provider activation: a deployment with persisted usable Devin accounts in `/data` can still route Devin while `callback_origin` is empty. Example Devin-enabled configuration (all keys shown are optional except `callback_origin` when starting new Devin logins):
+A YAML file can override server, upstream, OAuth, Devin, model, limit, usage, and retention settings. Unknown YAML fields and invalid values fail closed. Local defaults need no Devin OAuth configuration. Set `devin.oauth.callback_origin` only when the browser must return through an explicit public HTTPS origin or a custom loopback origin. The example below shows a remote HTTPS deployment:
 
 <!-- BEGIN devin example yaml -->
 ```yaml
@@ -316,7 +317,7 @@ devin:
 This rebrand is a clean cutover for fresh installations. Legacy `SUPERGROK_*` variables, the `supergrok-api` binary, `supergrok.db`, `supergrok-data`, `supergrok_admin_*` cookies, and `sgk_` downstream keys are not recognized or migrated.
 
 - Keep `/data` persistent and private. Back it up, and retain `BYOS_MASTER_KEY` securely in a separate secret store.
-- Use HTTPS for every non-loopback deployment, especially the administrator UI and the Devin OAuth callback. The Devin callback origin must be a public HTTPS URL; the callback is never derived from request headers.
+- Use HTTPS for every non-loopback deployment, especially the administrator UI and the Devin OAuth callback. Automatic Devin callback origins are derived only from loopback/wildcard `server.listen` addresses; request and forwarded headers are never used. Remote deployments must configure a public HTTPS origin explicitly.
 - Keep the administrator API key separate from downstream API keys.
 - Downstream API keys are stored as hashes; account credentials and sensitive state are encrypted before SQLite persistence.
 - A fresh process is healthy before it is ready. Readiness requires at least one enabled, authenticated account that can serve the configured default model.

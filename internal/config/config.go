@@ -403,16 +403,27 @@ func validateModelEntries(entries []ModelEntry) error {
 	return nil
 }
 
-// ValidateEnabled is the activation-time seam used by Devin OAuth composition.
-// The default remains unset so existing xAI-only deployments do not invent a
-// public origin or derive one from request headers.
+// ValidateEnabled validates an explicit Devin callback origin. Deployed
+// services use a public HTTPS origin; local/native flows may use an HTTP
+// loopback origin, as Devin's CLI does.
 func (c DevinConfig) ValidateEnabled() error {
 	origin, err := url.Parse(c.OAuth.CallbackOrigin)
-	if err != nil || origin.Scheme != "https" || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || origin.Opaque != "" || (origin.Path != "" && origin.Path != "/") {
-		return errors.New("devin.oauth.callback_origin must be an explicit HTTPS origin when Devin is enabled")
+	if err != nil || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || origin.Opaque != "" || (origin.Path != "" && origin.Path != "/") {
+		return errors.New("devin.oauth.callback_origin must be an HTTPS origin or HTTP loopback origin")
 	}
-	if net.ParseIP(origin.Hostname()) != nil || strings.EqualFold(origin.Hostname(), "localhost") || !validDNSName(strings.ToLower(origin.Hostname())) {
-		return errors.New("devin.oauth.callback_origin must use a public DNS hostname")
+	host := origin.Hostname()
+	switch origin.Scheme {
+	case "http":
+		ip := net.ParseIP(host)
+		if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+			return errors.New("devin.oauth.callback_origin may use HTTP only with a loopback hostname")
+		}
+	case "https":
+		if net.ParseIP(host) != nil || strings.EqualFold(host, "localhost") || !validDNSName(strings.ToLower(host)) {
+			return errors.New("devin.oauth.callback_origin must use a public DNS hostname for HTTPS")
+		}
+	default:
+		return errors.New("devin.oauth.callback_origin must use HTTPS or loopback HTTP")
 	}
 	return nil
 }
