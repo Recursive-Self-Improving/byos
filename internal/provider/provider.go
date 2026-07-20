@@ -3,7 +3,9 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql/driver"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -18,6 +20,30 @@ const (
 )
 
 var ErrInvalidKind = errors.New("invalid provider kind")
+
+// SessionID is a random opaque public handle for one authorization session. It
+// is distinct from the raw OAuth state, which remains internal to the
+// callback/PKCE protocol and is never exposed to admin, CLI, or Web callers.
+// SessionID is persisted plaintext and indexed so status/cancel lookups by
+// provider+SessionID never touch raw state. It is provider+flow-bound: a
+// SessionID is only meaningful alongside its provider kind and flow type.
+type SessionID string
+
+const sessionIDBytes = 24
+
+// NewSessionID generates a cryptographically random SessionID. The randomness
+// is independent of the OAuth state and PKCE verifier so leaking a SessionID
+// cannot recover raw state or replay a callback.
+func NewSessionID() (SessionID, error) {
+	var buf [sessionIDBytes]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("session id randomness: %w", err)
+	}
+	return SessionID(base64.RawURLEncoding.EncodeToString(buf[:])), nil
+}
+
+// String returns the SessionID as a string. It is safe to expose to callers.
+func (s SessionID) String() string { return string(s) }
 
 func ParseKind(value string) (Kind, error) {
 	kind := Kind(value)
@@ -177,6 +203,15 @@ type CredentialManager interface {
 
 var ErrProviderMismatch = errors.New("provider mismatch")
 
+// ErrOAuthConflict is the stable conflict sentinel returned by lifecycle
+// operations when an authorization session is known but is no longer
+// cancellable because it has reached a terminal state (consumed, completed,
+// failed, expired, or cancelled). It deliberately does not wrap sql.ErrNoRows
+// so callers can distinguish a known-but-terminal session (409 Conflict) from
+// a genuinely unknown or wrong-provider session (404 Not Found). Its message
+// is sanitized and safe to surface.
+var ErrOAuthConflict = errors.New("authorization is no longer cancellable")
+
 // AuthorizationStatus is the normalized state of a provider authorization
 // session. Providers may support only the states applicable to their flow.
 type AuthorizationStatus string
@@ -192,17 +227,25 @@ const (
 )
 
 // AuthorizationRef binds every lifecycle operation to a provider before an
-// implementation reads persisted state or performs network I/O.
+// implementation reads persisted state or performs network I/O. State is the
+// raw OAuth state used internally for callback/PKCE completion; SessionID is
+// the public opaque handle for status/cancel lookups. At least one of State
+// or SessionID must be set; callback completion uses State, while admin/CLI
+// status and cancel use SessionID.
 type AuthorizationRef struct {
-	Provider Kind
-	State    string
+	Provider  Kind
+	State     string
+	SessionID SessionID
 }
 
 // Authorization contains only values safe to return to a caller starting an
 // authorization flow. Provider codes, tokens, PKCE verifiers, and verified
-// identity claims must remain behind the lifecycle implementation.
+// identity claims must remain behind the lifecycle implementation. SessionID
+// is the public handle callers use to poll or cancel the flow; Ref.State is
+// the raw OAuth state retained only for callback completion.
 type Authorization struct {
 	Ref                     AuthorizationRef
+	SessionID               SessionID
 	UserCode                string
 	VerificationURL         string
 	VerificationURLComplete string

@@ -152,6 +152,9 @@ func Open(ctx context.Context, dataDir string) (*SQLite, error) {
 	if err := Migrate(ctx, db, migrations.FS); err != nil {
 		return closeOnError(err)
 	}
+	if err := backfillOAuthSessionIDs(ctx, db); err != nil {
+		return closeOnError(err)
+	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		return closeOnError(fmt.Errorf("secure database file: %w", err))
 	}

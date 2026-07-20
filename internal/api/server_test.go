@@ -176,3 +176,79 @@ func TestRecoveryDoesNotLeakPanicValue(t *testing.T) {
 		t.Fatalf("response=%s logs=%s", response.Body.String(), logs.String())
 	}
 }
+
+func TestExactCallbackDispatchBypassesAdminAuth(t *testing.T) {
+	database, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys := accounts.NewAPIKeyService(store.NewAPIKeyRepository(database.DB))
+	callbackHit := false
+	callback := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callbackHit = true
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	admin := statusHandler(204)
+	handlers := api.ServerHandlers{Health: statusHandler(200), Ready: statusHandler(200), Admin: admin, Callback: callback}
+	server := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: keys, AdminAPIKey: "admin", AdminAttempts: directAdminAttempts{}, AdminSources: fixedAdminSource{}, CallbackPath: "/admin/api/v1/oauth/devin/callback"})
+
+	// Exact GET on callback path bypasses admin auth (no Authorization header).
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/v1/oauth/devin/callback?state=s&code=c", nil))
+	if response.Code != http.StatusNoContent || !callbackHit {
+		t.Fatalf("callback bypass failed: code=%d hit=%v", response.Code, callbackHit)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("callback missing no-store: %v", response.Header())
+	}
+	// Global middleware (request IDs, security headers) still applied.
+	if response.Header().Get("X-Request-Id") == "" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("callback missing global middleware: %v", response.Header())
+	}
+}
+
+func TestExactCallbackDispatchFallsThroughForNonExact(t *testing.T) {
+	database, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys := accounts.NewAPIKeyService(store.NewAPIKeyRepository(database.DB))
+	callback := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	admin := statusHandler(204)
+	handlers := api.ServerHandlers{Health: statusHandler(200), Ready: statusHandler(200), Admin: admin, Callback: callback}
+	server := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: keys, AdminAPIKey: "admin", AdminAttempts: directAdminAttempts{}, AdminSources: fixedAdminSource{}, CallbackPath: "/admin/api/v1/oauth/devin/callback"})
+
+	// POST to exact callback path falls through to protected mux (not exact GET).
+	postResponse := httptest.NewRecorder()
+	server.ServeHTTP(postResponse, httptest.NewRequest(http.MethodPost, "/admin/api/v1/oauth/devin/callback", nil))
+	// Admin auth applies — no Authorization header means 401.
+	if postResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("POST to callback path should fall through to admin auth: code=%d", postResponse.Code)
+	}
+
+	// Trailing-slash descendant falls through to protected mux.
+	descendantResponse := httptest.NewRecorder()
+	server.ServeHTTP(descendantResponse, httptest.NewRequest(http.MethodGet, "/admin/api/v1/oauth/devin/callback/extra", nil))
+	if descendantResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("callback descendant should fall through to admin auth: code=%d", descendantResponse.Code)
+	}
+
+	// Neighboring admin route remains protected.
+	neighborResponse := httptest.NewRecorder()
+	server.ServeHTTP(neighborResponse, httptest.NewRequest(http.MethodGet, "/admin/api/v1/accounts", nil))
+	if neighborResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("neighboring admin route should require auth: code=%d", neighborResponse.Code)
+	}
+
+	// Exact callback with admin auth still goes to callback (bypass).
+	authedResponse := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/oauth/devin/callback?state=s&code=c", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	server.ServeHTTP(authedResponse, req)
+	if authedResponse.Code != http.StatusNoContent {
+		t.Fatalf("exact callback with auth should still bypass to callback: code=%d", authedResponse.Code)
+	}
+}

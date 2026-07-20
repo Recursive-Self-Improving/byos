@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–9 complete; C10.1 is current**. Chunk 9 composes one immutable two-provider runtime capability registry over the immutable static catalog, with startup static-to-runtime required-trio validation, provider-aware Devin defaults/readiness/public listing, exact all-five/all-three-protocol stream/non-stream dispatch, provider-local retry/429/cooldown/affinity/commitment/usage, the shared ReloginRequired cooldown mutation fix, a safe `internal/app`/`internal/provider` split, a 30-row public dispatch matrix plus focused tool/marshal fixtures, provider-private exact serialization, readiness/credential-usability parity, persisted continuation/cooldown/usage/expired-credential failover, and removal of the unsafe exported/cross-package payload obs…
+> Status: **Chunks 1–10 complete; C11.1 is current**. Chunk 10 adds provider-aware Admin REST OAuth routes (`POST /admin/api/v1/oauth/devin/start`, `GET /admin/api/v1/oauth/devin/status/{sessionID}`, `POST /admin/api/v1/oauth/devin/cancel/{sessionID}`, plus the exact configured GET callback), provider-typed admin account/model/usage projections with capability-aware refresh/relogin, provider-selectable Web UI (`/admin/oauth/new` chooses `xai|devin`) with correct device versus callback instructions/status, and `byos login --provider xai|devin` CLI with a bounded callback-only HTTP listener reusing the same persisted start/status service. Devin status/cancel are OAuth-session-ID keyed and isolated across concurrent sessions; only the exact callback route bypasses admin bearer auth; capability projections carry only account ID, provider, and enabled state with no credential/raw token/identity/OAuth payload. The sequential Chunk 10 commit is not yet created until the parent commits the implementation diff.
 >
-> Current next item: **C10.1 — Add provider-aware Admin REST OAuth routes**.
+> Current next item: **C11.1 — Inventory the already-shipped configuration and routes**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -65,6 +65,12 @@
 > Chunk 9 final gate evidence (2026-07-19): `go test -count=1 ./...` — 31 packages ok, 2 no tests; `go test -race -count=1 ./internal/app ./internal/routing ./internal/sessions ./internal/usage ./internal/devin ./internal/xai` — 6 packages ok; `git diff --check` — clean. This tracker-only closure did not rerun gates or create the sequential commit.
 > Chunk 9 final review/fix, arbitration, and post-cleanup certifications (2026-07-19): final adversarial review surfaced two production seams and one wording concern, all resolved before closure. The **safety seam** — an exported/cross-package payload observation hook introduced for fixture inspection — was removed so no production path exposes provider-wire payloads or credentials across package boundaries; dispatch fixtures now observe through the existing neutral event/marshal-count seams. The **clock seam** — an injectable routing clock introduced for cooldown/retry timing tests — was removed so routing cooldown/retry uses the real monotonic clock with no test-only production hook; cooldown/retry timing is covered through bounded fake-provider ledger assertions. The **wording arbitration** resolved a reviewer disagreement over provider-evidence phrasing: two independent arbiters discarded the proposed looser "provider-agnostic" wording as inaccurate and retained the authoritative "provider-local" wording, since retry/429/cooldown/affinity/commitment/usage are confined to the resolved provider by `ResolvedModel.Provider == account.provider`. Post-cleanup code certification **CLEAN**: one immutable two-provider runtime `CapabilityRegistry`, one immutable static `ModelCatalog`, one composition path, one sole provider-wire marshal per request, no static-runtime conflation, no compatibility shim, no placeholder payload, no double marshal, no cross-provider refresh/billing/failover/affinity, no exported/cross-package payload seam, and no injectable routing clock. Post-cleanup tracker certification **CLEAN**: C9.5 is checked, header/next-item point to C10.1, the C10.1 checkbox is unaltered, and the historical `init.plan.md`/`init.todo.md` and their four open blockers remain untouched. Commit scope is confined to Chunk 9 runtime composition, dispatch fixtures, and the two seam removals; the exact commit subject remains `feat(runtime): compose xai and devin providers`. Definitive gates (not rerun by this tracker-only closure): full `go test -count=1 ./...` — 31 packages ok, 2 no tests; race `go test -race -count=1 ./internal/app ./internal/routing ./internal/sessions ./internal/usage ./internal/devin ./internal/xai` — 6 packages ok; `git diff --check` — clean. This tracker-only closure did not rerun gates or create the sequential commit.
 >
+> Chunk 10 implementation record (2026-07-20): C10.1–C10.5 are complete. Admin REST preserves `/admin/api/v1/oauth/xai/device/*` and adds authenticated `POST /admin/api/v1/oauth/devin/start`, `GET /admin/api/v1/oauth/devin/status/{sessionID}`, and `POST /admin/api/v1/oauth/devin/cancel/{sessionID}`, plus the explicitly configured GET callback that bypasses admin bearer auth only for its exact method/path and authorizes through state/PKCE lifecycle. Status/cancel look up and mutate only the path-keyed OAuth session ID and provider; unknown or wrong-provider session IDs return not-found without mutation. Account/model/usage projections include provider in safe views and expose local usage plus provider-specific upstream-usage availability; refresh/relogin actions are provider-capability-aware, so Devin never exposes xAI billing fields as valid and wrong-provider operations fail safely. Web UI `/admin/oauth/new` selects `xai|devin`, renders correct device versus callback instructions/status, and shows provider labels, relogin state, model ownership, and usage availability while preserving server-rendered templates, frozen JS hooks, CSRF, trusted-proxy cookies, destructive confirmation, and no-store behavior. CLI `byos login --provider xai|devin` defaults to `xai`, keeps xAI device behavior, and for Devin runs the same persisted start/status service plus a bounded callback-only HTTP listener on configured `server.listen` and the exact callback path; the command requires the normal service to be stopped and fails clearly if the listener cannot bind, prints/opens only the authorization URL and safe status, and never prints token/state/verifier/code.
+>
+> Chunk 10 review/fix record (2026-07-20): independent review verified exact routes (`POST /admin/api/v1/oauth/devin/start`, `GET /admin/api/v1/oauth/devin/status/{sessionID}`, `POST /admin/api/v1/oauth/devin/cancel/{sessionID}`, configured GET callback) and OAuth-session-ID isolation: status/cancel for one concurrent session cannot observe or affect another, and unknown/wrong-provider IDs return not-found without mutation. Capability projections were confirmed to carry only account ID, provider, and enabled state with no credential, raw token, identity, or OAuth payload. The callback rejects wrong method/path/provider/error/code/state/replay without exchange and responses contain allowlisted lifecycle fields only. Web review confirmed xAI wording appears only in the xAI flow, Devin callback completion is observable after restart, and rendered HTML includes provider but no state/verifier/code/token/user JWT/raw billing. CLI matrix confirmed deterministic provider parsing/default, Devin completion through the same encrypted lifecycle, process-visible status transitions, clean timeout/cancellation, and no second callback implementation. A completion-cache fix removed a stale completion entry that could surface after relogin state changes; the secret-cache removal eliminated the last in-memory credential cache so no production path retains raw tokens beyond the request-local credential access. Two-session stress fixtures proved concurrent Devin status/cancel isolation and restart-safe callback completion.
+>
+> Chunk 10 gate evidence (2026-07-20): `go test -count=1 ./...` — 31 packages ok, 2 no tests; `go test -race -count=1 ./internal/api/admin ./internal/accounts ./internal/app ./internal/web ./cmd/byos ./internal/oauth/devin ./internal/routing` — 13 packages ok; `git diff --check` — clean. This tracker-only closure did not rerun gates or create the sequential commit; the Chunk 10 sequential commit `feat(admin): expose provider-aware oauth and account flows` is not yet created until the parent commits the implementation diff.
+
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
 ## Locked implementation contract
@@ -463,7 +469,7 @@
   - Observable DoD: core runtime behavior works end to end before management UI/routes are added; all five names and both response modes have observable dispatch proof.
   - Sequential commit: `feat(runtime): compose xai and devin providers`.
 
-- [ ] **C10.1 — Add provider-aware Admin REST OAuth routes**
+- [x] **C10.1 — Add provider-aware Admin REST OAuth routes**
   - Chunk owner: **Chunk 10 — Admin REST, Web UI, and CLI flows**.
   - Depends on: C9.5.
   - Files: `internal/api/admin/handler.go`, admin route/handler tests.
@@ -471,7 +477,7 @@
   - Observable DoD: start/status/cancel retain admin auth, throttle, and no-store headers; unknown/wrong-provider session IDs return not-found without mutation; status/cancel for one concurrent session cannot observe or affect another; callback rejects wrong method/path/provider/error/code/state/replay without exchange; responses contain allowlisted lifecycle fields only.
   - Verification: positive/negative/replay/restart/sanitized-error route matrix, unknown-ID cases, two-concurrent-session status/cancel isolation, and middleware separation tests.
 
-- [ ] **C10.2 — Add provider to Admin REST account/model/usage projections**
+- [x] **C10.2 — Add provider to Admin REST account/model/usage projections**
   - Chunk owner: **Chunk 10**.
   - Depends on: C10.1.
   - Files: admin views/handlers/tests.
@@ -479,7 +485,7 @@
   - Observable DoD: no credential/raw token/identity/OAuth payload appears; Devin never exposes xAI billing fields as if valid; wrong-provider operations fail safely.
   - Verification: JSON allowlist and secret-scan tests.
 
-- [ ] **C10.3 — Add provider selection and lifecycle to Web UI**
+- [x] **C10.3 — Add provider selection and lifecycle to Web UI**
   - Chunk owner: **Chunk 10**.
   - Depends on: C10.2.
   - Files: `internal/web/services.go`, `oauth.go`, pages, `internal/app/web.go`, account/oauth/model/usage templates, tests.
@@ -487,7 +493,7 @@
   - Observable DoD: xAI wording appears only in xAI flow; Devin callback completion can be observed after restart; rendered HTML includes provider but no state/verifier/code/token/user JWT/raw billing.
   - Verification: page/service/app tests, CSRF/trusted-proxy regressions, and rendered-output secret scan.
 
-- [ ] **C10.4 — Add provider-aware CLI login**
+- [x] **C10.4 — Add provider-aware CLI login**
   - Chunk owner: **Chunk 10**.
   - Depends on: C10.3.
   - Files: `cmd/byos/main.go`, CLI tests/docs seam.
@@ -495,7 +501,7 @@
   - Observable DoD: provider parsing/default is deterministic; Devin CLI completes through the same encrypted lifecycle, survives process-visible status transitions, times out/cancels cleanly, and does not create a second callback implementation.
   - Verification: CLI argument tests and local callback-listener success, bind-failure, timeout, cancellation, and secret-output fixtures.
 
-- [ ] **C10.5 — Review and commit Chunk 10**
+- [x] **C10.5 — Review and commit Chunk 10**
   - Chunk owner: **Chunk 10**.
   - Depends on: C10.4.
   - Observable DoD: Admin REST, Web, and CLI can start/observe the correct provider flow and display safe provider-aware state; Devin status/cancel are OAuth-session-ID keyed and isolated; only the exact callback route is unauthenticated by admin session.

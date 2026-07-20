@@ -109,8 +109,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /admin/accounts/{id}/delete", h.page(http.HandlerFunc(h.handleAccountDelete)))
 	mux.Handle("GET /admin/oauth/new", h.page(http.HandlerFunc(h.handleOAuthPage)))
 	mux.Handle("POST /admin/oauth/new", h.page(http.HandlerFunc(h.handleOAuthStart)))
-	mux.Handle("GET /admin/oauth/status/{state}", h.page(http.HandlerFunc(h.handleOAuthStatus)))
-	mux.Handle("POST /admin/oauth/{state}/cancel", h.page(http.HandlerFunc(h.handleOAuthCancel)))
+	mux.Handle("GET /admin/oauth/{provider}/authorize/{session}", h.page(http.HandlerFunc(h.handleOAuthAuthorize)))
+	mux.Handle("GET /admin/oauth/{provider}/status/{session}", h.page(http.HandlerFunc(h.handleOAuthStatus)))
+	mux.Handle("POST /admin/oauth/{provider}/cancel/{session}", h.page(http.HandlerFunc(h.handleOAuthCancel)))
 	mux.Handle("GET /admin/usage", h.page(http.HandlerFunc(h.handleUsage)))
 	mux.Handle("POST /admin/usage/{id}/refresh", h.page(http.HandlerFunc(h.handleUsageRefresh)))
 	mux.Handle("GET /admin/models", h.page(http.HandlerFunc(h.handleModels)))
@@ -223,8 +224,10 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"accountEnabledURL": func(id string) string { return resourceURL("/admin/accounts/", id, "/enabled") },
 		"accountRefreshURL": func(id string) string { return resourceURL("/admin/accounts/", id, "/refresh") },
 		"accountDeleteURL":  func(id string) string { return resourceURL("/admin/accounts/", id, "/delete") },
-		"oauthStatusURL":    func(state string) string { return resourceURL("/admin/oauth/status/", state, "") },
-		"oauthCancelURL":    func(state string) string { return resourceURL("/admin/oauth/", state, "/cancel") },
+		"oauthNewURL":       oauthNewURL,
+		"oauthAuthorizeURL": oauthAuthorizeURL,
+		"oauthStatusURL":    oauthStatusURL,
+		"oauthCancelURL":    oauthCancelURL,
 		"usageRefreshURL":   func(id string) string { return resourceURL("/admin/usage/", id, "/refresh") },
 		"modelRefreshURL":   func(id string) string { return resourceURL("/admin/models/", id, "/refresh") },
 		"keyRevokeURL":      func(id string) string { return resourceURL("/admin/api-keys/", id, "/revoke") },
@@ -238,6 +241,9 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"searchSupport":     searchSupport,
 		"join":              func(values []string) string { return strings.Join(values, ", ") },
 		"displayLabel":      displayLabel,
+		"providerLabel":     providerLabel,
+		"providerSelected":  func(value Provider, expected string) bool { return string(value) == expected },
+		"isXAI":             func(value Provider) bool { return value == ProviderXAI },
 	}
 	pages := []string{"login", "dashboard", "accounts", "account", "oauth", "usage", "models", "api_keys", "error"}
 	parsed := make(map[string]*template.Template, len(pages))
@@ -256,6 +262,47 @@ func resourceURL(prefix, id, suffix string) string {
 }
 
 func accountURL(id string) string { return resourceURL("/admin/accounts/", id, "") }
+
+func oauthNewURL(provider Provider) string {
+	if !provider.Valid() {
+		return "/admin/oauth/new"
+	}
+	return "/admin/oauth/new?provider=" + url.QueryEscape(string(provider))
+}
+
+func oauthAuthorizeURL(provider Provider, sessionID string) string {
+	return resourceURL("/admin/oauth/"+url.PathEscape(string(provider))+"/authorize/", sessionID, "")
+}
+
+func oauthStatusURL(ref string) string {
+	provider, sessionID, ok := oauthManagementParts(ref)
+	if !ok {
+		return ""
+	}
+	return resourceURL("/admin/oauth/"+url.PathEscape(string(provider))+"/status/", sessionID, "")
+}
+
+func oauthCancelURL(ref string) string {
+	provider, sessionID, ok := oauthManagementParts(ref)
+	if !ok {
+		return ""
+	}
+	return resourceURL("/admin/oauth/"+url.PathEscape(string(provider))+"/cancel/", sessionID, "")
+}
+
+func oauthManagementRef(provider Provider, sessionID string) string {
+	return string(provider) + "/" + sessionID
+}
+
+func oauthManagementParts(ref string) (Provider, string, bool) {
+	providerValue, sessionID, found := strings.Cut(ref, "/")
+	provider := Provider(providerValue)
+	if !found || !provider.Valid() {
+		return "", "", false
+	}
+	validated, ok := resourceID(sessionID)
+	return provider, validated, ok
+}
 
 func formatTime(value any) string {
 	var instant time.Time
@@ -320,6 +367,17 @@ func displayLabel(label string) string {
 		return "Unlabeled account"
 	}
 	return label
+}
+
+func providerLabel(value Provider) string {
+	switch value {
+	case ProviderXAI:
+		return "xAI"
+	case ProviderDevin:
+		return "Devin"
+	default:
+		return "Unknown provider"
+	}
 }
 
 type errorPage struct {

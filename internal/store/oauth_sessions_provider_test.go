@@ -205,13 +205,13 @@ func TestOAuthCallbackConsumeIsAtomicSecretDisposingAndRecoverable(t *testing.T)
 	if consumed.Status != "consumed" || consumed.Pending != nil {
 		t.Fatalf("persisted consumed session = %+v", consumed)
 	}
-	if _, err := repo.Consume(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, now); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := repo.Consume(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("consume replay = %v", err)
 	}
-	if err := repo.Cancel(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, "cancel", now); !errors.Is(err, sql.ErrNoRows) {
+	if err := repo.Cancel(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, "cancel", now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("consumed cancellation = %v", err)
 	}
-	if err := repo.Expire(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, "expired", now); !errors.Is(err, sql.ErrNoRows) {
+	if err := repo.Expire(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, "expired", now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("consumed expiry = %v", err)
 	}
 	_, stored, _ := oauthStoredRow(t, db.DB, state)
@@ -248,7 +248,7 @@ func TestOAuthCallbackConsumeIsAtomicSecretDisposingAndRecoverable(t *testing.T)
 		func() error { return repo.Cancel(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, "again", now) },
 		func() error { return repo.Expire(ctx, provider.Devin, OAuthFlowCallbackPKCE, state, "again", now) },
 	} {
-		if err := mutate(); !errors.Is(err, sql.ErrNoRows) {
+		if err := mutate(); !errors.Is(err, ErrOAuthTerminalConflict) {
 			t.Fatalf("terminal mutation = %v", err)
 		}
 	}

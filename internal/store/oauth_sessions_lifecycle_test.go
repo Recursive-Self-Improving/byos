@@ -40,7 +40,7 @@ func TestOAuthAuthorizationAndCompletionSurviveRestart(t *testing.T) {
 	if err := repository.Create(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Complete(ctx, provider.XAI, OAuthFlowDevice, session.State, "acct_too_early", now); !errors.Is(err, sql.ErrNoRows) {
+	if err := repository.Complete(ctx, provider.XAI, OAuthFlowDevice, session.State, "acct_too_early", now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("pending session completed without authorization: %v", err)
 	}
 	authorization := OAuthAuthorization{
@@ -85,7 +85,7 @@ func TestOAuthAuthorizationAndCompletionSurviveRestart(t *testing.T) {
 	if completed.Status != "completed" || completed.AccountID != "acct_persisted" || completed.Authorization != nil || completed.DeviceCode != "" {
 		t.Fatalf("completed session = %+v", completed)
 	}
-	if err := repository.Complete(ctx, provider.XAI, OAuthFlowDevice, session.State, "acct_other", now.Add(2*time.Second)); !errors.Is(err, sql.ErrNoRows) {
+	if err := repository.Complete(ctx, provider.XAI, OAuthFlowDevice, session.State, "acct_other", now.Add(2*time.Second)); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("terminal completion mutated: %v", err)
 	}
 	if values, err := repository.ListResumable(ctx, provider.XAI, OAuthFlowDevice, now); err != nil || len(values) != 0 {

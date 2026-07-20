@@ -152,10 +152,17 @@ func TestEncryptedOAuthUsageAndResponseRepositories(t *testing.T) {
 	if err := oauth.Complete(ctx, provider.XAI, OAuthFlowDevice, session.State, account.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := oauth.GetPending(ctx, provider.XAI, OAuthFlowDevice, session.State, now); err != sql.ErrNoRows {
-		t.Fatalf("terminal session resumed: %v", err)
+	_, pendingErr := oauth.GetPending(ctx, provider.XAI, OAuthFlowDevice, session.State, now)
+	if !errors.Is(pendingErr, sql.ErrNoRows) {
+		t.Fatalf("terminal session resumed: %v", pendingErr)
 	}
-	if err := oauth.Fail(ctx, provider.XAI, OAuthFlowDevice, session.State, "", now); err != sql.ErrNoRows {
+	// A terminal session must not be classifiable as a cancellable conflict:
+	// GetPending returns a plain not-found for non-pending rows, while
+	// mutation methods (Fail below) distinguish ErrOAuthTerminalConflict.
+	if errors.Is(pendingErr, ErrOAuthTerminalConflict) {
+		t.Fatalf("GetPending must not surface terminal conflict: %v", pendingErr)
+	}
+	if err := oauth.Fail(ctx, provider.XAI, OAuthFlowDevice, session.State, "", now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("terminal session mutated: %v", err)
 	}
 	usage := NewUsageRepository(store.DB, keys)

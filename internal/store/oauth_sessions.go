@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	appcrypto "byos/internal/crypto"
@@ -14,6 +15,19 @@ import (
 )
 
 const oauthAuthorizationRetention = 24 * time.Hour
+
+// ErrOAuthTerminalConflict is returned by oauth session mutations when the
+// session row exists and is provider+flow-bound to the caller, but its
+// current status is not in the allowed source set for the mutation. It
+// distinguishes a known-but-terminal session (caller should map to 409
+// Conflict) from a genuinely unknown or wrong-provider/wrong-flow session,
+// which continues to surface as a plain sql.ErrNoRows (404 Not Found). It
+// wraps sql.ErrNoRows so existing errors.Is(err, sql.ErrNoRows) callers
+// continue to treat terminal sessions as non-mutable, while new callers can
+// check errors.Is(err, ErrOAuthTerminalConflict) first to classify 409. No
+// mutation is performed in either case, so terminal immutability is
+// preserved.
+var ErrOAuthTerminalConflict = fmt.Errorf("oauth session is in a non-cancellable terminal state: %w", sql.ErrNoRows)
 
 type OAuthFlowType string
 
@@ -90,6 +104,12 @@ func decodeOAuthPendingPayload(raw json.RawMessage) (*OAuthPendingPayload, error
 type OAuthSession struct {
 	Provider provider.Kind
 	FlowType OAuthFlowType
+
+	// SessionID is a random opaque public handle, persisted plaintext and
+	// indexed, distinct from raw state. It is provider+flow-bound and lets
+	// admin/CLI/Web status and cancel lookups avoid touching raw state.
+	// Legacy rows backfilled by migration 006 always carry a value.
+	SessionID string
 
 	// State is encrypted only for the legacy device flow. Callback state is
 	// represented durably only by StateHash and is never recoverable as plaintext.
@@ -285,6 +305,13 @@ func (r *OAuthSessionRepository) Create(ctx context.Context, value OAuthSession)
 	if err := validateOAuthKey(value.Provider, value.FlowType, value.State); err != nil {
 		return err
 	}
+	if value.SessionID == "" {
+		generated, err := provider.NewSessionID()
+		if err != nil {
+			return fmt.Errorf("oauth session id: %w", err)
+		}
+		value.SessionID = string(generated)
+	}
 	if value.Status != "" && value.Status != "pending" {
 		return errors.New("new oauth session must be pending")
 	}
@@ -313,8 +340,24 @@ func (r *OAuthSessionRepository) Create(ctx context.Context, value OAuthSession)
 		return err
 	}
 	hash := stateHash(value.State)
-	_, err = r.db.ExecContext(ctx, `INSERT INTO oauth_sessions(state_hash,provider,flow_type,payload_encrypted,status,poll_interval_seconds,expires_at,created_at,updated_at,sanitized_error) VALUES(?,?,?,?,?,?,?,?,?,?)`, hash[:], value.Provider, value.FlowType, encrypted, value.Status, int64(value.PollInterval/time.Second), value.ExpiresAt.Unix(), now.Unix(), now.Unix(), nullString(value.SanitizedError))
+	_, err = r.db.ExecContext(ctx, `INSERT INTO oauth_sessions(state_hash,provider,flow_type,session_id,payload_encrypted,status,poll_interval_seconds,expires_at,created_at,updated_at,sanitized_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, hash[:], value.Provider, value.FlowType, value.SessionID, encrypted, value.Status, int64(value.PollInterval/time.Second), value.ExpiresAt.Unix(), now.Unix(), now.Unix(), nullString(value.SanitizedError))
 	return err
+}
+
+// GetBySessionID looks up an oauth session by its public opaque SessionID. It
+// is provider+flow-bound so a SessionID from one provider or flow can never
+// resolve a session belonging to another. For callback-PKCE the raw state is
+// not stored in the encrypted payload, so the returned State is naturally
+// empty; callers must use SessionID-based mutation methods (CancelBySessionID,
+// ExpireBySessionID) rather than recovering raw state.
+func (r *OAuthSessionRepository) GetBySessionID(ctx context.Context, kind provider.Kind, flow OAuthFlowType, sessionID string) (OAuthSession, error) {
+	if !kind.Valid() || !flow.Valid() {
+		return OAuthSession{}, errors.New("valid oauth provider and flow type are required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return OAuthSession{}, errors.New("oauth session id is required")
+	}
+	return r.scan(r.db.QueryRowContext(ctx, oauthSessionSelect+` WHERE session_id=? AND provider=? AND flow_type=?`, sessionID, kind, flow))
 }
 
 func (r *OAuthSessionRepository) Get(ctx context.Context, kind provider.Kind, flow OAuthFlowType, state string) (OAuthSession, error) {
@@ -530,6 +573,68 @@ func (r *OAuthSessionRepository) Cancel(ctx context.Context, kind provider.Kind,
 	return r.terminal(ctx, kind, flow, state, "cancelled", sanitized, now, []string{"pending", "authorized"})
 }
 
+// CancelBySessionID cancels a pending or authorized session by its public
+// SessionID without recovering or exposing raw state. It is provider+flow-bound.
+func (r *OAuthSessionRepository) CancelBySessionID(ctx context.Context, kind provider.Kind, flow OAuthFlowType, sessionID, sanitized string, now time.Time) error {
+	return r.mutateBySessionID(ctx, kind, flow, sessionID, now, []string{"pending", "authorized"}, func(value *OAuthSession) error {
+		value.Status = "cancelled"
+		value.SanitizedError = sanitized
+		value.AccountID = ""
+		disposeOAuthSecrets(value)
+		return nil
+	})
+}
+
+// ExpireBySessionID expires an elapsed pending session by its public SessionID
+// without recovering or exposing raw state. It is provider+flow-bound.
+func (r *OAuthSessionRepository) ExpireBySessionID(ctx context.Context, kind provider.Kind, flow OAuthFlowType, sessionID, sanitized string, now time.Time) error {
+	return r.mutateBySessionID(ctx, kind, flow, sessionID, now, []string{"pending", "authorized"}, func(value *OAuthSession) error {
+		value.Status = "expired"
+		value.SanitizedError = sanitized
+		value.AccountID = ""
+		disposeOAuthSecrets(value)
+		return nil
+	})
+}
+
+func (r *OAuthSessionRepository) mutateBySessionID(ctx context.Context, kind provider.Kind, flow OAuthFlowType, sessionID string, now time.Time, from []string, mutate func(*OAuthSession) error) error {
+	if !kind.Valid() || !flow.Valid() {
+		return errors.New("valid oauth provider and flow type are required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("oauth session id is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	value, err := r.scan(tx.QueryRowContext(ctx, oauthSessionSelect+` WHERE session_id=? AND provider=? AND flow_type=?`, sessionID, kind, flow))
+	if err != nil {
+		return err
+	}
+	if !containsOAuthStatus(from, value.Status) {
+		return ErrOAuthTerminalConflict
+	}
+	originalStatus := value.Status
+	if err := mutate(&value); err != nil {
+		return err
+	}
+	value.UpdatedAt = now.UTC()
+	encrypted, err := r.encrypt(value)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE oauth_sessions SET payload_encrypted=?,status=?,updated_at=?,sanitized_error=? WHERE session_id=? AND provider=? AND flow_type=? AND status=?`, encrypted, value.Status, value.UpdatedAt.Unix(), nullString(value.SanitizedError), sessionID, kind, flow, originalStatus)
+	if err != nil {
+		return err
+	}
+	if err := requireAffected(result); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // FailConsumedByHash is the restart-recovery path for callback attempts whose
 // raw state was intentionally never persisted. It cannot exchange or consume.
 func (r *OAuthSessionRepository) FailConsumedByHash(ctx context.Context, kind provider.Kind, flow OAuthFlowType, hash []byte, sanitized string, now time.Time) error {
@@ -580,19 +685,20 @@ type oauthSessionScanner interface {
 	Scan(...any) error
 }
 
-const oauthSessionSelect = `SELECT state_hash,provider,flow_type,payload_encrypted,status,poll_interval_seconds,expires_at,created_at,updated_at,sanitized_error FROM oauth_sessions`
+const oauthSessionSelect = `SELECT state_hash,provider,flow_type,session_id,payload_encrypted,status,poll_interval_seconds,expires_at,created_at,updated_at,sanitized_error FROM oauth_sessions`
 
 func (r *OAuthSessionRepository) scan(row oauthSessionScanner) (OAuthSession, error) {
 	var value OAuthSession
 	var encrypted, status string
 	var pollInterval, expiresAt, createdAt, updatedAt int64
-	var sanitized sql.NullString
-	if err := row.Scan(&value.StateHash, &value.Provider, &value.FlowType, &encrypted, &status, &pollInterval, &expiresAt, &createdAt, &updatedAt, &sanitized); err != nil {
+	var sanitized, sessionID sql.NullString
+	if err := row.Scan(&value.StateHash, &value.Provider, &value.FlowType, &sessionID, &encrypted, &status, &pollInterval, &expiresAt, &createdAt, &updatedAt, &sanitized); err != nil {
 		return OAuthSession{}, err
 	}
 	if !value.Provider.Valid() || !value.FlowType.Valid() {
 		return OAuthSession{}, errors.New("invalid persisted oauth provider or flow type")
 	}
+	value.SessionID = sessionID.String
 	plain, err := appcrypto.Decrypt(r.key, encrypted)
 	if err != nil {
 		return OAuthSession{}, err
@@ -673,7 +779,7 @@ func (r *OAuthSessionRepository) mutate(ctx context.Context, kind provider.Kind,
 		return err
 	}
 	if !containsOAuthStatus(from, value.Status) {
-		return sql.ErrNoRows
+		return ErrOAuthTerminalConflict
 	}
 	originalStatus := value.Status
 	if err := mutate(&value); err != nil {

@@ -19,10 +19,10 @@ func TestAuthenticatedNavigationAndPageInventory(t *testing.T) {
 	}{
 		{path: "/admin/", want: "Ready for requests"},
 		{path: "/admin/accounts", want: "Primary account"},
-		{path: "/admin/accounts/acct_test", want: "Discovered models"},
-		{path: "/admin/oauth/new", want: "Start a secure device flow"},
-		{path: "/admin/usage", want: "Monthly and weekly provider limits"},
-		{path: "/admin/models", want: "Downstream exposure"},
+		{path: "/admin/accounts/acct_test", want: "Provider models"},
+		{path: "/admin/oauth/new", want: "Start a secure provider flow"},
+		{path: "/admin/usage", want: "Local proxy counters"},
+		{path: "/admin/models", want: "Static ownership"},
 		{path: "/admin/api-keys", want: "Existing keys"},
 	}
 	for _, page := range pages {
@@ -66,7 +66,7 @@ func TestUsagePageDisclosesSnapshotAuthority(t *testing.T) {
 	fixture := newWebFixture(t)
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "not official API-key billing") || !strings.Contains(body, "never influence routing") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "never influence routing") || !strings.Contains(body, "Local proxy counters") {
 		t.Fatalf("usage disclosure missing: %d %s", response.StatusCode, body)
 	}
 }
@@ -74,14 +74,14 @@ func TestUsagePageDisclosesSnapshotAuthority(t *testing.T) {
 func TestOAuthFlowStartsResumesPollsCancelsAndRedirects(t *testing.T) {
 	fixture := newWebFixture(t)
 	browser, token := loginBrowser(t, fixture)
-	response, _ := browser.request(t, http.MethodPost, "/admin/oauth/new", url.Values{"gorilla.csrf.Token": {token}})
-	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/oauth/new?state=state_test" || fixture.oauth.startCalls != 1 {
-		t.Fatalf("OAuth start = %d %q calls=%d", response.StatusCode, response.Header.Get("Location"), fixture.oauth.startCalls)
+	response, _ := browser.request(t, http.MethodPost, "/admin/oauth/new", url.Values{"provider": {"xai"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/oauth/new?provider=xai&session_id=state_test" || fixture.oauth.startCalls != 1 || fixture.oauth.startProviders[0] != ProviderXAI {
+		t.Fatalf("OAuth start = %d %q calls=%d providers=%v", response.StatusCode, response.Header.Get("Location"), fixture.oauth.startCalls, fixture.oauth.startProviders)
 	}
 
 	for range 2 {
-		response, body := browser.request(t, http.MethodGet, "/admin/oauth/new?state=state_test", nil)
-		if response.StatusCode != http.StatusOK || !strings.Contains(body, "ABCD-EFGH") || !strings.Contains(body, `data-status-url="/admin/oauth/status/state_test"`) {
+		response, body := browser.request(t, http.MethodGet, "/admin/oauth/new?provider=xai&session_id=state_test", nil)
+		if response.StatusCode != http.StatusOK || !strings.Contains(body, "ABCD-EFGH") || !strings.Contains(body, `data-status-url="/admin/oauth/xai/status/state_test"`) {
 			t.Fatalf("resumed OAuth page = %d body=%s", response.StatusCode, body)
 		}
 	}
@@ -89,7 +89,7 @@ func TestOAuthFlowStartsResumesPollsCancelsAndRedirects(t *testing.T) {
 		t.Fatalf("refresh restarted flow: starts=%d gets=%d", fixture.oauth.startCalls, len(fixture.oauth.getCalls))
 	}
 
-	response, body := browser.request(t, http.MethodGet, "/admin/oauth/status/state_test", nil)
+	response, body := browser.request(t, http.MethodGet, "/admin/oauth/xai/status/state_test", nil)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("pending OAuth status = %d", response.StatusCode)
 	}
@@ -106,11 +106,11 @@ func TestOAuthFlowStartsResumesPollsCancelsAndRedirects(t *testing.T) {
 		}
 	}
 
-	completed := fixture.oauth.flows["state_test"]
+	completed := fixture.oauth.flows["xai/state_test"]
 	completed.Status = "completed"
 	completed.AccountID = "acct_test"
-	fixture.oauth.flows["state_test"] = completed
-	response, body = browser.request(t, http.MethodGet, "/admin/oauth/status/state_test", nil)
+	fixture.oauth.flows["xai/state_test"] = completed
+	response, body = browser.request(t, http.MethodGet, "/admin/oauth/xai/status/state_test", nil)
 	var terminal map[string]any
 	if err := json.Unmarshal([]byte(body), &terminal); err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestOAuthFlowStartsResumesPollsCancelsAndRedirects(t *testing.T) {
 	if terminal["status"] != "completed" || terminal["account_url"] != "/admin/accounts/acct_test" {
 		t.Fatalf("completed OAuth payload = %#v", terminal)
 	}
-	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/new?state=state_test", nil)
+	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=xai&session_id=state_test", nil)
 	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/accounts/acct_test" {
 		t.Fatalf("completed OAuth page = %d %q", response.StatusCode, response.Header.Get("Location"))
 	}
@@ -126,10 +126,142 @@ func TestOAuthFlowStartsResumesPollsCancelsAndRedirects(t *testing.T) {
 	pendingFlow := completed
 	pendingFlow.Status = "pending"
 	pendingFlow.AccountID = ""
-	fixture.oauth.flows["state_test"] = pendingFlow
-	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/state_test/cancel", url.Values{"gorilla.csrf.Token": {token}})
-	if response.StatusCode != http.StatusSeeOther || len(fixture.oauth.cancelled) != 1 || fixture.oauth.cancelled[0] != "state_test" {
+	fixture.oauth.flows["xai/state_test"] = pendingFlow
+	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/xai/cancel/state_test", url.Values{"gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || len(fixture.oauth.cancelled) != 1 || fixture.oauth.cancelled[0] != (oauthServiceCall{Provider: ProviderXAI, SessionID: "state_test"}) {
 		t.Fatalf("OAuth cancel = %d cancelled=%v", response.StatusCode, fixture.oauth.cancelled)
+	}
+}
+
+func TestOAuthProviderSelectionAndDevinLifecycle(t *testing.T) {
+	fixture := newWebFixture(t)
+	browser, token := loginBrowser(t, fixture)
+
+	response, body := browser.request(t, http.MethodGet, "/admin/oauth/new?provider=devin", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `value="devin" selected`) || !strings.Contains(body, "Devin browser callback") {
+		t.Fatalf("Devin selector page = %d body=%s", response.StatusCode, body)
+	}
+	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=unknown", nil)
+	if response.StatusCode != http.StatusBadRequest || fixture.oauth.startCalls != 0 {
+		t.Fatalf("unknown provider = %d starts=%d", response.StatusCode, fixture.oauth.startCalls)
+	}
+
+	const authorizationURL = "https://preview.devin.ai/oauth/authorize?state=raw-state-secret&code_challenge=verifier-canary&token=token-canary&identity=user-jwt-canary"
+	fixture.oauth.startFlow = OAuthFlow{SessionID: "devin_session", Status: "pending", AuthorizationURL: authorizationURL, ExpiresAt: fixture.clock.Now().Add(5 * time.Minute), PollAfter: 2 * time.Second}
+	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/new", url.Values{"provider": {"devin"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/oauth/new?provider=devin&session_id=devin_session" || len(fixture.oauth.startProviders) != 1 || fixture.oauth.startProviders[0] != ProviderDevin {
+		t.Fatalf("Devin start = %d location=%q providers=%v", response.StatusCode, response.Header.Get("Location"), fixture.oauth.startProviders)
+	}
+
+	response, body = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=devin&session_id=devin_session", nil)
+	for _, required := range []string{"Approve the connection with Devin", "Open Devin authorization", `data-oauth-flow`, `data-status-url="/admin/oauth/devin/status/devin_session"`, `action="/admin/oauth/devin/cancel/devin_session"`} {
+		if response.StatusCode != http.StatusOK || !strings.Contains(body, required) {
+			t.Fatalf("Devin flow missing %q: status=%d body=%s", required, response.StatusCode, body)
+		}
+	}
+	for _, forbidden := range []string{"raw-state-secret", "verifier-canary", "token-canary", "user-jwt-canary", "Device user code", "xAI verification", "ABCD-EFGH"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("Devin flow exposed or reused %q: %s", forbidden, body)
+		}
+	}
+
+	response, body = browser.request(t, http.MethodGet, "/admin/oauth/devin/authorize/devin_session", nil)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != authorizationURL || body != "" || response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("Devin authorize = %d location=%q cache=%q body=%q", response.StatusCode, response.Header.Get("Location"), response.Header.Get("Cache-Control"), body)
+	}
+
+	flow := fixture.oauth.flows["devin/devin_session"]
+	flow.Status = "consumed"
+	flow.AuthorizationURL = ""
+	fixture.oauth.flows["devin/devin_session"] = flow
+	response, body = browser.request(t, http.MethodGet, "/admin/oauth/devin/status/devin_session", nil)
+	var pending oauthStatusResponse
+	if err := json.Unmarshal([]byte(body), &pending); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || pending.Provider != ProviderDevin || pending.Status != "pending" || strings.Contains(body, "raw-state-secret") {
+		t.Fatalf("consumed Devin status = %d %#v body=%s", response.StatusCode, pending, body)
+	}
+	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/xai/status/devin_session", nil)
+	if response.StatusCode != http.StatusNotFound || fixture.oauth.getCalls[len(fixture.oauth.getCalls)-1] != (oauthServiceCall{Provider: ProviderXAI, SessionID: "devin_session"}) {
+		t.Fatalf("wrong-provider status = %d calls=%v", response.StatusCode, fixture.oauth.getCalls)
+	}
+	expired := flow
+	expired.Status = "expired"
+	expired.SanitizedMessage = "Devin authorization expired. Start a new connection."
+	fixture.oauth.flows["devin/devin_session"] = expired
+	response, body = browser.request(t, http.MethodGet, "/admin/oauth/devin/status/devin_session", nil)
+	var expiredStatus oauthStatusResponse
+	if err := json.Unmarshal([]byte(body), &expiredStatus); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || expiredStatus.Status != "failed" || strings.Contains(strings.ToLower(body), "device code") || !strings.Contains(body, "Devin authorization expired") {
+		t.Fatalf("expired Devin status = %d %#v body=%s", response.StatusCode, expiredStatus, body)
+	}
+	fixture.oauth.flows["devin/devin_session"] = flow
+	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/devin/cancel/devin_session", url.Values{"gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/oauth/new?provider=devin&notice=oauth-cancelled" || fixture.oauth.cancelled[len(fixture.oauth.cancelled)-1] != (oauthServiceCall{Provider: ProviderDevin, SessionID: "devin_session"}) {
+		t.Fatalf("Devin cancel = %d location=%q calls=%v", response.StatusCode, response.Header.Get("Location"), fixture.oauth.cancelled)
+	}
+
+	flow.Status = "completed"
+	flow.AccountID = "acct_test"
+	fixture.oauth.flows["devin/devin_session"] = flow
+	response, body = browser.request(t, http.MethodGet, "/admin/oauth/devin/status/devin_session", nil)
+	var completed oauthStatusResponse
+	if err := json.Unmarshal([]byte(body), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || completed.Status != "completed" || completed.AccountURL != "/admin/accounts/acct_test" {
+		t.Fatalf("completed Devin status = %d %#v", response.StatusCode, completed)
+	}
+	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=devin&session_id=devin_session", nil)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/accounts/acct_test" {
+		t.Fatalf("completed Devin page = %d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+}
+
+func TestProviderCapabilityPresentationAndUnavailableActions(t *testing.T) {
+	fixture := newWebFixture(t)
+	fetched := fixture.clock.Now().Add(-time.Minute)
+	fixture.accounts.summaries = append(fixture.accounts.summaries, AccountSummary{Provider: ProviderDevin, ID: "acct_devin", Label: "Devin account", Status: "relogin_required", StatusLabel: "Reconnect required", NeedsRelogin: true, CanRelogin: true, ModelCount: 1})
+	fixture.models.values = append(fixture.models.values, ModelSupport{Provider: ProviderDevin, OwnedBy: "devin", AccountID: "acct_devin", AccountLabel: "Devin account", Name: "kimi-k2-7", UpstreamName: "kimi-k2-7", Supported: true, DiscoveryAvailable: false, Allowlisted: true})
+	fixture.usage.values = append(fixture.usage.values, AccountUsage{Provider: ProviderDevin, AccountID: "acct_devin", AccountLabel: "Devin account", QuotaAvailable: false, Monthly: UsagePeriod{Used: 987654, Unit: "raw-billing-canary"}, Local: LocalUsage{Requests: 7, InputTokens: 11, OutputTokens: 13}, FetchedAt: &fetched})
+	browser, token := loginBrowser(t, fixture)
+	fixture.accounts.detail = AccountDetail{AccountSummary: AccountSummary{Provider: ProviderDevin, ID: "acct_devin", Label: "Devin account", Status: "relogin_required", StatusLabel: "Reconnect required", NeedsRelogin: true, CanRelogin: true}, Models: []AccountModel{{Provider: ProviderDevin, Name: "kimi-k2-7", UpstreamName: "kimi-k2-7", OwnedBy: "devin", Supported: true, DiscoveryAvailable: false}}}
+	response, body := browser.request(t, http.MethodGet, "/admin/accounts/acct_devin", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Start a new Devin connection") || !strings.Contains(body, "In-place credential refresh is unavailable for Devin") || strings.Contains(body, `action="/admin/accounts/acct_devin/refresh"`) {
+		t.Fatalf("Devin account detail = %d body=%s", response.StatusCode, body)
+	}
+
+	response, body = browser.request(t, http.MethodGet, "/admin/accounts", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Devin account") || !strings.Contains(body, "Reconnect required") || !strings.Contains(body, "/admin/oauth/new?provider=devin") {
+		t.Fatalf("provider account list = %d body=%s", response.StatusCode, body)
+	}
+	response, body = browser.request(t, http.MethodGet, "/admin/models", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "kimi-k2-7") || !strings.Contains(body, "Static support") || strings.Contains(body, `action="/admin/models/acct_devin/refresh"`) {
+		t.Fatalf("provider model page = %d body=%s", response.StatusCode, body)
+	}
+	response, body = browser.request(t, http.MethodGet, "/admin/usage", nil)
+	for _, required := range []string{"Devin account", "Upstream quota", "Unavailable", ">7<", ">11<", ">13<"} {
+		if response.StatusCode != http.StatusOK || !strings.Contains(body, required) {
+			t.Fatalf("Devin usage missing %q: status=%d body=%s", required, response.StatusCode, body)
+		}
+	}
+	for _, forbidden := range []string{"987654", "raw-billing-canary", `/admin/usage/acct_devin/refresh`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("Devin usage fabricated %q: %s", forbidden, body)
+		}
+	}
+
+	fixture.accounts.refreshErr = ErrActionUnavailable
+	fixture.usage.refreshErr = ErrActionUnavailable
+	fixture.models.refreshErr = ErrActionUnavailable
+	for _, path := range []string{"/admin/accounts/acct_test/refresh", "/admin/usage/acct_test/refresh", "/admin/models/acct_test/refresh"} {
+		response, body = browser.request(t, http.MethodPost, path, url.Values{"gorilla.csrf.Token": {token}})
+		if response.StatusCode != http.StatusConflict || !strings.Contains(body, "unavailable for the account provider") {
+			t.Fatalf("unavailable POST %s = %d body=%s", path, response.StatusCode, body)
+		}
 	}
 }
 
@@ -228,13 +360,13 @@ func TestSafeRenderingEscapesServiceValuesAndRejectsUnsafeOAuthLinks(t *testing.
 	fixture.accounts.summaries[0].SanitizedError = `<b>bad</b>`
 	fixture.apiKeys.keys[0].Label = malicious
 	fixture.models.values[0].DisplayName = malicious
-	flow := fixture.oauth.flows["state_test"]
-	flow.VerificationURL = "javascript:alert(1)"
+	flow := fixture.oauth.flows["xai/state_test"]
+	flow.AuthorizationURL = "javascript:alert(1)"
 	flow.SanitizedMessage = `<svg onload=alert(1)>`
-	fixture.oauth.flows["state_test"] = flow
+	fixture.oauth.flows["xai/state_test"] = flow
 	browser, _ := loginBrowser(t, fixture)
 
-	for _, path := range []string{"/admin/accounts", "/admin/accounts/acct_test", "/admin/models", "/admin/api-keys", "/admin/oauth/new?state=state_test"} {
+	for _, path := range []string{"/admin/accounts", "/admin/accounts/acct_test", "/admin/models", "/admin/api-keys", "/admin/oauth/new?provider=xai&session_id=state_test"} {
 		response, body := browser.request(t, http.MethodGet, path, nil)
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s status = %d", path, response.StatusCode)
@@ -242,16 +374,16 @@ func TestSafeRenderingEscapesServiceValuesAndRejectsUnsafeOAuthLinks(t *testing.
 		if strings.Contains(body, malicious) || strings.Contains(body, `<img src=x`) || strings.Contains(body, `<svg onload`) {
 			t.Fatalf("GET %s rendered executable service value", path)
 		}
-		if path != "/admin/oauth/new?state=state_test" && !strings.Contains(body, "&lt;") {
+		if !strings.Contains(path, "/admin/oauth/new") && !strings.Contains(body, "&lt;") {
 			t.Fatalf("GET %s did not contain escaped malicious value", path)
 		}
 		if strings.Contains(strings.ToLower(body), "localstorage") || strings.Contains(body, fixture.apiKeys.created.Plaintext) {
 			t.Fatalf("GET %s leaked browser storage or key plaintext", path)
 		}
 	}
-	_, oauthBody := browser.request(t, http.MethodGet, "/admin/oauth/new?state=state_test", nil)
-	if strings.Contains(oauthBody, "javascript:alert") || !strings.Contains(oauthBody, "verification link was invalid") {
-		t.Fatal("unsafe OAuth verification URL was rendered")
+	_, oauthBody := browser.request(t, http.MethodGet, "/admin/oauth/new?provider=xai&session_id=state_test", nil)
+	if strings.Contains(oauthBody, "javascript:alert") || !strings.Contains(oauthBody, "verification link is unavailable") {
+		t.Fatal("unsafe OAuth authorization URL was rendered")
 	}
 	fixture.accounts.getErr = errors.New("upstream access_token=secret-canary")
 	response, errorBody := browser.request(t, http.MethodGet, "/admin/accounts/acct_test", nil)
@@ -265,8 +397,8 @@ func TestUsageKeepsWeeklyPercentagesPerAccount(t *testing.T) {
 	firstPercent := 60.0
 	secondPercent := 70.0
 	fixture.usage.values = []AccountUsage{
-		{AccountID: "acct_one", AccountLabel: "First", Weekly: UsagePeriod{Used: 60, Percent: &firstPercent, Unit: "percent"}},
-		{AccountID: "acct_two", AccountLabel: "Second", Weekly: UsagePeriod{Used: 70, Percent: &secondPercent, Unit: "percent"}},
+		{Provider: ProviderXAI, AccountID: "acct_one", AccountLabel: "First", QuotaAvailable: true, Weekly: UsagePeriod{Used: 60, Percent: &firstPercent, Unit: "percent"}},
+		{Provider: ProviderXAI, AccountID: "acct_two", AccountLabel: "Second", QuotaAvailable: true, Weekly: UsagePeriod{Used: 70, Percent: &secondPercent, Unit: "percent"}},
 	}
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)
@@ -280,11 +412,11 @@ func TestUsageKeepsWeeklyPercentagesPerAccount(t *testing.T) {
 
 func TestOAuthPollingStopsAtExpiryServerSide(t *testing.T) {
 	fixture := newWebFixture(t)
-	flow := fixture.oauth.flows["state_test"]
+	flow := fixture.oauth.flows["xai/state_test"]
 	flow.ExpiresAt = fixture.clock.Now().Add(-time.Second)
-	fixture.oauth.flows["state_test"] = flow
+	fixture.oauth.flows["xai/state_test"] = flow
 	browser, _ := loginBrowser(t, fixture)
-	response, body := browser.request(t, http.MethodGet, "/admin/oauth/status/state_test", nil)
+	response, body := browser.request(t, http.MethodGet, "/admin/oauth/xai/status/state_test", nil)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("expired OAuth status = %d", response.StatusCode)
 	}

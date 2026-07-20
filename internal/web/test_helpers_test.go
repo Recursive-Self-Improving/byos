@@ -80,50 +80,62 @@ func (s *fakeAccountService) Refresh(_ context.Context, id string) error {
 	return nil
 }
 
-type fakeOAuthService struct {
-	startFlow  OAuthFlow
-	flows      map[string]OAuthFlow
-	startErr   error
-	getErr     error
-	cancelErr  error
-	startCalls int
-	getCalls   []string
-	cancelled  []string
+type oauthServiceCall struct {
+	Provider  Provider
+	SessionID string
 }
 
-func (s *fakeOAuthService) Start(context.Context) (OAuthFlow, error) {
+type fakeOAuthService struct {
+	startFlow      OAuthFlow
+	flows          map[string]OAuthFlow
+	startErr       error
+	getErr         error
+	cancelErr      error
+	startCalls     int
+	startProviders []Provider
+	getCalls       []oauthServiceCall
+	cancelled      []oauthServiceCall
+}
+
+func (s *fakeOAuthService) Start(_ context.Context, selected Provider) (OAuthFlow, error) {
 	s.startCalls++
+	s.startProviders = append(s.startProviders, selected)
 	if s.startErr != nil {
 		return OAuthFlow{}, s.startErr
 	}
+	flow := s.startFlow
+	flow.Provider = selected
+	flow.State = oauthManagementRef(selected, flow.SessionID)
 	if s.flows == nil {
 		s.flows = make(map[string]OAuthFlow)
 	}
-	s.flows[s.startFlow.State] = s.startFlow
-	return s.startFlow, nil
+	s.flows[flow.State] = flow
+	return flow, nil
 }
-func (s *fakeOAuthService) Get(_ context.Context, state string) (OAuthFlow, error) {
-	s.getCalls = append(s.getCalls, state)
+func (s *fakeOAuthService) Get(_ context.Context, selected Provider, sessionID string) (OAuthFlow, error) {
+	s.getCalls = append(s.getCalls, oauthServiceCall{Provider: selected, SessionID: sessionID})
 	if s.getErr != nil {
 		return OAuthFlow{}, s.getErr
 	}
-	flow, ok := s.flows[state]
+	flow, ok := s.flows[oauthManagementRef(selected, sessionID)]
 	if !ok {
 		return OAuthFlow{}, ErrNotFound
 	}
 	return flow, nil
 }
-func (s *fakeOAuthService) Cancel(_ context.Context, state string) error {
+func (s *fakeOAuthService) Cancel(_ context.Context, selected Provider, sessionID string) error {
 	if s.cancelErr != nil {
 		return s.cancelErr
 	}
-	s.cancelled = append(s.cancelled, state)
-	flow, ok := s.flows[state]
+	call := oauthServiceCall{Provider: selected, SessionID: sessionID}
+	s.cancelled = append(s.cancelled, call)
+	key := oauthManagementRef(selected, sessionID)
+	flow, ok := s.flows[key]
 	if !ok {
 		return ErrNotFound
 	}
 	flow.Status = "cancelled"
-	s.flows[state] = flow
+	s.flows[key] = flow
 	return nil
 }
 
@@ -234,17 +246,17 @@ func newWebFixture(t *testing.T, configure ...func(*Options)) *webFixture {
 	expires := clock.value.Add(2 * time.Hour)
 	fetched := clock.value.Add(-5 * time.Minute)
 	accounts := &fakeAccountService{
-		summaries: []AccountSummary{{ID: "acct_test", Label: "Primary account", Enabled: true, Status: "ready", ExpiresAt: &expires, ModelCount: 1, UsageFetchedAt: &fetched}},
+		summaries: []AccountSummary{{Provider: ProviderXAI, ID: "acct_test", Label: "Primary account", Enabled: true, Status: "ready", StatusLabel: "Ready", CanRefresh: true, CanRefreshModels: true, CanRefreshUsage: true, ExpiresAt: &expires, ModelCount: 1, UsageFetchedAt: &fetched}},
 		detail: AccountDetail{
-			AccountSummary: AccountSummary{ID: "acct_test", Label: "Primary account", Enabled: true, Status: "ready", ExpiresAt: &expires, ModelCount: 1, UsageFetchedAt: &fetched},
+			AccountSummary: AccountSummary{Provider: ProviderXAI, ID: "acct_test", Label: "Primary account", Enabled: true, Status: "ready", StatusLabel: "Ready", CanRefresh: true, CanRefreshModels: true, CanRefreshUsage: true, ExpiresAt: &expires, ModelCount: 1, UsageFetchedAt: &fetched},
 			LastRefreshAt:  &fetched,
-			Models:         []AccountModel{{Name: "grok-4.5", DisplayName: "Grok 4.5", Supported: true, SupportsBackendSearch: &search, ContextWindow: 131072, MaxOutputTokens: 8192, DiscoveredAt: fetched}},
+			Models:         []AccountModel{{Provider: ProviderXAI, Name: "grok-4.5", UpstreamName: "grok-4.5", OwnedBy: "xai", DisplayName: "Grok 4.5", Supported: true, CapabilityKnown: true, DiscoveryAvailable: true, SupportsBackendSearch: &search, ContextWindow: 131072, MaxOutputTokens: 8192, DiscoveredAt: fetched}},
 		},
 	}
-	oauthFlow := OAuthFlow{State: "state_test", Status: "pending", UserCode: "ABCD-EFGH", VerificationURL: "https://accounts.x.ai/device", ExpiresAt: clock.value.Add(10 * time.Minute), PollAfter: 5 * time.Second}
-	oauth := &fakeOAuthService{startFlow: oauthFlow, flows: map[string]OAuthFlow{"state_test": oauthFlow}}
-	usage := &fakeUsageService{values: []AccountUsage{{AccountID: "acct_test", AccountLabel: "Primary account", Monthly: UsagePeriod{Used: 25, Limit: &limit, Percent: &monthly, Unit: "credits"}, Weekly: UsagePeriod{Used: 40, Limit: &limit, Percent: &weekly, Unit: "credits"}, Local: LocalUsage{Requests: 10, InputTokens: 200, OutputTokens: 80}, FetchedAt: &fetched}}}
-	models := &fakeModelService{values: []ModelSupport{{AccountID: "acct_test", AccountLabel: "Primary account", Name: "grok-4.5", DisplayName: "Grok 4.5", Supported: true, SupportsBackendSearch: &search, Allowlisted: true, ContextWindow: 131072, MaxOutputTokens: 8192, DiscoveredAt: fetched}}}
+	oauthFlow := OAuthFlow{Provider: ProviderXAI, SessionID: "state_test", State: "xai/state_test", Status: "pending", UserCode: "ABCD-EFGH", AuthorizationURL: "https://accounts.x.ai/device", ExpiresAt: clock.value.Add(10 * time.Minute), PollAfter: 5 * time.Second}
+	oauth := &fakeOAuthService{startFlow: oauthFlow, flows: map[string]OAuthFlow{"xai/state_test": oauthFlow}}
+	usage := &fakeUsageService{values: []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_test", AccountLabel: "Primary account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Used: 25, Limit: &limit, Percent: &monthly, Unit: "credits"}, Weekly: UsagePeriod{Used: 40, Limit: &limit, Percent: &weekly, Unit: "credits"}, Local: LocalUsage{Requests: 10, InputTokens: 200, OutputTokens: 80}, FetchedAt: &fetched}}}
+	models := &fakeModelService{values: []ModelSupport{{Provider: ProviderXAI, OwnedBy: "xai", AccountID: "acct_test", AccountLabel: "Primary account", Name: "grok-4.5", UpstreamName: "grok-4.5", DisplayName: "Grok 4.5", Supported: true, CapabilityKnown: true, DiscoveryAvailable: true, SupportsBackendSearch: &search, Allowlisted: true, CanRefresh: true, ContextWindow: 131072, MaxOutputTokens: 8192, DiscoveredAt: fetched}}}
 	apiKeys := &fakeAPIKeyService{keys: []APIKey{{ID: "key_test", Prefix: "byos_example", Label: "Test client", CreatedAt: fetched}}, created: CreatedAPIKey{Key: APIKey{ID: "key_new", Prefix: "byos_new", Label: "New key", CreatedAt: clock.value}, Plaintext: "byos_one_time_plaintext"}}
 	options := Options{
 		AdminPassword: "correct horse battery staple",

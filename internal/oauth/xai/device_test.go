@@ -127,8 +127,15 @@ func TestPollTerminalAndCancellationPaths(t *testing.T) {
 			if !errors.As(err, &oauthErr) || oauthErr.Code != test.code {
 				t.Fatalf("error=%v", err)
 			}
-			if _, err := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now()); err != sql.ErrNoRows {
-				t.Fatalf("terminal resumed: %v", err)
+			_, pendingErr := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now())
+			if !errors.Is(pendingErr, sql.ErrNoRows) {
+				t.Fatalf("terminal resumed: %v", pendingErr)
+			}
+			// GetPending returns a plain not-found for non-pending rows;
+			// it must not surface the cancellable terminal-conflict sentinel
+			// (that is reserved for mutation methods like Cancel/Fail).
+			if errors.Is(pendingErr, store.ErrOAuthTerminalConflict) {
+				t.Fatalf("GetPending must not surface terminal conflict: %v", pendingErr)
 			}
 		})
 	}

@@ -17,11 +17,13 @@ import (
 type lifecycleService interface {
 	Start(context.Context) (DeviceAuthorization, error)
 	Get(context.Context, string) (store.OAuthSession, error)
+	GetBySessionID(context.Context, string) (store.OAuthSession, error)
 	ListResumable(context.Context) ([]store.OAuthSession, error)
 	Poll(context.Context, string) (TokenResponse, error)
 	Complete(context.Context, string, string) error
 	Fail(context.Context, string, string) error
 	Cancel(context.Context, string) error
+	CancelBySessionID(context.Context, string, string) error
 	Stop(string)
 }
 
@@ -55,14 +57,14 @@ func (l *ProviderLifecycle) Start(ctx context.Context) (provider.Authorization, 
 	if err != nil {
 		return provider.Authorization{}, err
 	}
-	return authorizationProjection(flow.State, flow.UserCode, flow.VerificationURI, flow.VerificationURIComplete, flow.ExpiresAt, flow.PollInterval), nil
+	return authorizationProjection(flow.SessionID, flow.UserCode, flow.VerificationURI, flow.VerificationURIComplete, flow.ExpiresAt, flow.PollInterval), nil
 }
 
 func (l *ProviderLifecycle) Status(ctx context.Context, ref provider.AuthorizationRef) (provider.AuthorizationSession, error) {
-	if err := requireXAIRef(ref); err != nil {
+	if err := requireXAIManagementRef(ref); err != nil {
 		return provider.AuthorizationSession{}, err
 	}
-	session, err := l.service.Get(ctx, ref.State)
+	session, err := l.service.GetBySessionID(ctx, string(ref.SessionID))
 	if err != nil {
 		return provider.AuthorizationSession{}, err
 	}
@@ -70,14 +72,15 @@ func (l *ProviderLifecycle) Status(ctx context.Context, ref provider.Authorizati
 }
 
 func (l *ProviderLifecycle) Complete(ctx context.Context, ref provider.AuthorizationRef, completion provider.AuthorizationCompletion) (provider.AccountResult, error) {
-	if err := requireXAIRef(ref); err != nil {
+	if err := requireXAIManagementRef(ref); err != nil {
 		return provider.AccountResult{}, err
 	}
 	if completion.Code != "" {
 		return provider.AccountResult{}, errors.New("xAI authorization does not accept a callback code")
 	}
-	result := l.completions.DoChan(ref.State, func() (any, error) {
-		return l.complete(ctx, ref.State)
+	key := "session:" + string(ref.SessionID)
+	result := l.completions.DoChan(key, func() (any, error) {
+		return l.complete(ctx, ref.SessionID)
 	})
 	select {
 	case <-ctx.Done():
@@ -90,11 +93,12 @@ func (l *ProviderLifecycle) Complete(ctx context.Context, ref provider.Authoriza
 	}
 }
 
-func (l *ProviderLifecycle) complete(ctx context.Context, state string) (provider.AccountResult, error) {
-	session, err := l.service.Get(ctx, state)
+func (l *ProviderLifecycle) complete(ctx context.Context, sessionID provider.SessionID) (provider.AccountResult, error) {
+	session, err := l.service.GetBySessionID(ctx, string(sessionID))
 	if err != nil {
 		return provider.AccountResult{}, err
 	}
+	state := session.State
 	if session.Status == string(provider.AuthorizationCompleted) {
 		if strings.TrimSpace(session.AccountID) == "" {
 			return provider.AccountResult{}, errors.New("completed xAI authorization is missing its account")
@@ -146,10 +150,16 @@ func (l *ProviderLifecycle) complete(ctx context.Context, state string) (provide
 }
 
 func (l *ProviderLifecycle) Cancel(ctx context.Context, ref provider.AuthorizationRef) error {
-	if err := requireXAIRef(ref); err != nil {
+	if err := requireXAIManagementRef(ref); err != nil {
 		return err
 	}
-	return l.service.Cancel(ctx, ref.State)
+	if err := l.service.CancelBySessionID(ctx, string(ref.SessionID), "Device authorization was cancelled."); err != nil {
+		if errors.Is(err, store.ErrOAuthTerminalConflict) {
+			return provider.ErrOAuthConflict
+		}
+		return err
+	}
+	return nil
 }
 
 func (l *ProviderLifecycle) Resume(ctx context.Context) ([]provider.AuthorizationSession, error) {
@@ -168,20 +178,27 @@ func (l *ProviderLifecycle) Resume(ctx context.Context) ([]provider.Authorizatio
 	return result, nil
 }
 
-func requireXAIRef(ref provider.AuthorizationRef) error {
+// requireXAIManagementRef validates a provider-bound ref for all xAI lifecycle
+// operations (Status/Cancel/Complete). Every operation resolves by SessionID;
+// raw state is never accepted from a caller and is resolved internally only.
+func requireXAIManagementRef(ref provider.AuthorizationRef) error {
 	if ref.Provider != provider.XAI {
 		return fmt.Errorf("xAI authorization reference: %w", provider.ErrProviderMismatch)
+	}
+	if strings.TrimSpace(string(ref.SessionID)) == "" {
+		return errors.New("xAI authorization session id is required")
 	}
 	return nil
 }
 
-func authorizationProjection(state, userCode, verificationURL, completeURL string, expiresAt time.Time, interval time.Duration) provider.Authorization {
+func authorizationProjection(sessionID provider.SessionID, userCode, verificationURL, completeURL string, expiresAt time.Time, interval time.Duration) provider.Authorization {
 	preferredURL := strings.TrimSpace(completeURL)
 	if preferredURL == "" {
 		preferredURL = strings.TrimSpace(verificationURL)
 	}
 	return provider.Authorization{
-		Ref:                     provider.AuthorizationRef{Provider: provider.XAI, State: state},
+		Ref:                     provider.AuthorizationRef{Provider: provider.XAI, SessionID: sessionID},
+		SessionID:               sessionID,
 		UserCode:                userCode,
 		VerificationURL:         preferredURL,
 		VerificationURLComplete: strings.TrimSpace(completeURL),
@@ -200,7 +217,7 @@ func sessionProjection(session store.OAuthSession) (provider.AuthorizationSessio
 		return provider.AuthorizationSession{}, errors.New("xAI authorization has an invalid status")
 	}
 	return provider.AuthorizationSession{
-		Authorization: authorizationProjection(session.State, session.UserCode, session.VerificationURI, session.VerificationURIComplete, session.ExpiresAt, session.PollInterval),
+		Authorization: authorizationProjection(provider.SessionID(session.SessionID), session.UserCode, session.VerificationURI, session.VerificationURIComplete, session.ExpiresAt, session.PollInterval),
 		Status:        status, AccountID: session.AccountID, SanitizedMessage: session.SanitizedError,
 	}, nil
 }

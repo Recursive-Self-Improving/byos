@@ -87,14 +87,14 @@ func TestCompleteLoginRejectsUnverifiedIdentityBeforePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompleteLogin(ctx, provider.XAI, flow.Ref.State, provider.AuthorizationCompletion{}); err == nil {
+	if _, err := service.CompleteLogin(ctx, provider.XAI, flow.Ref, provider.AuthorizationCompletion{}); err == nil {
 		t.Fatal("wrong-audience identity persisted")
 	}
 	accounts, err := accountsRepo.List(ctx)
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("accounts=%+v err=%v", accounts, err)
 	}
-	session, err := oauthService.Get(ctx, flow.Ref.State)
+	session, err := oauthService.GetBySessionID(ctx, string(flow.Ref.SessionID))
 	if err != nil || session.Status != "failed" || session.SanitizedError != "The identity token could not be verified." {
 		t.Fatalf("session=%+v err=%v", session, err)
 	}

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,7 @@ type Runtime struct {
 	Server                             *http.Server
 	Store                              *store.SQLite
 	Accounts                           *accounts.Service
+	CallbackHandler                    http.Handler
 	capabilityRegistry                 *provider.RuntimeCapabilityRegistry
 	credentialUsabilityRegistry        *provider.RuntimeCredentialUsabilityRegistry
 	modelWorker                        *models.Worker
@@ -427,8 +429,9 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		return executor.Stream(ctx, request)
 	}}, CountTokens: http.HandlerFunc(apianthropic.CountTokensHandler)}
 	webOAuth := newWebOAuthAdapter(ctx, accountService)
-	handlers.Admin = admin.NewHandler(admin.Services{Accounts: accountService, Completion: webOAuth, Usage: usageService, UsageRefresh: usageWorker, Models: catalog, ModelsRefresh: modelWorker, Cooldowns: cooldownRepo, APIKeys: apiKeyService})
-	webAccounts := &webAccountAdapter{accounts: accountService, models: catalog, usage: usageService, cooldowns: cooldownRepo, now: func() time.Time { return time.Now().UTC() }}
+	handlers.Admin = admin.NewHandler(admin.Services{Accounts: accountService, Completion: webOAuth, Usage: usageService, UsageRefresh: usageWorker, Models: catalog, ModelsRefresh: modelWorker, Cooldowns: cooldownRepo, APIKeys: apiKeyService, Capabilities: capabilityRegistry})
+	handlers.Callback = admin.CallbackHandler(accountService)
+	webAccounts := &webAccountAdapter{accounts: accountService, models: catalog, static: staticCatalog, registry: capabilityRegistry, usage: usageService, cooldowns: cooldownRepo, now: func() time.Time { return time.Now().UTC() }}
 	trustedProxies, err := requestsource.ParseTrustedProxies(cfg.Server.TrustedProxies)
 	if err != nil {
 		return fail(err)
@@ -446,8 +449,8 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		Services: web.Services{
 			Accounts:  webAccounts,
 			OAuth:     webOAuth,
-			Usage:     &webUsageAdapter{accounts: accountService, usage: usageService, refresher: usageRefresher},
-			Models:    &webModelAdapter{accounts: accountService, models: catalog, refresher: modelRefresher},
+			Usage:     &webUsageAdapter{accounts: accountService, usage: usageService, registry: capabilityRegistry, refresher: usageRefresher},
+			Models:    &webModelAdapter{accounts: accountService, models: catalog, static: staticCatalog, registry: capabilityRegistry, refresher: modelRefresher},
 			APIKeys:   &webAPIKeyAdapter{service: apiKeyService},
 			Readiness: publicModels,
 		},
@@ -456,9 +459,15 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		return fail(err)
 	}
 	handlers.Web = webHandler
-	root := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: apiKeyService, AdminAPIKey: secrets.AdminAPIKey(), AdminAttempts: adminAuthGuard, AdminSources: trustedProxies, MaxBodyBytes: cfg.Limits.MaxBodyBytes, Logger: logger})
+	callbackPath := strings.TrimSpace(cfg.Devin.OAuth.CallbackPath)
+	if callbackPath != "" {
+		if err := validateCallbackPath(callbackPath); err != nil {
+			return fail(err)
+		}
+	}
+	root := api.NewServer(api.ServerConfig{Handlers: handlers, ClientKeys: apiKeyService, AdminAPIKey: secrets.AdminAPIKey(), AdminAttempts: adminAuthGuard, AdminSources: trustedProxies, CallbackPath: callbackPath, MaxBodyBytes: cfg.Limits.MaxBodyBytes, Logger: logger})
 	trackedRoot, activity := api.NewActivityTracker(root)
-	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, capabilityRegistry: capabilityRegistry, credentialUsabilityRegistry: credentialUsabilityRegistry, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, capabilityRegistry, credentialUsabilityRegistry, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, adminThrottleRepo, cooldownRepo, 30*24*time.Hour, auththrottle.DefaultPolicy().SourceRetention), webOAuth: webOAuth, activity: activity, shutdownTimeout: 15 * time.Second, forceDrainTimeout: 5 * time.Second}
+	runtime := &Runtime{Config: cfg, Store: database, Accounts: accountService, CallbackHandler: admin.CallbackHandler(accountService), capabilityRegistry: capabilityRegistry, credentialUsabilityRegistry: credentialUsabilityRegistry, modelWorker: modelWorker, usageWorker: usageWorker, refreshWorker: accounts.NewRefreshWorker(accountRepo, capabilityRegistry, credentialUsabilityRegistry, modelRefresher, usageRefresher), cleanupWorker: NewCleanupWorker(responseRepo, oauthRepo, adminSessionRepo, usageRepo, adminThrottleRepo, cooldownRepo, 30*24*time.Hour, auththrottle.DefaultPolicy().SourceRetention), webOAuth: webOAuth, activity: activity, shutdownTimeout: 15 * time.Second, forceDrainTimeout: 5 * time.Second}
 	runtime.Server = &http.Server{Addr: cfg.Server.Listen, Handler: trackedRoot, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	return runtime, nil
 }
@@ -528,4 +537,77 @@ func ignoreCancellation(err error) error {
 		return nil
 	}
 	return err
+}
+
+// validateCallbackPath rejects a configured Devin callback path that would
+// collide with or shadow the health, readiness, public API, or Web subtrees,
+// or that contains Go 1.22 ServeMux metacharacters ({, }, $) which would
+// broaden the unauthenticated exception into a wildcard. The exact-callback
+// dispatcher matches a literal GET+path, so the callback may live under
+// /admin/api/v1/ as long as it does not equal a registered admin route. The
+// /admin/ Web subtree is reserved separately so the callback cannot shadow it.
+func validateCallbackPath(callbackPath string) error {
+	if callbackPath == "" {
+		return nil
+	}
+	if !strings.HasPrefix(callbackPath, "/") {
+		return fmt.Errorf("Devin callback path must start with '/': %q", callbackPath)
+	}
+	if strings.HasSuffix(callbackPath, "/") {
+		return fmt.Errorf("Devin callback path must not end with '/' (would match a subtree): %q", callbackPath)
+	}
+	if strings.ContainsAny(callbackPath, "{}$") {
+		return fmt.Errorf("Devin callback path must not contain ServeMux metacharacters: %q", callbackPath)
+	}
+	// Reserved exact routes and subtrees the callback must not equal or shadow.
+	// /admin/ (the Web subtree) is reserved as an exact match, but
+	// /admin/api/v1/ is allowed because the callback is an exact-match
+	// exception within the admin API subtree, secured by AdminAuth for every
+	// non-callback path. The outer dispatcher matches a literal GET+path, so a
+	// callback under /admin/api/v1/ cannot shadow the Web subtree or bypass
+	// admin auth for any neighboring route.
+	for _, reserved := range []string{"/healthz", "/readyz", "/v1/models", "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens", "/admin/"} {
+		if callbackPath == reserved {
+			return fmt.Errorf("Devin callback path %q collides with a reserved route", callbackPath)
+		}
+	}
+	for _, subtree := range []string{"/healthz/", "/readyz/", "/v1/"} {
+		if callbackPath == subtree || strings.HasPrefix(callbackPath, subtree) {
+			return fmt.Errorf("Devin callback path %q collides with a reserved subtree", callbackPath)
+		}
+	}
+	// Reject collisions with registered admin API routes. Fixed routes are
+	// compared exactly. Dynamic routes (containing {param}) are converted to
+	// a prefix so a concrete callback path that would match the pattern — e.g.
+	// /admin/api/v1/oauth/devin/status/abc hijacking the status route — is
+	// rejected, not just the literal pattern string.
+	adminRoutes := []string{
+		"/admin/api/v1/oauth/xai/device",
+		"/admin/api/v1/oauth/xai/device/{state}",
+		"/admin/api/v1/oauth/devin/start",
+		"/admin/api/v1/oauth/devin/status/{session}",
+		"/admin/api/v1/oauth/devin/cancel/{session}",
+		"/admin/api/v1/accounts",
+		"/admin/api/v1/accounts/{id}",
+		"/admin/api/v1/accounts/{id}/refresh",
+		"/admin/api/v1/accounts/{id}/usage",
+		"/admin/api/v1/accounts/{id}/usage/refresh",
+		"/admin/api/v1/models",
+		"/admin/api/v1/models/refresh",
+		"/admin/api/v1/usage",
+		"/admin/api/v1/api-keys",
+		"/admin/api/v1/api-keys/{id}",
+	}
+	for _, route := range adminRoutes {
+		if callbackPath == route {
+			return fmt.Errorf("Devin callback path %q collides with an admin route", callbackPath)
+		}
+		if idx := strings.Index(route, "{"); idx > 0 {
+			prefix := route[:idx]
+			if strings.HasPrefix(callbackPath, prefix) {
+				return fmt.Errorf("Devin callback path %q collides with a dynamic admin route %q", callbackPath, route)
+			}
+		}
+	}
+	return nil
 }

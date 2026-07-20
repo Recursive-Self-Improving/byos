@@ -179,148 +179,6 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "dashboard", status, data)
 }
 
-type accountsPage struct {
-	layoutData
-	Accounts []AccountSummary
-}
-
-func (h *Handler) handleAccounts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAuthentication(w, r); !ok {
-		return
-	}
-	accounts, err := h.services.Accounts.List(r.Context())
-	data := accountsPage{layoutData: h.layout(r, "Accounts", "accounts"), Accounts: accounts}
-	status := http.StatusOK
-	if err != nil {
-		data.LoadError = "Accounts could not be loaded."
-		status = http.StatusServiceUnavailable
-	}
-	h.render(w, "accounts", status, data)
-}
-
-type accountPage struct {
-	layoutData
-	Account     AccountDetail
-	ActionError string
-}
-
-func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAuthentication(w, r); !ok {
-		return
-	}
-	id, ok := resourceID(r.PathValue("id"))
-	if !ok {
-		h.renderError(w, r, http.StatusNotFound, "Account not found.")
-		return
-	}
-	h.renderAccount(w, r, id, http.StatusOK, "")
-}
-
-func (h *Handler) renderAccount(w http.ResponseWriter, r *http.Request, id string, status int, actionError string) {
-	account, err := h.services.Accounts.Get(r.Context(), id)
-	if err != nil {
-		if isNotFound(err) {
-			h.renderError(w, r, http.StatusNotFound, "Account not found.")
-		} else {
-			h.renderError(w, r, http.StatusServiceUnavailable, "The account could not be loaded.")
-		}
-		return
-	}
-	data := accountPage{layoutData: h.layout(r, displayLabel(account.Label), "accounts"), Account: account, ActionError: actionError}
-	h.render(w, "account", status, data)
-}
-
-func (h *Handler) handleAccountLabel(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAuthentication(w, r); !ok {
-		return
-	}
-	id, ok := resourceID(r.PathValue("id"))
-	if !ok {
-		h.renderError(w, r, http.StatusNotFound, "Account not found.")
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		h.renderAccount(w, r, id, http.StatusBadRequest, "The label form could not be read.")
-		return
-	}
-	label := strings.TrimSpace(r.PostForm.Get("label"))
-	if label == "" || utf8.RuneCountInString(label) > 100 {
-		h.renderAccount(w, r, id, http.StatusBadRequest, "Enter a label between 1 and 100 characters.")
-		return
-	}
-	if err := h.services.Accounts.Update(r.Context(), id, AccountUpdate{Label: &label}); err != nil {
-		h.renderMutationError(w, r, err, "Account settings could not be updated.")
-		return
-	}
-	h.redirect(w, r, accountURL(id)+"?notice=account-updated")
-}
-
-func (h *Handler) handleAccountEnabled(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAuthentication(w, r); !ok {
-		return
-	}
-	id, ok := resourceID(r.PathValue("id"))
-	if !ok {
-		h.renderError(w, r, http.StatusNotFound, "Account not found.")
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		h.renderAccount(w, r, id, http.StatusBadRequest, "The account form could not be read.")
-		return
-	}
-	var enabled bool
-	switch r.PostForm.Get("enabled") {
-	case "true":
-		enabled = true
-	case "false":
-		enabled = false
-	default:
-		h.renderAccount(w, r, id, http.StatusBadRequest, "Choose whether the account is enabled.")
-		return
-	}
-	if err := h.services.Accounts.Update(r.Context(), id, AccountUpdate{Enabled: &enabled}); err != nil {
-		h.renderMutationError(w, r, err, "Account settings could not be updated.")
-		return
-	}
-	h.redirect(w, r, accountURL(id)+"?notice=account-updated")
-}
-
-func (h *Handler) handleAccountRefresh(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAuthentication(w, r); !ok {
-		return
-	}
-	id, ok := resourceID(r.PathValue("id"))
-	if !ok {
-		h.renderError(w, r, http.StatusNotFound, "Account not found.")
-		return
-	}
-	if err := h.services.Accounts.Refresh(r.Context(), id); err != nil {
-		h.renderMutationError(w, r, err, "The account refresh could not be started.")
-		return
-	}
-	h.redirect(w, r, accountURL(id)+"?notice=account-refreshed")
-}
-
-func (h *Handler) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireAuthentication(w, r); !ok {
-		return
-	}
-	id, ok := resourceID(r.PathValue("id"))
-	if !ok {
-		h.renderError(w, r, http.StatusNotFound, "Account not found.")
-		return
-	}
-	if err := r.ParseForm(); err != nil || r.PostForm.Get("confirm") != "delete" {
-		h.renderAccount(w, r, id, http.StatusBadRequest, "Confirm account deletion before continuing.")
-		return
-	}
-	if err := h.services.Accounts.Delete(r.Context(), id); err != nil {
-		h.renderMutationError(w, r, err, "The account could not be deleted.")
-		return
-	}
-	h.redirect(w, r, "/admin/accounts?notice=account-deleted")
-}
-
 type usagePage struct {
 	layoutData
 	Usage []AccountUsage
@@ -461,6 +319,10 @@ func (h *Handler) handleAPIKeyRevoke(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) renderMutationError(w http.ResponseWriter, r *http.Request, err error, message string) {
 	if isNotFound(err) {
 		h.renderError(w, r, http.StatusNotFound, "The requested item was not found.")
+		return
+	}
+	if errors.Is(err, ErrActionUnavailable) {
+		h.renderError(w, r, http.StatusConflict, "This action is unavailable for the account provider.")
 		return
 	}
 	h.renderError(w, r, http.StatusServiceUnavailable, message)

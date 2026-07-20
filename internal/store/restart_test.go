@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func TestOAuthPendingEnumerationAfterRestartAndTerminalImmutability(t *testing.T
 		},
 	}
 	for status, mutate := range terminalMutations {
-		if err := mutate(); err != sql.ErrNoRows {
+		if err := mutate(); !errors.Is(err, ErrOAuthTerminalConflict) {
 			t.Fatalf("terminal -> %s error = %v", status, err)
 		}
 	}
@@ -130,13 +131,13 @@ func TestOAuthConsumedCallbackFinalizesAfterRestartByHashOnly(t *testing.T) {
 	if recovered.Status != "consumed" || recovered.State != "" || recovered.Pending != nil || len(recovered.StateHash) != 32 {
 		t.Fatalf("recovered consumed callback exposed secrets = %+v", recovered)
 	}
-	if _, err := repo.Consume(ctx, provider.XAI, OAuthFlowCallbackPKCE, state, now); err != sql.ErrNoRows {
+	if _, err := repo.Consume(ctx, provider.XAI, OAuthFlowCallbackPKCE, state, now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("consumed callback replay error = %v", err)
 	}
-	if err := repo.Cancel(ctx, provider.XAI, OAuthFlowCallbackPKCE, state, "", now); err != sql.ErrNoRows {
+	if err := repo.Cancel(ctx, provider.XAI, OAuthFlowCallbackPKCE, state, "", now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("consumed callback cancel error = %v", err)
 	}
-	if err := repo.Expire(ctx, provider.XAI, OAuthFlowCallbackPKCE, state, "", now); err != sql.ErrNoRows {
+	if err := repo.Expire(ctx, provider.XAI, OAuthFlowCallbackPKCE, state, "", now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("consumed callback expire error = %v", err)
 	}
 	if err := repo.Complete(ctx, provider.XAI, OAuthFlowCallbackPKCE, state, "", now); err == nil {

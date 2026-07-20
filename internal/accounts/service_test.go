@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ type fakeLifecycle struct {
 	calls       atomic.Int32
 	completed   atomic.Bool
 	started     chan struct{}
+	startOnce   sync.Once
 	release     chan struct{}
 }
 
@@ -45,7 +47,7 @@ func (f *fakeLifecycle) Complete(ctx context.Context, _ provider.AuthorizationRe
 	}
 	f.completion = completion
 	if f.started != nil {
-		close(f.started)
+		f.startOnce.Do(func() { close(f.started) })
 	}
 	if f.release != nil {
 		select {
@@ -151,7 +153,7 @@ func accountRepository(t *testing.T) (*store.AccountRepository, func()) {
 	return store.NewAccountRepository(database.DB, keys), func() { _ = database.Close() }
 }
 
-func TestCompleteLoginSingleflightAndCompletedFastPathRunHooksOnce(t *testing.T) {
+func TestCompleteLoginConcurrentHooksOnceAndReplayReloadsRepository(t *testing.T) {
 	ctx := context.Background()
 	repo, closeRepo := accountRepository(t)
 	defer closeRepo()
@@ -164,19 +166,34 @@ func TestCompleteLoginSingleflightAndCompletedFastPathRunHooksOnce(t *testing.T)
 	capabilities, usage := &countingHook{}, &countingHook{}
 	service := NewService(repo, lifecycleRegistry(lifecycle), capabilities, usage)
 
+	// Deterministic barrier: the onFlightEntered seam fires after a caller
+	// has joined the singleflight (DoChan returned) and before it blocks on
+	// the result. Waiting for the second entry proves both callers are
+	// sharing the same in-flight completion before we unblock the lifecycle.
+	var flightsEntered atomic.Int32
+	secondEntered := make(chan struct{})
+	service.onFlightEntered = func() {
+		if flightsEntered.Add(1) == 2 {
+			close(secondEntered)
+		}
+	}
+
+	// Concurrent same-session calls share a single in-flight completion, so
+	// the lifecycle and optional hooks run exactly once.
 	results := make(chan store.Account, 2)
 	errs := make(chan error, 2)
 	go func() {
-		value, err := service.CompleteLogin(ctx, provider.XAI, "state", provider.AuthorizationCompletion{})
+		value, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{})
 		results <- value
 		errs <- err
 	}()
 	<-lifecycle.started
 	go func() {
-		value, err := service.CompleteLogin(ctx, provider.XAI, "state", provider.AuthorizationCompletion{})
+		value, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{})
 		results <- value
 		errs <- err
 	}()
+	<-secondEntered
 	close(lifecycle.release)
 	first, second := <-results, <-results
 	if err := <-errs; err != nil {
@@ -185,22 +202,41 @@ func TestCompleteLoginSingleflightAndCompletedFastPathRunHooksOnce(t *testing.T)
 	if err := <-errs; err != nil {
 		t.Fatal(err)
 	}
-	third, err := service.CompleteLogin(ctx, provider.XAI, "state", provider.AuthorizationCompletion{})
+	if first.ID != account.ID || second.ID != account.ID {
+		t.Fatalf("concurrent accounts=%q/%q want=%q", first.ID, second.ID, account.ID)
+	}
+	if lifecycle.calls.Load() != 1 || capabilities.calls.Load() != 1 || usage.calls.Load() != 1 {
+		t.Fatalf("concurrent lifecycle=%d capabilities=%d usage=%d want=1/1/1", lifecycle.calls.Load(), capabilities.calls.Load(), usage.calls.Load())
+	}
+
+	// Sequential replay is not memoized: it re-enters the lifecycle and
+	// reloads the account from the repository, returning the current row
+	// rather than a cached decrypted account.
+	third, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ID != account.ID || second.ID != account.ID || third.ID != account.ID {
-		t.Fatalf("accounts=%q/%q/%q", first.ID, second.ID, third.ID)
+	if third.ID != account.ID {
+		t.Fatalf("replay account=%q want=%q", third.ID, account.ID)
 	}
-	if lifecycle.calls.Load() != 1 || capabilities.calls.Load() != 1 || usage.calls.Load() != 1 {
-		t.Fatalf("lifecycle=%d capabilities=%d usage=%d", lifecycle.calls.Load(), capabilities.calls.Load(), usage.calls.Load())
+	if lifecycle.calls.Load() != 2 || capabilities.calls.Load() != 2 || usage.calls.Load() != 2 {
+		t.Fatalf("replay lifecycle=%d capabilities=%d usage=%d want=2/2/2", lifecycle.calls.Load(), capabilities.calls.Load(), usage.calls.Load())
+	}
+
+	// Deleted account replay is not stale: the repository lookup fails
+	// instead of returning a cached account.
+	if err := repo.Delete(ctx, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); err == nil {
+		t.Fatal("deleted account replay returned stale account")
 	}
 }
 
 func TestCompleteLoginCancellationRemainsLifecycleOwned(t *testing.T) {
 	lifecycle := &fakeLifecycle{completeErr: context.Canceled}
 	service := NewService(nil, lifecycleRegistry(lifecycle), nil, nil)
-	if _, err := service.CompleteLogin(context.Background(), provider.XAI, "state", provider.AuthorizationCompletion{}); !errors.Is(err, context.Canceled) {
+	if _, err := service.CompleteLogin(context.Background(), provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("completion error=%v", err)
 	}
 }
@@ -210,7 +246,7 @@ func TestLifecycleUnavailableFailsBeforeProviderCall(t *testing.T) {
 	if _, err := service.StartLogin(context.Background(), provider.XAI); !errors.Is(err, ErrAccountLifecycleUnavailable) {
 		t.Fatalf("start error=%v", err)
 	}
-	if _, err := service.CompleteLogin(context.Background(), provider.XAI, "state", provider.AuthorizationCompletion{}); !errors.Is(err, ErrAccountLifecycleUnavailable) {
+	if _, err := service.CompleteLogin(context.Background(), provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); !errors.Is(err, ErrAccountLifecycleUnavailable) {
 		t.Fatalf("complete error=%v", err)
 	}
 }
@@ -225,7 +261,7 @@ func TestLifecycleRejectsWrongProviderResultsBeforeRepositoryAccess(t *testing.T
 	if _, err := service.StartLogin(context.Background(), provider.XAI); err == nil {
 		t.Fatal("wrong-provider start succeeded")
 	}
-	if _, err := service.CompleteLogin(context.Background(), provider.XAI, "state", provider.AuthorizationCompletion{}); err == nil {
+	if _, err := service.CompleteLogin(context.Background(), provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); err == nil {
 		t.Fatal("wrong-provider completion reached repository")
 	}
 	if _, err := service.ResumeLogins(context.Background(), provider.XAI); err == nil {
@@ -279,7 +315,7 @@ func TestCompleteLoginSkipsAbsentOptionalHooks(t *testing.T) {
 	registry := fakeLifecycleRegistry{capabilities: provider.Capabilities{Lifecycle: lifecycle}}
 	models, usage := &countingHook{}, &countingHook{}
 	service := NewService(repo, registry, models, usage)
-	if _, err := service.CompleteLogin(ctx, provider.XAI, "state", provider.AuthorizationCompletion{}); err != nil {
+	if _, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); err != nil {
 		t.Fatal(err)
 	}
 	if models.calls.Load() != 0 || usage.calls.Load() != 0 {
@@ -299,7 +335,7 @@ func TestCompleteLoginDispatchesProviderAndCompletionInput(t *testing.T) {
 	registry := fakeLifecycleRegistry{provider: provider.Devin, policyKey: string(provider.Devin), capabilities: provider.Capabilities{Lifecycle: lifecycle}}
 	service := NewService(repo, registry, nil, nil)
 	completion := provider.AuthorizationCompletion{Code: "callback-secret"}
-	result, err := service.CompleteLogin(ctx, provider.Devin, "state", completion)
+	result, err := service.CompleteLogin(ctx, provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: "state"}, completion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,14 +367,14 @@ func TestCompleteLoginDevinReplayReachesLifecycleAndSkipsHooks(t *testing.T) {
 	service := NewService(repo, registry, models, usage)
 	completion := provider.AuthorizationCompletion{Code: "single-use-code"}
 
-	first, err := service.CompleteLogin(ctx, provider.Devin, "state", completion)
+	first, err := service.CompleteLogin(ctx, provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: "state"}, completion)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.ID != account.ID {
 		t.Fatalf("account=%q want=%q", first.ID, account.ID)
 	}
-	if _, err := service.CompleteLogin(ctx, provider.Devin, "state", completion); !errors.Is(err, replayErr) {
+	if _, err := service.CompleteLogin(ctx, provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: "state"}, completion); !errors.Is(err, replayErr) {
 		t.Fatalf("replay error=%v want=%v", err, replayErr)
 	}
 	if lifecycle.calls.Load() != 2 {

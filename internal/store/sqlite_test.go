@@ -79,7 +79,7 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err := second.DB.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 5 {
+	if count != 6 {
 		t.Fatalf("migration count = %d", count)
 	}
 }
@@ -166,7 +166,7 @@ func TestProviderIdentityMigrationFreshSchema(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 5 {
+	if count != 6 {
 		t.Fatalf("migration count = %d", count)
 	}
 	for _, column := range []struct {
@@ -247,7 +247,7 @@ func TestProviderIdentityMigrationPreservesPopulatedV4(t *testing.T) {
 		t.Fatal("foreign_key_check reported a violation")
 	}
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil || count != 5 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil || count != 6 {
 		t.Fatalf("migration count = %d, %v", count, err)
 	}
 }

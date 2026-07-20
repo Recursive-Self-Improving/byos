@@ -36,6 +36,7 @@ type Service struct {
 }
 type DeviceAuthorization struct {
 	State, UserCode, VerificationURI, VerificationURIComplete string
+	SessionID                                                 provider.SessionID
 	ExpiresAt                                                 time.Time
 	PollInterval                                              time.Duration
 }
@@ -67,6 +68,22 @@ func (s *Service) Complete(ctx context.Context, state, accountID string) error {
 
 func (s *Service) Fail(ctx context.Context, state, sanitized string) error {
 	return s.sessions.Fail(ctx, provider.XAI, store.OAuthFlowDevice, state, sanitized, s.now())
+}
+
+func (s *Service) GetBySessionID(ctx context.Context, sessionID string) (store.OAuthSession, error) {
+	return s.sessions.GetBySessionID(ctx, provider.XAI, store.OAuthFlowDevice, sessionID)
+}
+
+func (s *Service) CancelBySessionID(ctx context.Context, sessionID, sanitized string) error {
+	session, err := s.sessions.GetBySessionID(ctx, provider.XAI, store.OAuthFlowDevice, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := s.sessions.CancelBySessionID(ctx, provider.XAI, store.OAuthFlowDevice, sessionID, sanitized, s.now()); err != nil {
+		return err
+	}
+	s.Stop(session.State)
+	return nil
 }
 func (s *Service) Start(ctx context.Context) (DeviceAuthorization, error) {
 	discovery, err := s.discovery.Discover(ctx)
@@ -103,6 +120,10 @@ func (s *Service) Start(ctx context.Context) (DeviceAuthorization, error) {
 	if err != nil {
 		return DeviceAuthorization{}, err
 	}
+	sessionID, err := provider.NewSessionID()
+	if err != nil {
+		return DeviceAuthorization{}, err
+	}
 	interval := time.Duration(payload.Interval) * time.Second
 	if interval < MinimumPollInterval {
 		interval = MinimumPollInterval
@@ -113,11 +134,11 @@ func (s *Service) Start(ctx context.Context) (DeviceAuthorization, error) {
 	if expires.After(max) {
 		expires = max
 	}
-	session := store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, State: state, DeviceCode: payload.DeviceCode, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, TokenEndpoint: discovery.TokenEndpoint, PollInterval: interval, ExpiresAt: expires}
+	session := store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, State: state, SessionID: string(sessionID), DeviceCode: payload.DeviceCode, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, TokenEndpoint: discovery.TokenEndpoint, PollInterval: interval, ExpiresAt: expires}
 	if err := s.sessions.Create(ctx, session); err != nil {
 		return DeviceAuthorization{}, err
 	}
-	return DeviceAuthorization{State: state, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, ExpiresAt: expires, PollInterval: interval}, nil
+	return DeviceAuthorization{State: state, SessionID: sessionID, UserCode: payload.UserCode, VerificationURI: payload.VerificationURI, VerificationURIComplete: payload.VerificationURIComplete, ExpiresAt: expires, PollInterval: interval}, nil
 }
 func randomState() (string, error) {
 	raw := make([]byte, 32)

@@ -10,6 +10,20 @@ import (
 // resource from an operational failure without exposing storage details.
 var ErrNotFound = errors.New("web management resource not found")
 
+// ErrActionUnavailable reports a provider capability mismatch without exposing
+// runtime registry details to the Web surface.
+var ErrActionUnavailable = errors.New("web management action unavailable")
+
+// Provider is the allowlisted provider identity rendered by the Web UI.
+type Provider string
+
+const (
+	ProviderXAI   Provider = "xai"
+	ProviderDevin Provider = "devin"
+)
+
+func (p Provider) Valid() bool { return p == ProviderXAI || p == ProviderDevin }
+
 // Services are UI-facing projections over the management layer. Implementations
 // must not place OAuth credentials, identity subjects, or raw billing payloads
 // in any returned value.
@@ -40,16 +54,23 @@ type AccountUpdate struct {
 }
 
 type AccountSummary struct {
-	ID             string
-	Label          string
-	Enabled        bool
-	Status         string
-	ExpiresAt      *time.Time
-	CooldownUntil  *time.Time
-	ModelCount     int
-	UsageFetchedAt *time.Time
-	UsageStale     bool
-	SanitizedError string
+	Provider         Provider
+	ID               string
+	Label            string
+	Enabled          bool
+	Status           string
+	StatusLabel      string
+	NeedsRelogin     bool
+	CanRelogin       bool
+	CanRefresh       bool
+	CanRefreshModels bool
+	CanRefreshUsage  bool
+	ExpiresAt        *time.Time
+	CooldownUntil    *time.Time
+	ModelCount       int
+	UsageFetchedAt   *time.Time
+	UsageStale       bool
+	SanitizedError   string
 }
 
 type AccountDetail struct {
@@ -60,9 +81,14 @@ type AccountDetail struct {
 }
 
 type AccountModel struct {
+	Provider              Provider
 	Name                  string
+	UpstreamName          string
+	OwnedBy               string
 	DisplayName           string
 	Supported             bool
+	CapabilityKnown       bool
+	DiscoveryAvailable    bool
 	SupportsBackendSearch *bool
 	ContextWindow         int64
 	MaxOutputTokens       int64
@@ -79,21 +105,24 @@ type AccountCooldown struct {
 	LastErrorAt    *time.Time
 }
 
-// OAuthService owns persisted device-flow state. Start must arrange exactly one
-// polling/completion operation for a state, and Get must resume or observe that
-// same operation so browser refreshes and concurrent tabs cannot duplicate an
-// account record.
+// OAuthService owns safe management handles for persisted provider login
+// sessions. Session IDs are distinct from provider OAuth state; callers must
+// bind every lookup and cancellation to the selected provider.
 type OAuthService interface {
-	Start(context.Context) (OAuthFlow, error)
-	Get(context.Context, string) (OAuthFlow, error)
-	Cancel(context.Context, string) error
+	Start(context.Context, Provider) (OAuthFlow, error)
+	Get(context.Context, Provider, string) (OAuthFlow, error)
+	Cancel(context.Context, Provider, string) error
 }
 
 type OAuthFlow struct {
+	Provider  Provider
+	SessionID string
+	// State is a provider-qualified safe management reference retained for the
+	// frozen server-rendered template actions. It is never provider OAuth state.
 	State            string
 	Status           string
 	UserCode         string
-	VerificationURL  string
+	AuthorizationURL string
 	ExpiresAt        time.Time
 	PollAfter        time.Duration
 	AccountID        string
@@ -106,8 +135,11 @@ type UsageService interface {
 }
 
 type AccountUsage struct {
+	Provider        Provider
 	AccountID       string
 	AccountLabel    string
+	QuotaAvailable  bool
+	CanRefresh      bool
 	Monthly         UsagePeriod
 	Weekly          UsagePeriod
 	Local           LocalUsage
@@ -135,13 +167,19 @@ type ModelService interface {
 }
 
 type ModelSupport struct {
+	Provider              Provider
+	OwnedBy               string
 	AccountID             string
 	AccountLabel          string
 	Name                  string
+	UpstreamName          string
 	DisplayName           string
 	Supported             bool
+	CapabilityKnown       bool
+	DiscoveryAvailable    bool
 	SupportsBackendSearch *bool
 	Allowlisted           bool
+	CanRefresh            bool
 	ContextWindow         int64
 	MaxOutputTokens       int64
 	DiscoveredAt          time.Time

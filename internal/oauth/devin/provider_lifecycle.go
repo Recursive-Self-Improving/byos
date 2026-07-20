@@ -63,34 +63,39 @@ func (l *ProviderLifecycle) Start(ctx context.Context) (provider.Authorization, 
 	if err != nil {
 		return provider.Authorization{}, err
 	}
+	sessionID, err := provider.NewSessionID()
+	if err != nil {
+		return provider.Authorization{}, errors.New("Devin authorization could not be started")
+	}
 	expiresAt := l.now().Add(pendingSessionTTL)
 	if err := l.sessions.Create(ctx, store.OAuthSession{
-		Provider: provider.Devin, FlowType: store.OAuthFlowCallbackPKCE, State: state,
+		Provider: provider.Devin, FlowType: store.OAuthFlowCallbackPKCE, State: state, SessionID: string(sessionID),
 		Pending:   &store.OAuthPendingPayload{Verifier: verifier, RedirectURI: redirectURI, ExpiresAt: expiresAt},
 		ExpiresAt: expiresAt,
 	}); err != nil {
 		return provider.Authorization{}, errors.New("Devin authorization could not be started")
 	}
 	return provider.Authorization{
-		Ref:             provider.AuthorizationRef{Provider: provider.Devin, State: state},
+		Ref:             provider.AuthorizationRef{Provider: provider.Devin, SessionID: sessionID},
+		SessionID:       sessionID,
 		VerificationURL: verificationURL, VerificationURLComplete: verificationURL, ExpiresAt: expiresAt,
 	}, nil
 }
 
 func (l *ProviderLifecycle) Status(ctx context.Context, ref provider.AuthorizationRef) (provider.AuthorizationSession, error) {
-	if err := requireDevinRef(ref); err != nil {
+	if err := requireDevinManagementRef(ref); err != nil {
 		return provider.AuthorizationSession{}, err
 	}
 	now := l.now()
-	session, err := l.sessionWithExpiry(ctx, ref.State, now)
+	session, err := l.resolveSessionBySessionID(ctx, ref.SessionID, now)
 	if err != nil {
 		return provider.AuthorizationSession{}, sanitizedLookupError(err)
 	}
-	return devinSessionProjection(session, ref.State)
+	return devinSessionProjection(session)
 }
 
 func (l *ProviderLifecycle) Complete(ctx context.Context, ref provider.AuthorizationRef, completion provider.AuthorizationCompletion) (provider.AccountResult, error) {
-	if err := requireDevinRef(ref); err != nil {
+	if err := requireDevinCallbackRef(ref); err != nil {
 		return provider.AccountResult{}, err
 	}
 	result := l.completions.DoChan(ref.State, func() (any, error) {
@@ -158,23 +163,36 @@ func (l *ProviderLifecycle) complete(ctx context.Context, state, code string) (p
 }
 
 func (l *ProviderLifecycle) Cancel(ctx context.Context, ref provider.AuthorizationRef) error {
-	if err := requireDevinRef(ref); err != nil {
+	if err := requireDevinManagementRef(ref); err != nil {
 		return err
 	}
 	now := l.now()
-	session, err := l.sessionWithExpiry(ctx, ref.State, now)
+	session, err := l.resolveSessionBySessionID(ctx, ref.SessionID, now)
 	if err != nil {
 		return sanitizedLookupError(err)
 	}
 	if session.Status == string(provider.AuthorizationExpired) {
-		return errors.New("Devin authorization has expired")
+		// Expired is a terminal, non-cancellable state. The
+		// provider.ErrOAuthConflict sentinel's contract explicitly names
+		// expired alongside consumed/completed/failed/cancelled, so the
+		// admin layer maps this to 409 Conflict rather than 500.
+		return provider.ErrOAuthConflict
 	}
-	if err := l.sessions.Cancel(ctx, provider.Devin, store.OAuthFlowCallbackPKCE, ref.State, cancelledMessage, now); err != nil {
-		session, lookupErr := l.sessionWithExpiry(ctx, ref.State, l.now())
-		if lookupErr == nil && session.Status == string(provider.AuthorizationExpired) {
-			return errors.New("Devin authorization has expired")
+	if err := l.sessions.CancelBySessionID(ctx, provider.Devin, store.OAuthFlowCallbackPKCE, string(ref.SessionID), cancelledMessage, now); err != nil {
+		if errors.Is(err, store.ErrOAuthTerminalConflict) {
+			// The session is known and provider+flow-bound but has reached a
+			// non-cancellable terminal state (consumed, completed, failed, or
+			// already cancelled). Surface a stable conflict sentinel so the
+			// admin layer can map to 409 without re-fetching or leaking
+			// storage detail. Expired was already handled above.
+			return provider.ErrOAuthConflict
 		}
-		return sanitizedLookupError(err)
+		if !errors.Is(err, sql.ErrNoRows) {
+			return sanitizedLookupError(err)
+		}
+		// No row was mutated and it was not a classified terminal conflict:
+		// the session vanished between resolve and cancel. Treat as not-found.
+		return ErrNotFound
 	}
 	return nil
 }
@@ -199,7 +217,7 @@ func (l *ProviderLifecycle) Resume(ctx context.Context) ([]provider.Authorizatio
 			}
 			continue
 		}
-		projected, err := devinSessionProjection(session, "")
+		projected, err := devinSessionProjection(session)
 		if err != nil {
 			return nil, err
 		}
@@ -238,7 +256,23 @@ func (l *ProviderLifecycle) failDetached(state, message string, now time.Time) {
 	_ = l.sessions.Fail(ctx, provider.Devin, store.OAuthFlowCallbackPKCE, state, message, now)
 }
 
-func requireDevinRef(ref provider.AuthorizationRef) error {
+// requireDevinManagementRef validates a provider-bound ref for management
+// operations (Status/Cancel) that resolve by SessionID. Raw state is never
+// accepted from a management caller.
+func requireDevinManagementRef(ref provider.AuthorizationRef) error {
+	if ref.Provider != provider.Devin {
+		return fmt.Errorf("Devin authorization reference: %w", provider.ErrProviderMismatch)
+	}
+	if strings.TrimSpace(string(ref.SessionID)) == "" {
+		return errors.New("Devin authorization session id is required")
+	}
+	return nil
+}
+
+// requireDevinCallbackRef validates a provider-bound ref for the callback
+// completion path, which uses raw state for PKCE consume/exchange. SessionID
+// is not accepted here; completion is driven only by the OAuth callback.
+func requireDevinCallbackRef(ref provider.AuthorizationRef) error {
 	if ref.Provider != provider.Devin {
 		return fmt.Errorf("Devin authorization reference: %w", provider.ErrProviderMismatch)
 	}
@@ -248,7 +282,30 @@ func requireDevinRef(ref provider.AuthorizationRef) error {
 	return nil
 }
 
-func devinSessionProjection(session store.OAuthSession, rawState string) (provider.AuthorizationSession, error) {
+// resolveSessionBySessionID looks up a Devin session by its public SessionID,
+// expiring elapsed pending sessions in place. Raw state is never recovered or
+// returned. It is provider+flow-bound.
+func (l *ProviderLifecycle) resolveSessionBySessionID(ctx context.Context, sessionID provider.SessionID, now time.Time) (store.OAuthSession, error) {
+	if l == nil || l.sessions == nil {
+		return store.OAuthSession{}, errors.New("Devin authorization is unavailable")
+	}
+	session, err := l.sessions.GetBySessionID(ctx, provider.Devin, store.OAuthFlowCallbackPKCE, string(sessionID))
+	if err != nil {
+		return store.OAuthSession{}, err
+	}
+	if session.Status == string(provider.AuthorizationPending) && !now.Before(session.ExpiresAt) {
+		if err := l.sessions.ExpireBySessionID(ctx, provider.Devin, store.OAuthFlowCallbackPKCE, string(sessionID), expiredMessage, now); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return store.OAuthSession{}, err
+		}
+		session, err = l.sessions.GetBySessionID(ctx, provider.Devin, store.OAuthFlowCallbackPKCE, string(sessionID))
+		if err != nil {
+			return store.OAuthSession{}, err
+		}
+	}
+	return session, nil
+}
+
+func devinSessionProjection(session store.OAuthSession) (provider.AuthorizationSession, error) {
 	if session.Provider != provider.Devin || session.FlowType != store.OAuthFlowCallbackPKCE {
 		return provider.AuthorizationSession{}, fmt.Errorf("Devin authorization session: %w", provider.ErrProviderMismatch)
 	}
@@ -260,14 +317,26 @@ func devinSessionProjection(session store.OAuthSession, rawState string) (provid
 		return provider.AuthorizationSession{}, errors.New("Devin authorization has an invalid status")
 	}
 	return provider.AuthorizationSession{
-		Authorization: provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.Devin, State: rawState}, ExpiresAt: session.ExpiresAt},
+		Authorization: provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.Devin, SessionID: provider.SessionID(session.SessionID)}, SessionID: provider.SessionID(session.SessionID), ExpiresAt: session.ExpiresAt},
 		Status:        status, AccountID: session.AccountID, SanitizedMessage: session.SanitizedError,
 	}, nil
 }
 
+// ErrNotFound is the stable not-found sentinel for Devin authorization
+// lookups. It wraps sql.ErrNoRows so callers using errors.Is(err, sql.ErrNoRows)
+// continue to classify unknown/wrong-provider SessionIDs as 404, while the
+// sentinel itself carries a safe sanitized message with no storage detail.
+var ErrNotFound = fmt.Errorf("Devin authorization not found: %w", sql.ErrNoRows)
+
 func sanitizedLookupError(err error) error {
+	if err == nil {
+		return nil
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
 	}
 	return errors.New("Devin authorization was not found")
 }

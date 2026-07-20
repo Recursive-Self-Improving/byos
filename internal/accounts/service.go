@@ -24,12 +24,13 @@ type UsageRefresher interface {
 }
 
 type Service struct {
-	accounts     *store.AccountRepository
-	registry     provider.CapabilityRegistry
-	capabilities CapabilityRefresher
-	usage        UsageRefresher
-	now          func() time.Time
-	completions  singleflight.Group
+	accounts        *store.AccountRepository
+	registry        provider.CapabilityRegistry
+	capabilities    CapabilityRefresher
+	usage           UsageRefresher
+	now             func() time.Time
+	completions     singleflight.Group
+	onFlightEntered func() // test seam; nil in production
 }
 
 func NewService(accounts *store.AccountRepository, registry provider.CapabilityRegistry, capabilities CapabilityRefresher, usage UsageRefresher) *Service {
@@ -71,12 +72,12 @@ func (s *Service) StartLogin(ctx context.Context, kind provider.Kind) (provider.
 	return authorization, nil
 }
 
-func (s *Service) LoginStatus(ctx context.Context, kind provider.Kind, state string) (provider.AuthorizationSession, error) {
+func (s *Service) LoginStatus(ctx context.Context, kind provider.Kind, sessionID provider.SessionID) (provider.AuthorizationSession, error) {
 	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return provider.AuthorizationSession{}, err
 	}
-	session, err := lifecycle.Status(ctx, provider.AuthorizationRef{Provider: kind, State: state})
+	session, err := lifecycle.Status(ctx, provider.AuthorizationRef{Provider: kind, SessionID: sessionID})
 	if err != nil {
 		return provider.AuthorizationSession{}, err
 	}
@@ -86,14 +87,33 @@ func (s *Service) LoginStatus(ctx context.Context, kind provider.Kind, state str
 	return session, nil
 }
 
-func (s *Service) CompleteLogin(ctx context.Context, kind provider.Kind, state string, completion provider.AuthorizationCompletion) (store.Account, error) {
-	if kind != provider.XAI {
-		return s.completeLogin(ctx, kind, state, completion)
+// CompleteLogin completes an authorization flow. For xAI the ref carries the
+// public SessionID used by the internal polling completion path; for Devin the
+// ref carries the raw callback state. Neither path invokes management Status;
+// the lifecycle Complete implementation is the sole authority for completion
+// and already handles the already-completed case internally.
+//
+// xAI completion is SessionID-scoped and idempotent. singleflight dedupes
+// concurrent calls for the same session so the lifecycle and optional
+// model/usage hooks run exactly once per in-flight completion. Sequential
+// replays are not memoized: they re-enter the lifecycle, which reports the
+// already-completed AccountID from persisted OAuth session linkage, and the
+// account is reloaded from the repository so a deleted or rotated account is
+// never served stale. No decrypted account is retained in a long-lived map.
+func (s *Service) CompleteLogin(ctx context.Context, kind provider.Kind, ref provider.AuthorizationRef, completion provider.AuthorizationCompletion) (store.Account, error) {
+	if ref.Provider != kind {
+		return store.Account{}, fmt.Errorf("account lifecycle returned provider %q, want %q", ref.Provider, kind)
 	}
-	key := string(kind) + "\x00" + state
+	if kind != provider.XAI {
+		return s.completeLogin(ctx, kind, ref, completion)
+	}
+	key := string(kind) + "\x00" + string(ref.SessionID)
 	result := s.completions.DoChan(key, func() (any, error) {
-		return s.completeLogin(ctx, kind, state, completion)
+		return s.completeLogin(ctx, kind, ref, completion)
 	})
+	if s.onFlightEntered != nil {
+		s.onFlightEntered()
+	}
 	select {
 	case <-ctx.Done():
 		return store.Account{}, ctx.Err()
@@ -105,24 +125,10 @@ func (s *Service) CompleteLogin(ctx context.Context, kind provider.Kind, state s
 	}
 }
 
-func (s *Service) completeLogin(ctx context.Context, kind provider.Kind, state string, completion provider.AuthorizationCompletion) (store.Account, error) {
+func (s *Service) completeLogin(ctx context.Context, kind provider.Kind, ref provider.AuthorizationRef, completion provider.AuthorizationCompletion) (store.Account, error) {
 	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return store.Account{}, err
-	}
-	ref := provider.AuthorizationRef{Provider: kind, State: state}
-	session, err := lifecycle.Status(ctx, ref)
-	if err != nil {
-		return store.Account{}, err
-	}
-	if kind == provider.XAI && session.Status == provider.AuthorizationCompleted {
-		if session.Ref.Provider != kind {
-			return store.Account{}, fmt.Errorf("account lifecycle returned provider %q, want %q", session.Ref.Provider, kind)
-		}
-		if session.AccountID == "" {
-			return store.Account{}, errors.New("completed account lifecycle returned an empty account id")
-		}
-		return s.account(ctx, kind, session.AccountID)
 	}
 	result, err := lifecycle.Complete(ctx, ref, completion)
 	if err != nil {
@@ -159,12 +165,12 @@ func (s *Service) account(ctx context.Context, kind provider.Kind, accountID str
 	return account, nil
 }
 
-func (s *Service) CancelLogin(ctx context.Context, kind provider.Kind, state string) error {
+func (s *Service) CancelLogin(ctx context.Context, kind provider.Kind, sessionID provider.SessionID) error {
 	lifecycle, err := s.lifecycle(kind)
 	if err != nil {
 		return err
 	}
-	return lifecycle.Cancel(ctx, provider.AuthorizationRef{Provider: kind, State: state})
+	return lifecycle.Cancel(ctx, provider.AuthorizationRef{Provider: kind, SessionID: sessionID})
 }
 
 func (s *Service) ResumeLogins(ctx context.Context, kind provider.Kind) ([]provider.AuthorizationSession, error) {
