@@ -3,133 +3,384 @@ package accounts
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	appcrypto "byos/internal/crypto"
-	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
-type blockingIdentityVerifier struct {
-	calls   atomic.Int32
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+type fakeLifecycle struct {
+	start       provider.Authorization
+	status      provider.AuthorizationSession
+	result      provider.AccountResult
+	resume      []provider.AuthorizationSession
+	err         error
+	completeErr error
+	replayErr   error
+	completion  provider.AuthorizationCompletion
+	calls       atomic.Int32
+	completed   atomic.Bool
+	started     chan struct{}
+	startOnce   sync.Once
+	release     chan struct{}
 }
 
-func (v *blockingIdentityVerifier) Verify(context.Context, string) (oauthxai.Identity, error) {
-	v.calls.Add(1)
-	v.once.Do(func() { close(v.started) })
-	<-v.release
-	return oauthxai.Identity{Issuer: "https://auth.x.ai", Subject: "private-subject", Email: "private@example.com", Claims: map[string]any{"sub": "private-subject", "email": "private@example.com"}}, nil
+func (f *fakeLifecycle) Start(context.Context) (provider.Authorization, error) { return f.start, f.err }
+func (f *fakeLifecycle) Status(context.Context, provider.AuthorizationRef) (provider.AuthorizationSession, error) {
+	if f.completed.Load() {
+		return provider.AuthorizationSession{
+			Authorization: provider.Authorization{Ref: provider.AuthorizationRef{Provider: f.result.Provider, State: "state"}},
+			Status:        provider.AuthorizationCompleted, AccountID: f.result.AccountID,
+		}, f.err
+	}
+	return f.status, f.err
+}
+func (f *fakeLifecycle) Complete(ctx context.Context, _ provider.AuthorizationRef, completion provider.AuthorizationCompletion) (provider.AccountResult, error) {
+	f.calls.Add(1)
+	if f.completed.Load() && f.replayErr != nil {
+		return provider.AccountResult{}, f.replayErr
+	}
+	f.completion = completion
+	if f.started != nil {
+		f.startOnce.Do(func() { close(f.started) })
+	}
+	if f.release != nil {
+		select {
+		case <-ctx.Done():
+			return provider.AccountResult{}, ctx.Err()
+		case <-f.release:
+		}
+	}
+	if f.completeErr == nil {
+		f.completed.Store(true)
+	}
+	return f.result, f.completeErr
+}
+func (f *fakeLifecycle) Cancel(context.Context, provider.AuthorizationRef) error { return f.err }
+func (f *fakeLifecycle) Resume(context.Context) ([]provider.AuthorizationSession, error) {
+	return f.resume, f.err
 }
 
-func TestCompleteLoginSingleflightsAndPersistsAccountID(t *testing.T) {
+type fakeLifecycleRegistry struct {
+	provider     provider.Kind
+	policyKey    string
+	capabilities provider.Capabilities
+}
+
+func (f fakeLifecycleRegistry) Capabilities(kind provider.Kind, policyKey string) (provider.Capabilities, bool) {
+	wantProvider, wantPolicy := f.provider, f.policyKey
+	if wantProvider == "" {
+		wantProvider = provider.XAI
+	}
+	if wantPolicy == "" {
+		wantPolicy = string(wantProvider)
+	}
+	if kind != wantProvider || policyKey != wantPolicy {
+		return provider.Capabilities{}, false
+	}
+	if f.capabilities.Policy == nil && f.capabilities.Generation == nil && f.capabilities.Credentials == nil && f.capabilities.CredentialRefresher == nil && f.capabilities.Lifecycle == nil && f.capabilities.ModelDiscoverer == nil && f.capabilities.UsageFetcher == nil {
+		return provider.Capabilities{}, false
+	}
+	return f.capabilities, true
+}
+
+var _ provider.CapabilityRegistry = fakeLifecycleRegistry{}
+
+func (f fakeLifecycleRegistry) CredentialRefresher(kind provider.Kind, policyKey string) (provider.CredentialRefresher, bool) {
+	capabilities, ok := f.Capabilities(kind, policyKey)
+	return capabilities.CredentialRefresher, ok && capabilities.CredentialRefresher != nil
+}
+
+var _ provider.CredentialRefreshRegistry = fakeLifecycleRegistry{}
+
+type countingHook struct{ calls atomic.Int32 }
+
+func (h *countingHook) Refresh(context.Context, string) error {
+	h.calls.Add(1)
+	return nil
+}
+
+type countingCredentialRefresher struct {
+	needsCalls atomic.Int32
+	calls      atomic.Int32
+	needs      bool
+	err        error
+}
+
+func (r *countingCredentialRefresher) NeedsRefresh(context.Context, string, time.Time) (bool, error) {
+	r.needsCalls.Add(1)
+	return r.needs, r.err
+}
+
+func (r *countingCredentialRefresher) Refresh(context.Context, string) error {
+	r.calls.Add(1)
+	return r.err
+}
+
+type optionalDiscoverer struct{}
+
+func (optionalDiscoverer) Discover(context.Context, provider.Credential) ([]provider.DiscoveredModel, error) {
+	return nil, nil
+}
+
+type optionalUsageFetcher struct{}
+
+func (optionalUsageFetcher) FetchUsage(context.Context, provider.Credential) (provider.UsageSnapshot, error) {
+	return provider.UsageSnapshot{}, nil
+}
+
+func lifecycleRegistry(lifecycle provider.AccountLifecycle) provider.CapabilityRegistry {
+	return fakeLifecycleRegistry{capabilities: provider.Capabilities{Lifecycle: lifecycle, ModelDiscoverer: optionalDiscoverer{}, UsageFetcher: optionalUsageFetcher{}}}
+}
+
+func accountRepository(t *testing.T) (*store.AccountRepository, func()) {
+	t.Helper()
 	ctx := context.Background()
 	database, err := store.Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
 	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{23}, 32))
 	if err != nil {
+		database.Close()
 		t.Fatal(err)
 	}
-	accountRepository := store.NewAccountRepository(database.DB, keys)
-	sessionRepository := store.NewOAuthSessionRepository(database.DB, keys)
-	now := time.Now().UTC().Truncate(time.Second)
-	state := "deduplicated-completion"
-	if err := sessionRepository.Create(ctx, store.OAuthSession{State: state, DeviceCode: "device", UserCode: "CODE", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(10 * time.Minute)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := sessionRepository.Authorize(ctx, state, store.OAuthAuthorization{AccessToken: "access", RefreshToken: "refresh", IDToken: "identity", TokenType: "Bearer", ExpiresIn: 3600, AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}, now); err != nil {
-		t.Fatal(err)
-	}
-	oauthService := oauthxai.NewService(nil, nil, sessionRepository, oauthxai.Options{})
-	identity := &blockingIdentityVerifier{started: make(chan struct{}), release: make(chan struct{})}
-	service := NewService(accountRepository, oauthService, identity, nil, nil, nil)
-
-	results := make(chan store.Account, 2)
-	errors := make(chan error, 2)
-	go func() {
-		account, err := service.CompleteLogin(ctx, state)
-		results <- account
-		errors <- err
-	}()
-	<-identity.started
-	go func() {
-		account, err := service.CompleteLogin(ctx, state)
-		results <- account
-		errors <- err
-	}()
-	close(identity.release)
-
-	first := <-results
-	second := <-results
-	if err := <-errors; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-errors; err != nil {
-		t.Fatal(err)
-	}
-	if first.ID == "" || second.ID != first.ID || identity.calls.Load() != 1 {
-		t.Fatalf("accounts = %+v / %+v, identity calls = %d", first, second, identity.calls.Load())
-	}
-	terminal, err := oauthService.Session(ctx, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if terminal.Status != "completed" || terminal.AccountID != first.ID || terminal.Authorization != nil {
-		t.Fatalf("terminal session = %+v", terminal)
-	}
-
-	repeated, err := service.CompleteLogin(ctx, state)
-	if err != nil || repeated.ID != first.ID || identity.calls.Load() != 1 {
-		t.Fatalf("repeated completion = %+v, %v, identity calls = %d", repeated, err, identity.calls.Load())
-	}
-	stored, err := service.Get(ctx, first.ID)
-	if err != nil || stored.Credentials.Subject != "private-subject" {
-		t.Fatalf("stored account = %+v, %v", stored, err)
-	}
+	return store.NewAccountRepository(database.DB, keys), func() { _ = database.Close() }
 }
 
-type cancelledIdentityVerifier struct{}
-
-func (cancelledIdentityVerifier) Verify(context.Context, string) (oauthxai.Identity, error) {
-	return oauthxai.Identity{}, context.Canceled
-}
-
-func TestCompleteLoginCancellationKeepsAuthorizationResumable(t *testing.T) {
+func TestCompleteLoginConcurrentHooksOnceAndReplayReloadsRepository(t *testing.T) {
 	ctx := context.Background()
-	database, err := store.Open(ctx, t.TempDir())
+	repo, closeRepo := accountRepository(t)
+	defer closeRepo()
+	expires := time.Now().Add(time.Hour)
+	account, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Status: "ready", ExpiresAt: &expires, Credentials: store.AccountCredentials{Issuer: "https://auth.x.ai", Subject: "private-subject", AccessToken: "secret"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
-	keys, err := appcrypto.DeriveKeys(bytes.Repeat([]byte{29}, 32))
+	lifecycle := &fakeLifecycle{result: provider.AccountResult{Provider: provider.XAI, AccountID: account.ID}, started: make(chan struct{}), release: make(chan struct{})}
+	capabilities, usage := &countingHook{}, &countingHook{}
+	service := NewService(repo, lifecycleRegistry(lifecycle), capabilities, usage)
+
+	// Deterministic barrier: the onFlightEntered seam fires after a caller
+	// has joined the singleflight (DoChan returned) and before it blocks on
+	// the result. Waiting for the second entry proves both callers are
+	// sharing the same in-flight completion before we unblock the lifecycle.
+	var flightsEntered atomic.Int32
+	secondEntered := make(chan struct{})
+	service.onFlightEntered = func() {
+		if flightsEntered.Add(1) == 2 {
+			close(secondEntered)
+		}
+	}
+
+	// Concurrent same-session calls share a single in-flight completion, so
+	// the lifecycle and optional hooks run exactly once.
+	results := make(chan store.Account, 2)
+	errs := make(chan error, 2)
+	go func() {
+		value, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{})
+		results <- value
+		errs <- err
+	}()
+	<-lifecycle.started
+	go func() {
+		value, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{})
+		results <- value
+		errs <- err
+	}()
+	<-secondEntered
+	close(lifecycle.release)
+	first, second := <-results, <-results
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != account.ID || second.ID != account.ID {
+		t.Fatalf("concurrent accounts=%q/%q want=%q", first.ID, second.ID, account.ID)
+	}
+	if lifecycle.calls.Load() != 1 || capabilities.calls.Load() != 1 || usage.calls.Load() != 1 {
+		t.Fatalf("concurrent lifecycle=%d capabilities=%d usage=%d want=1/1/1", lifecycle.calls.Load(), capabilities.calls.Load(), usage.calls.Load())
+	}
+
+	// Sequential replay is not memoized: it re-enters the lifecycle and
+	// reloads the account from the repository, returning the current row
+	// rather than a cached decrypted account.
+	third, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	accounts := store.NewAccountRepository(database.DB, keys)
-	sessions := store.NewOAuthSessionRepository(database.DB, keys)
-	now := time.Now().UTC().Truncate(time.Second)
-	state := "cancelled-completion"
-	if err := sessions.Create(ctx, store.OAuthSession{State: state, DeviceCode: "device", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(time.Minute)}); err != nil {
+	if third.ID != account.ID {
+		t.Fatalf("replay account=%q want=%q", third.ID, account.ID)
+	}
+	if lifecycle.calls.Load() != 2 || capabilities.calls.Load() != 2 || usage.calls.Load() != 2 {
+		t.Fatalf("replay lifecycle=%d capabilities=%d usage=%d want=2/2/2", lifecycle.calls.Load(), capabilities.calls.Load(), usage.calls.Load())
+	}
+
+	// Deleted account replay is not stale: the repository lookup fails
+	// instead of returning a cached account.
+	if err := repo.Delete(ctx, account.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := sessions.Authorize(ctx, state, store.OAuthAuthorization{AccessToken: "access", IDToken: "identity", AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}, now); err != nil {
+	if _, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); err == nil {
+		t.Fatal("deleted account replay returned stale account")
+	}
+}
+
+func TestCompleteLoginCancellationRemainsLifecycleOwned(t *testing.T) {
+	lifecycle := &fakeLifecycle{completeErr: context.Canceled}
+	service := NewService(nil, lifecycleRegistry(lifecycle), nil, nil)
+	if _, err := service.CompleteLogin(context.Background(), provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("completion error=%v", err)
+	}
+}
+
+func TestLifecycleUnavailableFailsBeforeProviderCall(t *testing.T) {
+	service := NewService(nil, fakeLifecycleRegistry{}, nil, nil)
+	if _, err := service.StartLogin(context.Background(), provider.XAI); !errors.Is(err, ErrAccountLifecycleUnavailable) {
+		t.Fatalf("start error=%v", err)
+	}
+	if _, err := service.CompleteLogin(context.Background(), provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); !errors.Is(err, ErrAccountLifecycleUnavailable) {
+		t.Fatalf("complete error=%v", err)
+	}
+}
+
+func TestLifecycleRejectsWrongProviderResultsBeforeRepositoryAccess(t *testing.T) {
+	lifecycle := &fakeLifecycle{
+		start:  provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.Devin, State: "state"}},
+		result: provider.AccountResult{Provider: provider.Devin, AccountID: "account"},
+		resume: []provider.AuthorizationSession{{Authorization: provider.Authorization{Ref: provider.AuthorizationRef{Provider: provider.Devin, State: "state"}}}},
+	}
+	service := NewService(nil, lifecycleRegistry(lifecycle), nil, nil)
+	if _, err := service.StartLogin(context.Background(), provider.XAI); err == nil {
+		t.Fatal("wrong-provider start succeeded")
+	}
+	if _, err := service.CompleteLogin(context.Background(), provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); err == nil {
+		t.Fatal("wrong-provider completion reached repository")
+	}
+	if _, err := service.ResumeLogins(context.Background(), provider.XAI); err == nil {
+		t.Fatal("wrong-provider resume succeeded")
+	}
+}
+
+func TestRefreshDispatchesThroughExactProviderCapability(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := accountRepository(t)
+	defer closeRepo()
+	account, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Enabled: true, Credentials: store.AccountCredentials{OpaqueToken: "devin-secret"}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	oauthService := oauthxai.NewService(nil, nil, sessions, oauthxai.Options{})
-	service := NewService(accounts, oauthService, cancelledIdentityVerifier{}, nil, nil, nil)
-	if _, err := service.CompleteLogin(ctx, state); err != context.Canceled {
-		t.Fatalf("completion error = %v", err)
+	refresher := &countingCredentialRefresher{}
+	registry := fakeLifecycleRegistry{provider: provider.Devin, policyKey: string(provider.Devin), capabilities: provider.Capabilities{CredentialRefresher: refresher}}
+	service := NewService(repo, registry, nil, nil)
+	refreshed, err := service.Refresh(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	resumable, err := oauthService.Session(ctx, state)
-	if err != nil || resumable.Status != "authorized" || resumable.Authorization == nil {
-		t.Fatalf("cancelled completion session = %+v, %v", resumable, err)
+	if refreshed.ID != account.ID || refresher.calls.Load() != 1 || refresher.needsCalls.Load() != 0 {
+		t.Fatalf("account=%q refresh=%d needs=%d", refreshed.ID, refresher.calls.Load(), refresher.needsCalls.Load())
+	}
+}
+
+func TestRefreshFailsSafelyWhenCapabilityIsMissing(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := accountRepository(t)
+	defer closeRepo()
+	account, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Enabled: true, Credentials: store.AccountCredentials{OpaqueToken: "devin-secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repo, fakeLifecycleRegistry{}, nil, nil)
+	if _, err := service.Refresh(ctx, account.ID); !errors.Is(err, ErrCredentialRefreshUnavailable) {
+		t.Fatalf("refresh error=%v", err)
+	}
+}
+
+func TestCompleteLoginSkipsAbsentOptionalHooks(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := accountRepository(t)
+	defer closeRepo()
+	account, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Enabled: true, Credentials: store.AccountCredentials{Issuer: "https://auth.x.ai", Subject: "subject", AccessToken: "secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := &fakeLifecycle{result: provider.AccountResult{Provider: provider.XAI, AccountID: account.ID}}
+	registry := fakeLifecycleRegistry{capabilities: provider.Capabilities{Lifecycle: lifecycle}}
+	models, usage := &countingHook{}, &countingHook{}
+	service := NewService(repo, registry, models, usage)
+	if _, err := service.CompleteLogin(ctx, provider.XAI, provider.AuthorizationRef{Provider: provider.XAI, SessionID: "session"}, provider.AuthorizationCompletion{}); err != nil {
+		t.Fatal(err)
+	}
+	if models.calls.Load() != 0 || usage.calls.Load() != 0 {
+		t.Fatalf("optional hooks models=%d usage=%d", models.calls.Load(), usage.calls.Load())
+	}
+}
+
+func TestCompleteLoginDispatchesProviderAndCompletionInput(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := accountRepository(t)
+	defer closeRepo()
+	account, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Enabled: true, Credentials: store.AccountCredentials{OpaqueToken: "secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := &fakeLifecycle{result: provider.AccountResult{Provider: provider.Devin, AccountID: account.ID}}
+	registry := fakeLifecycleRegistry{provider: provider.Devin, policyKey: string(provider.Devin), capabilities: provider.Capabilities{Lifecycle: lifecycle}}
+	service := NewService(repo, registry, nil, nil)
+	completion := provider.AuthorizationCompletion{Code: "callback-secret"}
+	result, err := service.CompleteLogin(ctx, provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: "state"}, completion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ID != account.ID || lifecycle.completion != completion {
+		t.Fatalf("account=%q completion=%+v", result.ID, lifecycle.completion)
+	}
+}
+
+func TestCompleteLoginDevinReplayReachesLifecycleAndSkipsHooks(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := accountRepository(t)
+	defer closeRepo()
+	account, err := repo.UpsertLogin(ctx, store.Account{Provider: provider.Devin, Enabled: true, Credentials: store.AccountCredentials{OpaqueToken: "secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayErr := errors.New("authorization callback already used")
+	lifecycle := &fakeLifecycle{result: provider.AccountResult{Provider: provider.Devin, AccountID: account.ID}, replayErr: replayErr}
+	registry := fakeLifecycleRegistry{
+		provider:  provider.Devin,
+		policyKey: string(provider.Devin),
+		capabilities: provider.Capabilities{
+			Lifecycle:       lifecycle,
+			ModelDiscoverer: optionalDiscoverer{},
+			UsageFetcher:    optionalUsageFetcher{},
+		},
+	}
+	models, usage := &countingHook{}, &countingHook{}
+	service := NewService(repo, registry, models, usage)
+	completion := provider.AuthorizationCompletion{Code: "single-use-code"}
+
+	first, err := service.CompleteLogin(ctx, provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: "state"}, completion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != account.ID {
+		t.Fatalf("account=%q want=%q", first.ID, account.ID)
+	}
+	if _, err := service.CompleteLogin(ctx, provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: "state"}, completion); !errors.Is(err, replayErr) {
+		t.Fatalf("replay error=%v want=%v", err, replayErr)
+	}
+	if lifecycle.calls.Load() != 2 {
+		t.Fatalf("lifecycle calls=%d want=2", lifecycle.calls.Load())
+	}
+	if models.calls.Load() != 1 || usage.calls.Load() != 1 {
+		t.Fatalf("hooks after replay models=%d usage=%d want=1/1", models.calls.Load(), usage.calls.Load())
 	}
 }

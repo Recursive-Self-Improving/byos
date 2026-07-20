@@ -163,6 +163,23 @@ func TestCSRFMiddlewareProtectsLoginAndManagementMutations(t *testing.T) {
 	if response.StatusCode != http.StatusSeeOther || len(fixture.accounts.updates) != 1 {
 		t.Fatalf("mutation with CSRF = status %d updates %d", response.StatusCode, len(fixture.accounts.updates))
 	}
+	startCalls := fixture.oauth.startCalls
+	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/new", url.Values{"provider": {"devin"}})
+	if response.StatusCode != http.StatusForbidden || fixture.oauth.startCalls != startCalls {
+		t.Fatalf("OAuth start without CSRF = status %d starts %d", response.StatusCode, fixture.oauth.startCalls)
+	}
+	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/new", url.Values{"provider": {"devin"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || fixture.oauth.startCalls != startCalls+1 {
+		t.Fatalf("OAuth start with CSRF = status %d starts %d", response.StatusCode, fixture.oauth.startCalls)
+	}
+	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/devin/cancel/state_test", nil)
+	if response.StatusCode != http.StatusForbidden || len(fixture.oauth.cancelled) != 0 {
+		t.Fatalf("OAuth cancel without CSRF = status %d cancels %v", response.StatusCode, fixture.oauth.cancelled)
+	}
+	response, _ = browser.request(t, http.MethodPost, "/admin/oauth/devin/cancel/state_test", url.Values{"gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || len(fixture.oauth.cancelled) != 1 || fixture.oauth.cancelled[0].Provider != ProviderDevin {
+		t.Fatalf("OAuth cancel with CSRF = status %d cancels %v", response.StatusCode, fixture.oauth.cancelled)
+	}
 }
 
 func TestCookieSecurityAndTrustedProxyHandling(t *testing.T) {

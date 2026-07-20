@@ -3,74 +3,12 @@ package models
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
+	"byos/internal/provider"
 	"byos/internal/store"
-	"byos/internal/xai"
 )
-
-func TestDiscoverySchemasFallbackAndCredentials(t *testing.T) {
-	tests := []struct {
-		name           string
-		v2Status       int
-		v2Body         string
-		legacyBody     string
-		wantID         string
-		wantLegacy     bool
-		wantCredential bool
-	}{
-		{"array schema", 200, `[{"id":"grok-4.5","displayName":"Grok","contextWindow":131072,"maxCompletionTokens":8192,"reasoningEfforts":["high"],"supportsBackendSearch":true}]`, ``, "grok-4.5", false, false},
-		{"envelope model key", 200, `{"models":[{"model":"grok-4.5","display_name":"Grok"}]}`, ``, "grok-4.5", false, false},
-		{"404 fallback", 404, ``, `[{"id":"legacy"}]`, "legacy", true, false},
-		{"schema fallback", 200, `{"items":[]}`, `{"models":[{"model":"legacy"}]}`, "legacy", true, false},
-		{"credential no fallback", 401, ``, `[{"id":"must-not-call"}]`, "", false, true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var legacy atomic.Bool
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer token" {
-					t.Errorf("authorization=%q", r.Header.Get("Authorization"))
-				}
-				switch r.URL.Path {
-				case "/models-v2":
-					w.WriteHeader(test.v2Status)
-					_, _ = w.Write([]byte(test.v2Body))
-				case "/models":
-					legacy.Store(true)
-					_, _ = w.Write([]byte(test.legacyBody))
-				default:
-					t.Errorf("path=%s", r.URL.Path)
-				}
-			}))
-			defer server.Close()
-			upstream := NewUpstream(xai.NewClient(xai.HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second}))
-			models, err := upstream.Discover(context.Background(), "token")
-			if test.wantCredential {
-				if !errors.Is(err, ErrCredential) || legacy.Load() {
-					t.Fatalf("err=%v legacy=%v", err, legacy.Load())
-				}
-				return
-			}
-			if err != nil || len(models) != 1 || models[0].ID != test.wantID || legacy.Load() != test.wantLegacy {
-				t.Fatalf("models=%+v err=%v legacy=%v", models, err, legacy.Load())
-			}
-		})
-	}
-}
-
-func TestDiscoveryRejectsChangedTypes(t *testing.T) {
-	for _, payload := range []string{`[{"id":4}]`, `[{"id":"grok","contextWindow":"large"}]`, `[{"id":"grok","supportsBackendSearch":"yes"}]`} {
-		if _, err := parseCatalog([]byte(payload)); !errors.Is(err, ErrSchema) {
-			t.Fatalf("payload %s err=%v", payload, err)
-		}
-	}
-}
 
 type memoryCaps struct {
 	mu       sync.Mutex
@@ -107,20 +45,10 @@ func (m *memoryCaps) MarkStale(_ context.Context, id string) error {
 	return nil
 }
 
-type sequenceDiscovery struct {
-	models []Model
-	err    error
-}
-
-func (d *sequenceDiscovery) Discover(context.Context, string) ([]Model, error) {
-	return d.models, d.err
-}
-
 func TestCatalogAllowlistAliasesAndStaleSnapshot(t *testing.T) {
 	repo := &memoryCaps{values: map[string][]store.ModelCapability{}}
-	discovery := &sequenceDiscovery{models: []Model{{ID: "grok-4.5"}, {ID: "not-allowed"}}}
-	catalog := NewCatalog(repo, discovery, []string{"grok-4.5", "grok-5"}, map[string]string{"grok": "grok-4.5"})
-	if _, err := catalog.Refresh(context.Background(), "a", "token"); err != nil {
+	catalog := NewCatalog(repo, []string{"grok-4.5", "grok-5"}, map[string]string{"grok": "grok-4.5"})
+	if _, err := catalog.RefreshFromModels(context.Background(), "a", []Model{{ID: "grok-4.5"}, {ID: "not-allowed"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	public, err := catalog.Public(context.Background(), []string{"a"})
@@ -130,8 +58,7 @@ func TestCatalogAllowlistAliasesAndStaleSnapshot(t *testing.T) {
 	if resolved, ok := catalog.Resolve("grok"); !ok || resolved != "grok-4.5" {
 		t.Fatalf("resolve=%s,%v", resolved, ok)
 	}
-	discovery.err = errors.New("offline")
-	if _, err := catalog.Refresh(context.Background(), "a", "token"); err == nil {
+	if _, err := catalog.RefreshFromModels(context.Background(), "a", nil, errors.New("offline")); err == nil {
 		t.Fatal("refresh succeeded")
 	}
 	capabilities, err := catalog.Capabilities(context.Background(), "a")
@@ -151,7 +78,7 @@ func TestCatalogAllowlistAliasesAndStaleSnapshot(t *testing.T) {
 func TestCatalogExcludesSearchUnsupportedModels(t *testing.T) {
 	search := false
 	repo := &memoryCaps{values: map[string][]store.ModelCapability{"a": {{AccountID: "a", Model: "grok-4.5", Supported: true, SupportsBackendSearch: &search}}}}
-	catalog := NewCatalog(repo, nil, []string{"grok-4.5"}, map[string]string{"grok": "grok-4.5"})
+	catalog := NewCatalog(repo, []string{"grok-4.5"}, map[string]string{"grok": "grok-4.5"})
 	public, err := catalog.Public(context.Background(), []string{"a"})
 	if err != nil || len(public) != 0 {
 		t.Fatalf("public=%+v err=%v", public, err)
@@ -159,7 +86,6 @@ func TestCatalogExcludesSearchUnsupportedModels(t *testing.T) {
 }
 
 func TestCatalogRejectsUnpersistedStaleState(t *testing.T) {
-	discovery := &sequenceDiscovery{err: errors.New("offline")}
 	for _, test := range []struct {
 		name   string
 		repo   *memoryCaps
@@ -169,7 +95,7 @@ func TestCatalogRejectsUnpersistedStaleState(t *testing.T) {
 		{"fresh after mark", &memoryCaps{values: map[string][]store.ModelCapability{"a": {{AccountID: "a", Model: "grok", Supported: true}}}, skipMark: true}, ErrStaleState},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewCatalog(test.repo, discovery, []string{"grok"}, nil).Refresh(context.Background(), "a", "token")
+			_, err := NewCatalog(test.repo, []string{"grok"}, nil).RefreshFromModels(context.Background(), "a", nil, errors.New("offline"))
 			if err == nil || (test.target != nil && !errors.Is(err, test.target)) {
 				t.Fatalf("err=%v", err)
 			}
@@ -177,90 +103,79 @@ func TestCatalogRejectsUnpersistedStaleState(t *testing.T) {
 	}
 }
 
-type blockingRefresher struct {
-	calls   atomic.Int32
-	started chan struct{}
-}
-
-func (r *blockingRefresher) Refresh(ctx context.Context, _, _ string) ([]Model, error) {
-	if r.calls.Add(1) == 1 {
-		close(r.started)
+func TestCatalogApplyDiscoveryPreservesNormalizedFieldsAndSearchTriState(t *testing.T) {
+	repo := &memoryCaps{values: map[string][]store.ModelCapability{}}
+	catalog := NewCatalog(repo, nil, nil)
+	search := false
+	discovered := []provider.DiscoveredModel{
+		{UpstreamName: "unknown-search", ReasoningEfforts: []string{"high"}},
+		{UpstreamName: "no-search", DisplayName: "No Search", SupportsBackendSearch: &search, ContextWindow: 42, MaxOutputTokens: 7},
 	}
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
-type modelAccounts struct{}
-
-func (modelAccounts) ModelAccounts(context.Context) ([]Account, error) {
-	return []Account{{ID: "a", AccessToken: "t", Enabled: true}}, nil
-}
-func TestWorkerDeduplicatesAndCancels(t *testing.T) {
-	refresher := &blockingRefresher{started: make(chan struct{})}
-	worker := NewWorker(modelAccounts{}, refresher, time.Hour, time.Hour)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 2)
-	go func() { done <- worker.RefreshAccount(ctx, Account{ID: "a", AccessToken: "t", Enabled: true}) }()
-	<-refresher.started
-	go func() { done <- worker.RefreshAccount(ctx, Account{ID: "a", AccessToken: "t", Enabled: true}) }()
-	time.Sleep(10 * time.Millisecond)
-	cancel()
-	for range 2 {
-		if err := <-done; !errors.Is(err, context.Canceled) {
-			t.Fatalf("err=%v", err)
-		}
+	models, err := catalog.ApplyDiscovery(context.Background(), "a", discovered, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if refresher.calls.Load() != 1 {
-		t.Fatalf("calls=%d", refresher.calls.Load())
+	search = true
+	discovered[0].ReasoningEfforts[0] = "changed"
+	if len(models) != 2 || models[0].SupportsBackendSearch != nil || models[0].ReasoningEfforts[0] != "high" {
+		t.Fatalf("normalized models = %+v", models)
+	}
+	if models[1].SupportsBackendSearch == nil || *models[1].SupportsBackendSearch || models[1].DisplayName != "No Search" || models[1].ContextWindow != 42 || models[1].MaxOutputTokens != 7 {
+		t.Fatalf("normalized model = %+v", models[1])
+	}
+	capabilities, err := catalog.Capabilities(context.Background(), "a")
+	if err != nil || len(capabilities) != 2 || capabilities[0].SupportsBackendSearch != nil || capabilities[1].SupportsBackendSearch == nil || *capabilities[1].SupportsBackendSearch {
+		t.Fatalf("capabilities = %+v, error = %v", capabilities, err)
 	}
 }
 
-type boundedModelRefresher struct {
-	active, max, calls atomic.Int32
-	release            chan struct{}
-}
-
-func (r *boundedModelRefresher) Refresh(ctx context.Context, _, _ string) ([]Model, error) {
-	r.calls.Add(1)
-	n := r.active.Add(1)
-	defer r.active.Add(-1)
-	for {
-		old := r.max.Load()
-		if n <= old || r.max.CompareAndSwap(old, n) {
-			break
-		}
+func TestCatalogDiscoveryFreshnessSurvivesRestartAndPreservesUnknownSentinelSemantics(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	first, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-r.release:
-		return []Model{}, nil
-	}
-}
-func TestExplicitModelRefreshGlobalBound(t *testing.T) {
-	refresher := &boundedModelRefresher{release: make(chan struct{})}
-	worker := NewWorker(modelAccounts{}, refresher, time.Hour, time.Hour, 2)
-	done := make(chan error, 3)
-	for _, id := range []string{"a", "b", "c"} {
-		go func() { done <- worker.RefreshAccount(context.Background(), Account{ID: id, Enabled: true}) }()
-	}
-	deadline := time.After(time.Second)
-	for refresher.calls.Load() < 2 {
-		select {
-		case <-deadline:
-			t.Fatal("refreshes did not start")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	time.Sleep(10 * time.Millisecond)
-	if refresher.calls.Load() != 2 || refresher.max.Load() > 2 {
-		t.Fatalf("calls=%d max=%d", refresher.calls.Load(), refresher.max.Load())
-	}
-	close(refresher.release)
-	for range 3 {
-		if err := <-done; err != nil {
+	for _, accountID := range []string{"prior", "unknown", "empty"} {
+		if _, err := first.DB.ExecContext(ctx, `INSERT INTO accounts(id, identity_fingerprint, status, credentials_encrypted, created_at, updated_at) VALUES (?, ?, 'active', '{}', unixepoch(), unixepoch())`, accountID, []byte(accountID)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	repository := store.NewModelCapabilityRepository(first.DB)
+	catalog := NewCatalog(repository, []string{"grok"}, nil)
+	if _, err := catalog.ApplyDiscovery(ctx, "prior", []provider.DiscoveredModel{{UpstreamName: "grok"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := catalog.ApplyDiscovery(ctx, "prior", nil, context.DeadlineExceeded); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if _, err := catalog.ApplyDiscovery(ctx, "unknown", nil, context.DeadlineExceeded); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unknown timeout error = %v", err)
+	}
+	if _, err := catalog.ApplyDiscovery(ctx, "empty", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	restarted := NewCatalog(store.NewModelCapabilityRepository(second.DB), []string{"grok"}, nil)
+	prior, err := restarted.Capabilities(ctx, "prior")
+	if err != nil || len(prior) != 1 || prior[0].Model.ID != "grok" || !prior[0].Stale {
+		t.Fatalf("restarted stale snapshot = %+v, %v", prior, err)
+	}
+	resolved := provider.ResolvedModel{UpstreamName: "grok", Provider: provider.XAI}
+	unknown, err := restarted.AccountSupports(ctx, "unknown", resolved)
+	if err != nil || !unknown {
+		t.Fatalf("no-prior timeout should remain unknown/routable: supported=%v err=%v", unknown, err)
+	}
+	empty, err := restarted.AccountSupports(ctx, "empty", resolved)
+	if err != nil || empty {
+		t.Fatalf("successful empty sentinel should be known/unsupported: supported=%v err=%v", empty, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"byos/internal/provider"
 	"byos/internal/routing"
 	"byos/internal/sessions"
 )
@@ -29,8 +30,14 @@ func TestSemanticMappings(t *testing.T) {
 	if KindOf(routing.ErrModelUnavailable) != ModelUnavailable || KindOf(routing.ErrNoAvailableAccounts) != ModelUnavailable {
 		t.Fatal("model unavailable mapping failed")
 	}
-	if FromClassified(routing.ClassifiedError{Class: routing.ClassRateLimit}) != Cooldown || FromClassified(routing.ClassifiedError{Class: routing.ClassConnection}) != UpstreamFailure {
-		t.Fatal("routing mapping failed")
+	rateLimit := provider.ErrorClassification{Class: provider.ClassRateLimit}
+	connection := provider.ErrorClassification{Class: provider.ClassConnection}
+	if FromClassification(rateLimit) != Cooldown || FromClassification(connection) != UpstreamFailure {
+		t.Fatal("provider classification mapping failed")
+	}
+	upstream := &provider.UpstreamError{Provider: provider.XAI, Status: 429, Classification: rateLimit}
+	if KindOf(upstream) != Cooldown {
+		t.Fatal("provider upstream error mapping failed")
 	}
 }
 func TestExactProtocolFixtures(t *testing.T) {
@@ -75,6 +82,48 @@ func TestMappingsNeverCopyInternalErrorText(t *testing.T) {
 	for _, kind := range []Kind{UpstreamFailure, InternalFailure, Authentication} {
 		if OpenAI(kind, 0).Message == secret || Anthropic(kind, 0).Message == secret {
 			t.Fatal("mapping copied internal text")
+		}
+	}
+}
+
+func TestClassificationPublicMetadata(t *testing.T) {
+	classes := []provider.ErrorClass{
+		provider.ClassValidation,
+		provider.ClassUnauthorized,
+		provider.ClassInvalidGrant,
+		provider.ClassPermission,
+		provider.ClassTransient,
+		provider.ClassConnection,
+		provider.ClassRateLimit,
+		provider.ClassFreeUsageExhausted,
+		provider.ClassCancelled,
+		provider.ClassUpstream,
+	}
+	for _, class := range classes {
+		t.Run(string(class), func(t *testing.T) {
+			classified := provider.ErrorClassification{Class: class, PublicStatus: 418, PublicCode: "sanitized_code", PublicMessage: "sanitized message"}
+			openai := OpenAIClassification(classified, 3*time.Second)
+			if openai.Status != 418 || openai.Code != "sanitized_code" || openai.Message != "sanitized message" {
+				t.Fatalf("OpenAI classification lost metadata: %+v", openai)
+			}
+			anthropic := AnthropicClassification(classified, 3*time.Second)
+			if anthropic.Status != 418 || anthropic.Message != "sanitized message" {
+				t.Fatalf("Anthropic classification lost metadata: %+v", anthropic)
+			}
+			if openai.Type == "" || anthropic.Type == "" {
+				t.Fatalf("protocol type lost: OpenAI=%+v Anthropic=%+v", openai, anthropic)
+			}
+		})
+	}
+}
+
+func TestClassificationAbsentPublicMetadataUsesSanitizedDefaults(t *testing.T) {
+	for _, class := range []provider.ErrorClass{provider.ClassValidation, provider.ClassUnauthorized, provider.ClassRateLimit, provider.ClassPermission, provider.ClassCancelled, provider.ClassUpstream} {
+		classified := provider.ErrorClassification{Class: class}
+		openai := OpenAIClassification(classified, 0)
+		anthropic := AnthropicClassification(classified, 0)
+		if openai.Status == 0 || openai.Code == "" || openai.Message == "" || anthropic.Status == 0 || anthropic.Message == "" {
+			t.Fatalf("class %q did not receive defaults: OpenAI=%+v Anthropic=%+v", class, openai, anthropic)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -12,7 +13,7 @@ import (
 
 	"byos/internal/accounts"
 	"byos/internal/models"
-	oauthxai "byos/internal/oauth/xai"
+	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
 )
@@ -20,17 +21,18 @@ import (
 const basePath = "/admin/api/v1"
 
 type AccountManager interface {
-	StartLogin(context.Context) (oauthxai.DeviceAuthorization, error)
-	CompleteLogin(context.Context, string) (store.Account, error)
+	StartLogin(context.Context, provider.Kind) (provider.Authorization, error)
+	LoginStatus(context.Context, provider.Kind, provider.SessionID) (provider.AuthorizationSession, error)
+	CancelLogin(context.Context, provider.Kind, provider.SessionID) error
 	List(context.Context) ([]store.Account, error)
 	Update(context.Context, string, string, bool) error
 	Delete(context.Context, string) error
 	Refresh(context.Context, string) (store.Account, error)
 }
 
-type OAuthLifecycle interface {
-	Status(context.Context, string) (store.OAuthSession, error)
-	Cancel(context.Context, string) error
+type CompletionCoordinator interface {
+	Resume(string)
+	EnsureCompletion(string)
 }
 
 type UsageReader interface {
@@ -61,15 +63,31 @@ type APIKeyManager interface {
 	Revoke(context.Context, string) error
 }
 
+// CallbackCompleter completes a callback-PKCE authorization using the raw
+// OAuth state and authorization code supplied by the provider redirect. It is
+// the sole unauthenticated completion seam and must never accept a SessionID.
+type CallbackCompleter interface {
+	CompleteLogin(context.Context, provider.Kind, provider.AuthorizationRef, provider.AuthorizationCompletion) (store.Account, error)
+}
+
+// ErrAuthorizationNotFound is the stable not-found sentinel returned by admin
+// handlers when an authorization SessionID is unknown, belongs to the wrong
+// provider, or is otherwise unresolvable. It wraps sql.ErrNoRows so existing
+// errors.Is(err, sql.ErrNoRows) callers continue to map to 404, while letting
+// the admin layer distinguish a safe not-found from a genuine internal error
+// without sanitizing away the not-found classification.
+var ErrAuthorizationNotFound = fmt.Errorf("authorization not found: %w", sql.ErrNoRows)
+
 type Services struct {
 	Accounts      AccountManager
-	OAuth         OAuthLifecycle
+	Completion    CompletionCoordinator
 	Usage         UsageReader
 	UsageRefresh  UsageRefresher
 	Models        ModelReader
 	ModelsRefresh ModelRefresher
 	Cooldowns     CooldownReader
 	APIKeys       APIKeyManager
+	Capabilities  provider.CapabilityRegistry
 }
 
 type handler struct{ services Services }
@@ -80,6 +98,9 @@ func NewHandler(services Services) http.Handler {
 	mux.HandleFunc("POST "+basePath+"/oauth/xai/device", h.startDevice)
 	mux.HandleFunc("GET "+basePath+"/oauth/xai/device/{state}", h.pollDevice)
 	mux.HandleFunc("DELETE "+basePath+"/oauth/xai/device/{state}", h.cancelDevice)
+	mux.HandleFunc("POST "+basePath+"/oauth/devin/start", h.startDevin)
+	mux.HandleFunc("GET "+basePath+"/oauth/devin/status/{session}", h.pollDevin)
+	mux.HandleFunc("POST "+basePath+"/oauth/devin/cancel/{session}", h.cancelDevin)
 	mux.HandleFunc("GET "+basePath+"/accounts", h.listAccounts)
 	mux.HandleFunc("PATCH "+basePath+"/accounts/{id}", h.patchAccount)
 	mux.HandleFunc("DELETE "+basePath+"/accounts/{id}", h.deleteAccount)
@@ -93,6 +114,50 @@ func NewHandler(services Services) http.Handler {
 	mux.HandleFunc("POST "+basePath+"/api-keys", h.createAPIKey)
 	mux.HandleFunc("DELETE "+basePath+"/api-keys/{id}", h.revokeAPIKey)
 	return mux
+}
+
+// CallbackHandler returns the exact GET callback handler for Devin's
+// callback-PKCE flow. It is unauthenticated and must be registered outside
+// AdminAuth at the configured callback path. The same handler is exported for
+// CLI reuse.
+func CallbackHandler(completer CallbackCompleter) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleDevinCallback(w, r, completer)
+	})
+}
+
+func handleDevinCallback(w http.ResponseWriter, r *http.Request, completer CallbackCompleter) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is accepted")
+		return
+	}
+	query := r.URL.Query()
+	// Reject any provider-reported error by key presence, not by first-value
+	// non-emptiness. An explicit empty `error=` or a repeated
+	// `error=&error=denied` (query.Get returns "") must still be treated as an
+	// error signal and never reach the exchange path.
+	if errorValues, present := query["error"]; present {
+		_ = errorValues
+		writeError(w, http.StatusBadRequest, "callback_error", "authorization provider reported an error")
+		return
+	}
+	if errorDescriptionValues, present := query["error_description"]; present {
+		_ = errorDescriptionValues
+		writeError(w, http.StatusBadRequest, "callback_error", "authorization provider reported an error")
+		return
+	}
+	state := query["state"]
+	code := query["code"]
+	if len(state) != 1 || len(code) != 1 || state[0] == "" || code[0] == "" {
+		writeError(w, http.StatusBadRequest, "invalid_callback", "exactly one state and code are required")
+		return
+	}
+	if _, err := completer.CompleteLogin(r.Context(), provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: state[0]}, provider.AuthorizationCompletion{Code: code[0]}); err != nil {
+		writeError(w, http.StatusBadGateway, "callback_failed", "Devin authorization could not be completed")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type errorBody struct {
@@ -128,6 +193,33 @@ func notFoundOrInternal(w http.ResponseWriter, err error, noun string) {
 	internalError(w)
 }
 
+// writeOAuthCancelError classifies a cancel-login error into the exact HTTP
+// semantics required by the OAuth lifecycle: a known-but-terminal session
+// (consumed, completed, failed, already cancelled) maps to 409 Conflict with
+// a sanitized authorizationView; a genuinely unknown or wrong-provider
+// session maps to 404 Not Found; anything else maps to 500 Internal Server
+// Error. useSessionID selects whether the view carries State (xAI device) or
+// SessionID (Devin callback-PKCE). No unsanitized error text is ever echoed.
+func writeOAuthCancelError(w http.ResponseWriter, err error, kind provider.Kind, handle, noun string, useSessionID bool) {
+	view := authorizationView{Provider: string(kind), Status: "failed"}
+	if useSessionID {
+		view.SessionID = handle
+	} else {
+		view.State = handle
+	}
+	switch {
+	case errors.Is(err, provider.ErrOAuthConflict):
+		view.Error = noun + " is no longer cancellable"
+		writeJSON(w, http.StatusConflict, view)
+	case errors.Is(err, sql.ErrNoRows):
+		view.Error = noun + " not found"
+		writeJSON(w, http.StatusNotFound, view)
+	default:
+		view.Error = noun + " cancellation failed"
+		writeJSON(w, http.StatusInternalServerError, view)
+	}
+}
+
 func decodeJSON(r *http.Request, dst any) error {
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
@@ -140,8 +232,10 @@ func decodeJSON(r *http.Request, dst any) error {
 	return nil
 }
 
-type deviceView struct {
-	State           string     `json:"state"`
+type authorizationView struct {
+	Provider        string     `json:"provider"`
+	State           string     `json:"state,omitempty"`
+	SessionID       string     `json:"session_id,omitempty"`
 	UserCode        string     `json:"user_code,omitempty"`
 	VerificationURL string     `json:"verification_url,omitempty"`
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
@@ -152,56 +246,62 @@ type deviceView struct {
 
 func (h *handler) startDevice(w http.ResponseWriter, r *http.Request) {
 	if h.services.Accounts == nil {
-		writeJSON(w, http.StatusInternalServerError, deviceView{Status: "failed", Error: "device authorization failed"})
+		writeJSON(w, http.StatusInternalServerError, authorizationView{Provider: string(provider.XAI), Status: "failed", Error: "device authorization failed"})
 		return
 	}
-	flow, err := h.services.Accounts.StartLogin(r.Context())
+	flow, err := h.services.Accounts.StartLogin(r.Context(), provider.XAI)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, deviceView{Status: "failed", Error: "device authorization failed"})
+		writeJSON(w, http.StatusBadGateway, authorizationView{Provider: string(provider.XAI), Status: "failed", Error: "device authorization failed"})
 		return
 	}
-	verificationURL := flow.VerificationURIComplete
+	verificationURL := flow.VerificationURLComplete
 	if verificationURL == "" {
-		verificationURL = flow.VerificationURI
+		verificationURL = flow.VerificationURL
 	}
-	writeJSON(w, http.StatusCreated, deviceView{State: flow.State, Status: "pending", UserCode: flow.UserCode, VerificationURL: verificationURL, ExpiresAt: &flow.ExpiresAt})
+	if h.services.Completion != nil {
+		h.services.Completion.Resume(flow.SessionID.String())
+	}
+	writeJSON(w, http.StatusCreated, authorizationView{Provider: string(provider.XAI), State: flow.SessionID.String(), Status: "pending", UserCode: flow.UserCode, VerificationURL: verificationURL, ExpiresAt: &flow.ExpiresAt})
 }
 
 func (h *handler) pollDevice(w http.ResponseWriter, r *http.Request) {
-	if h.services.OAuth == nil {
+	if h.services.Accounts == nil {
 		internalError(w)
 		return
 	}
-	state := r.PathValue("state")
-	session, err := h.services.OAuth.Status(r.Context(), state)
+	sessionID := r.PathValue("state")
+	session, err := h.services.Accounts.LoginStatus(r.Context(), provider.XAI, provider.SessionID(sessionID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, deviceView{State: state, Status: "failed", Error: "device authorization not found"})
+			writeJSON(w, http.StatusNotFound, authorizationView{State: sessionID, Status: "failed", Error: "device authorization not found"})
 		} else {
 			internalError(w)
 		}
 		return
 	}
-	view := deviceView{State: state, Status: session.Status, AccountID: session.AccountID}
+	if h.services.Completion != nil && (session.Status == provider.AuthorizationPending || session.Status == provider.AuthorizationAuthorized) {
+		h.services.Completion.EnsureCompletion(sessionID)
+	}
+	view := authorizationView{Provider: string(provider.XAI), State: sessionID, Status: string(session.Status), AccountID: session.AccountID}
 	switch session.Status {
-	case "pending", "authorized":
+	case provider.AuthorizationPending, provider.AuthorizationAuthorized:
 		view.Status = "pending"
 		view.UserCode = session.UserCode
 		view.ExpiresAt = &session.ExpiresAt
-		view.VerificationURL = session.VerificationURIComplete
+		view.VerificationURL = session.VerificationURLComplete
 		if view.VerificationURL == "" {
-			view.VerificationURL = session.VerificationURI
+			view.VerificationURL = session.VerificationURL
 		}
 		writeJSON(w, http.StatusAccepted, view)
-	case "completed":
+	case provider.AuthorizationCompleted:
 		writeJSON(w, http.StatusOK, view)
-	case "expired":
+	case provider.AuthorizationExpired:
 		view.Error = "device authorization expired"
 		writeJSON(w, http.StatusGone, view)
-	case "cancelled":
+	case provider.AuthorizationCancelled:
 		view.Error = "device authorization was cancelled"
 		writeJSON(w, http.StatusConflict, view)
-	case "failed":
+	case provider.AuthorizationFailed:
 		view.Error = "device authorization failed"
 		writeJSON(w, http.StatusConflict, view)
 	default:
@@ -210,17 +310,77 @@ func (h *handler) pollDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) cancelDevice(w http.ResponseWriter, r *http.Request) {
-	state := r.PathValue("state")
-	if h.services.OAuth == nil {
-		writeJSON(w, http.StatusInternalServerError, deviceView{State: state, Status: "failed", Error: "device authorization cancellation failed"})
+	sessionID := r.PathValue("state")
+	if h.services.Accounts == nil {
+		writeJSON(w, http.StatusInternalServerError, authorizationView{Provider: string(provider.XAI), State: sessionID, Status: "failed", Error: "device authorization cancellation failed"})
 		return
 	}
-	if err := h.services.OAuth.Cancel(r.Context(), state); err != nil {
+	if err := h.services.Accounts.CancelLogin(r.Context(), provider.XAI, provider.SessionID(sessionID)); err != nil {
+		writeOAuthCancelError(w, err, provider.XAI, sessionID, "device authorization", false)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) startDevin(w http.ResponseWriter, r *http.Request) {
+	if h.services.Accounts == nil {
+		writeJSON(w, http.StatusInternalServerError, authorizationView{Provider: string(provider.Devin), Status: "failed", Error: "Devin authorization could not be started"})
+		return
+	}
+	flow, err := h.services.Accounts.StartLogin(r.Context(), provider.Devin)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, authorizationView{Provider: string(provider.Devin), Status: "failed", Error: "Devin authorization could not be started"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, authorizationView{Provider: string(provider.Devin), SessionID: flow.SessionID.String(), Status: "pending", VerificationURL: flow.VerificationURL, ExpiresAt: &flow.ExpiresAt})
+}
+
+func (h *handler) pollDevin(w http.ResponseWriter, r *http.Request) {
+	if h.services.Accounts == nil {
+		internalError(w)
+		return
+	}
+	sessionID := r.PathValue("session")
+	session, err := h.services.Accounts.LoginStatus(r.Context(), provider.Devin, provider.SessionID(sessionID))
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, deviceView{State: state, Status: "failed", Error: "device authorization not found"})
+			writeJSON(w, http.StatusNotFound, authorizationView{SessionID: sessionID, Status: "failed", Error: "Devin authorization not found"})
 		} else {
-			writeJSON(w, http.StatusInternalServerError, deviceView{State: state, Status: "failed", Error: "device authorization cancellation failed"})
+			internalError(w)
 		}
+		return
+	}
+	view := authorizationView{Provider: string(provider.Devin), SessionID: sessionID, Status: string(session.Status), AccountID: session.AccountID}
+	switch session.Status {
+	case provider.AuthorizationPending, provider.AuthorizationConsumed:
+		view.Status = "pending"
+		view.ExpiresAt = &session.ExpiresAt
+		writeJSON(w, http.StatusAccepted, view)
+	case provider.AuthorizationCompleted:
+		writeJSON(w, http.StatusOK, view)
+	case provider.AuthorizationExpired:
+		view.Error = "Devin authorization expired"
+		writeJSON(w, http.StatusGone, view)
+	case provider.AuthorizationCancelled:
+		view.Error = "Devin authorization was cancelled"
+		writeJSON(w, http.StatusConflict, view)
+	case provider.AuthorizationFailed:
+		view.Error = "Devin authorization failed"
+		writeJSON(w, http.StatusConflict, view)
+	default:
+		internalError(w)
+	}
+}
+
+func (h *handler) cancelDevin(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("session")
+	if h.services.Accounts == nil {
+		writeJSON(w, http.StatusInternalServerError, authorizationView{Provider: string(provider.Devin), SessionID: sessionID, Status: "failed", Error: "Devin authorization cancellation failed"})
+		return
+	}
+	if err := h.services.Accounts.CancelLogin(r.Context(), provider.Devin, provider.SessionID(sessionID)); err != nil {
+		writeOAuthCancelError(w, err, provider.Devin, sessionID, "Devin authorization", true)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -235,17 +395,22 @@ type refreshStatusView struct {
 }
 
 type accountView struct {
-	ID                  string            `json:"id"`
-	Label               string            `json:"label"`
-	Enabled             bool              `json:"enabled"`
-	Status              string            `json:"status"`
-	ExpiresAt           *time.Time        `json:"expires_at,omitempty"`
-	LastRefreshAt       *time.Time        `json:"last_refresh_at,omitempty"`
-	CooldownUntil       *time.Time        `json:"cooldown_until,omitempty"`
-	CapabilityFreshness refreshStatusView `json:"capability_freshness"`
-	UsageFreshness      refreshStatusView `json:"usage_freshness"`
-	CreatedAt           time.Time         `json:"created_at"`
-	UpdatedAt           time.Time         `json:"updated_at"`
+	Provider              string            `json:"provider"`
+	ID                    string            `json:"id"`
+	Label                 string            `json:"label"`
+	Enabled               bool              `json:"enabled"`
+	Status                string            `json:"status"`
+	ExpiresAt             *time.Time        `json:"expires_at,omitempty"`
+	LastRefreshAt         *time.Time        `json:"last_refresh_at,omitempty"`
+	CooldownUntil         *time.Time        `json:"cooldown_until,omitempty"`
+	CapabilityFreshness   refreshStatusView `json:"capability_freshness"`
+	UsageFreshness        refreshStatusView `json:"usage_freshness"`
+	CanRefreshCredentials bool              `json:"can_refresh_credentials"`
+	CanRelogin            bool              `json:"can_relogin"`
+	CanRefreshUsage       bool              `json:"can_refresh_usage"`
+	CanRefreshModels      bool              `json:"can_refresh_models"`
+	CreatedAt             time.Time         `json:"created_at"`
+	UpdatedAt             time.Time         `json:"updated_at"`
 }
 
 func timeIfSet(value time.Time) *time.Time {
@@ -301,7 +466,13 @@ func (h *handler) projectAccount(ctx context.Context, account store.Account) (ac
 	if err != nil {
 		return accountView{}, err
 	}
-	view := accountView{ID: account.ID, Label: account.Label, Enabled: account.Enabled, Status: account.Status, ExpiresAt: account.ExpiresAt, LastRefreshAt: account.LastRefreshAt, CooldownUntil: cooldown, CreatedAt: account.CreatedAt, UpdatedAt: account.UpdatedAt}
+	view := accountView{Provider: string(account.Provider), ID: account.ID, Label: account.Label, Enabled: account.Enabled, Status: account.Status, ExpiresAt: account.ExpiresAt, LastRefreshAt: account.LastRefreshAt, CooldownUntil: cooldown, CreatedAt: account.CreatedAt, UpdatedAt: account.UpdatedAt}
+	capabilities := h.accountCapabilities(account)
+	needsRelogin := account.Status == "relogin_required"
+	view.CanRefreshCredentials = capabilities.CredentialRefresher != nil && !needsRelogin
+	view.CanRelogin = capabilities.Lifecycle != nil
+	view.CanRefreshUsage = capabilities.UsageFetcher != nil && capabilities.Credentials != nil
+	view.CanRefreshModels = capabilities.ModelDiscoverer != nil && capabilities.Credentials != nil
 	if h.services.ModelsRefresh != nil {
 		view.CapabilityFreshness = modelRefreshView(h.services.ModelsRefresh.Status(account.ID))
 	}
@@ -309,6 +480,19 @@ func (h *handler) projectAccount(ctx context.Context, account store.Account) (ac
 		view.UsageFreshness = usageRefreshView(h.services.UsageRefresh.Status(account.ID))
 	}
 	return view, nil
+}
+
+// accountCapabilities resolves the runtime capabilities registered for the
+// account's provider. The policy key mirrors the runtime composition root,
+// which keys provider capabilities by the provider kind string. A nil
+// registry yields zero capabilities so capability booleans project as false
+// without panicking.
+func (h *handler) accountCapabilities(account store.Account) provider.Capabilities {
+	if h.services.Capabilities == nil {
+		return provider.Capabilities{}
+	}
+	capabilities, _ := h.services.Capabilities.Capabilities(account.Provider, string(account.Provider))
+	return capabilities
 }
 
 func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
@@ -402,7 +586,24 @@ func (h *handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
 		internalError(w)
 		return
 	}
-	account, err := h.services.Accounts.Refresh(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+	account, err := h.findAccount(r.Context(), id)
+	if err != nil {
+		notFoundOrInternal(w, err, "account")
+		return
+	}
+	capabilities := h.accountCapabilities(account)
+	if capabilities.CredentialRefresher == nil {
+		// Devin does not register a CredentialRefresher; credential refresh
+		// is unavailable without a no-op. Reconnection is via OAuth start.
+		writeError(w, http.StatusConflict, "action_unavailable", "credential refresh is not supported for this provider; reconnect via the authorization flow")
+		return
+	}
+	if account.Status == "relogin_required" {
+		writeError(w, http.StatusConflict, "relogin_required", "account requires reconnection via the authorization flow")
+		return
+	}
+	account, err = h.services.Accounts.Refresh(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			notFoundOrInternal(w, err, "account")
@@ -420,18 +621,39 @@ func (h *handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 type usageView struct {
-	AccountID string         `json:"account_id"`
-	Monthly   *usage.Monthly `json:"monthly"`
-	Weekly    *usage.Weekly  `json:"weekly"`
-	Local     usage.Counters `json:"local"`
-	FetchedAt time.Time      `json:"fetched_at"`
-	Stale     bool           `json:"stale"`
-	Unknown   bool           `json:"unknown"`
-	Error     string         `json:"error,omitempty"`
+	AccountID              string         `json:"account_id"`
+	Provider               string         `json:"provider"`
+	Monthly                *usage.Monthly `json:"monthly"`
+	Weekly                 *usage.Weekly  `json:"weekly"`
+	QuotaAvailable         bool           `json:"quota_available"`
+	UpstreamUsageAvailable bool           `json:"upstream_usage_available"`
+	Local                  usage.Counters `json:"local"`
+	FetchedAt              time.Time      `json:"fetched_at"`
+	Stale                  bool           `json:"stale"`
+	Unknown                bool           `json:"unknown"`
+	Error                  string         `json:"error,omitempty"`
 }
 
-func projectUsage(value usage.Snapshot) usageView {
-	view := usageView{AccountID: value.AccountID, Monthly: value.Monthly, Weekly: value.Weekly, Local: value.Local, FetchedAt: value.FetchedAt, Stale: value.Stale, Unknown: value.Unknown}
+// projectUsage projects a usage snapshot for an account owned by kind. xAI
+// retains its upstream Monthly/Weekly quota when present; Devin never exposes
+// upstream quota — Monthly/Weekly are forced nil even if a corrupt or legacy
+// xAI-shaped snapshot was persisted, and quota availability is false. Local
+// counters remain available for every provider. UpstreamUsageAvailable is true
+// only when a real upstream quota window was reported; QuotaAvailable mirrors
+// it for callers that reason in terms of remaining quota.
+func projectUsage(kind provider.Kind, value usage.Snapshot) usageView {
+	view := usageView{AccountID: value.AccountID, Provider: string(kind), Local: value.Local, FetchedAt: value.FetchedAt, Stale: value.Stale, Unknown: value.Unknown}
+	if kind == provider.XAI {
+		// xAI is the only provider with an upstream quota API. Even when a
+		// snapshot has not yet been fetched (Monthly/Weekly nil), the provider
+		// supports upstream quota, so QuotaAvailable is true. Devin never
+		// exposes upstream quota — Monthly/Weekly are forced nil even if a
+		// corrupt or legacy xAI-shaped snapshot was persisted.
+		view.Monthly = value.Monthly
+		view.Weekly = value.Weekly
+		view.QuotaAvailable = true
+		view.UpstreamUsageAvailable = value.Monthly != nil || value.Weekly != nil
+	}
 	if value.Error != "" {
 		view.Error = "usage data may be stale"
 	}
@@ -444,7 +666,8 @@ func (h *handler) accountUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if _, err := h.findAccount(r.Context(), id); err != nil {
+	account, err := h.findAccount(r.Context(), id)
+	if err != nil {
 		notFoundOrInternal(w, err, "account")
 		return
 	}
@@ -453,7 +676,7 @@ func (h *handler) accountUsage(w http.ResponseWriter, r *http.Request) {
 		notFoundOrInternal(w, err, "usage")
 		return
 	}
-	writeJSON(w, http.StatusOK, projectUsage(value))
+	writeJSON(w, http.StatusOK, projectUsage(account.Provider, value))
 }
 
 func (h *handler) refreshUsage(w http.ResponseWriter, r *http.Request) {
@@ -467,7 +690,14 @@ func (h *handler) refreshUsage(w http.ResponseWriter, r *http.Request) {
 		notFoundOrInternal(w, err, "account")
 		return
 	}
-	refreshErr := h.services.UsageRefresh.RefreshAccount(r.Context(), usage.Account{ID: account.ID, AccessToken: account.Credentials.AccessToken, Enabled: account.Enabled})
+	capabilities := h.accountCapabilities(account)
+	if capabilities.UsageFetcher == nil || capabilities.Credentials == nil {
+		// Devin does not expose an upstream usage API; return a stable
+		// action-unavailable response rather than a fake success/no-op.
+		writeError(w, http.StatusConflict, "action_unavailable", "usage refresh is not supported for this provider")
+		return
+	}
+	refreshErr := h.services.UsageRefresh.RefreshAccount(r.Context(), usage.Account{ID: account.ID, Provider: account.Provider, Enabled: account.Enabled})
 	value, latestErr := h.services.Usage.Latest(r.Context(), id)
 	if latestErr != nil {
 		notFoundOrInternal(w, latestErr, "usage")
@@ -477,7 +707,7 @@ func (h *handler) refreshUsage(w http.ResponseWriter, r *http.Request) {
 		value.Stale = true
 		value.Error = "refresh failed"
 	}
-	writeJSON(w, http.StatusOK, projectUsage(value))
+	writeJSON(w, http.StatusOK, projectUsage(account.Provider, value))
 }
 
 func (h *handler) allUsage(w http.ResponseWriter, r *http.Request) {
@@ -500,13 +730,14 @@ func (h *handler) allUsage(w http.ResponseWriter, r *http.Request) {
 			internalError(w)
 			return
 		}
-		views = append(views, projectUsage(value))
+		views = append(views, projectUsage(account.Provider, value))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"usage": views})
 }
 
 type modelView struct {
 	AccountID             string    `json:"account_id"`
+	Provider              string    `json:"provider"`
 	ID                    string    `json:"id"`
 	DisplayName           string    `json:"display_name,omitempty"`
 	Supported             bool      `json:"supported"`
@@ -518,12 +749,12 @@ type modelView struct {
 	Stale                 bool      `json:"stale"`
 }
 
-func projectModel(accountID string, value models.Capability) modelView {
+func projectModel(accountID string, kind provider.Kind, value models.Capability) modelView {
 	efforts := value.ReasoningEfforts
 	if efforts == nil {
 		efforts = []string{}
 	}
-	return modelView{AccountID: accountID, ID: value.ID, DisplayName: value.DisplayName, Supported: true, SupportsBackendSearch: value.SupportsBackendSearch, ContextWindow: value.ContextWindow, MaxOutputTokens: value.MaxOutputTokens, ReasoningEfforts: efforts, DiscoveredAt: value.DiscoveredAt, Stale: value.Stale}
+	return modelView{AccountID: accountID, Provider: string(kind), ID: value.ID, DisplayName: value.DisplayName, Supported: true, SupportsBackendSearch: value.SupportsBackendSearch, ContextWindow: value.ContextWindow, MaxOutputTokens: value.MaxOutputTokens, ReasoningEfforts: efforts, DiscoveredAt: value.DiscoveredAt, Stale: value.Stale}
 }
 
 func (h *handler) modelViews(ctx context.Context, accountsList []store.Account) ([]modelView, error) {
@@ -534,7 +765,7 @@ func (h *handler) modelViews(ctx context.Context, accountsList []store.Account) 
 			return nil, err
 		}
 		for _, value := range values {
-			views = append(views, projectModel(account.ID, value))
+			views = append(views, projectModel(account.ID, account.Provider, value))
 		}
 	}
 	return views, nil
@@ -570,7 +801,17 @@ func (h *handler) refreshModels(w http.ResponseWriter, r *http.Request) {
 	}
 	failed := false
 	for _, account := range accountsList {
-		if account.Enabled && h.services.ModelsRefresh.RefreshAccount(r.Context(), models.Account{ID: account.ID, AccessToken: account.Credentials.AccessToken, Enabled: true}) != nil {
+		// Global model refresh handles only providers with a registered
+		// ModelDiscoverer; providers without discovery (e.g. Devin) are
+		// skipped rather than treated as refresh failures.
+		if !account.Enabled {
+			continue
+		}
+		capabilities := h.accountCapabilities(account)
+		if capabilities.ModelDiscoverer == nil || capabilities.Credentials == nil {
+			continue
+		}
+		if h.services.ModelsRefresh.RefreshAccount(r.Context(), models.Account{ID: account.ID, Provider: account.Provider, Enabled: true}) != nil {
 			failed = true
 		}
 	}

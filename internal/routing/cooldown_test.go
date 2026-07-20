@@ -9,6 +9,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -21,62 +22,67 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	}
 	keys, _ := appcrypto.DeriveKeys(bytes.Repeat([]byte{15}, 32))
 	accounts := store.NewAccountRepository(database.DB, keys)
-	account, err := accounts.UpsertLogin(ctx, store.Account{Credentials: store.AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cooldown", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+	account, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Credentials: store.AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cooldown", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	states := store.NewCooldownRepository(database.DB)
 	manager := NewCooldownManager(states, accounts)
-	now := time.Now().UTC().Truncate(time.Second)
-	manager.now = func() time.Time { return now }
-	generic := ClassifiedError{Class: ClassRateLimit}
+	generic := provider.ErrorClassification{Class: provider.ClassRateLimit, CooldownScope: provider.CooldownModel}
 	if err := manager.Apply(ctx, account.ID, "model-a", generic); err != nil {
 		t.Fatal(err)
 	}
-	first, err := states.Get(ctx, account.ID, "model-a", now)
-	if err != nil || first.BackoffLevel != 1 || first.Until.Sub(now) != time.Minute {
+	first, err := states.Get(ctx, account.ID, "model-a", time.Now().UTC())
+	if err != nil || first.BackoffLevel != 1 || first.Until == nil || first.LastErrorAt == nil || first.Until.Sub(*first.LastErrorAt) != time.Minute {
 		t.Fatalf("first=%+v %v", first, err)
 	}
 	for level, minutes := range []time.Duration{2, 4, 8, 16, 30, 30} {
 		if err := manager.Apply(ctx, account.ID, "model-a", generic); err != nil {
 			t.Fatal(err)
 		}
-		state, err := states.Get(ctx, account.ID, "model-a", now)
+		state, err := states.Get(ctx, account.ID, "model-a", time.Now().UTC())
 		wantLevel := min(level+2, 6)
-		if err != nil || state.BackoffLevel != wantLevel || state.Until.Sub(now) != minutes*time.Minute {
+		if err != nil || state.BackoffLevel != wantLevel || state.Until == nil || state.LastErrorAt == nil || state.Until.Sub(*state.LastErrorAt) != minutes*time.Minute {
 			t.Fatalf("backoff level %d = %+v, %v", wantLevel, state, err)
 		}
 	}
-	latest, _ := states.Get(ctx, account.ID, "model-a", now)
-	now = latest.Until.Add(time.Second)
+	// Advance real time past the stored Until so the next Apply resets the
+	// backoff. PromoteExpired clears cooldown_until for rows whose deadline
+	// has passed; without a mutable clock, simulate expiry by rewriting the
+	// stored cooldown_until to the past via the repository, then re-Get so
+	// the row is observed as expired.
+	latest, _ := states.Get(ctx, account.ID, "model-a", time.Now().UTC())
+	if _, err := database.DB.ExecContext(ctx, `UPDATE account_model_states SET cooldown_until=? WHERE account_id=? AND model=?`, latest.LastErrorAt.Unix()-1, account.ID, "model-a"); err != nil {
+		t.Fatalf("force expiry: %v", err)
+	}
 	if err := manager.Apply(ctx, account.ID, "model-a", generic); err != nil {
 		t.Fatal(err)
 	}
-	second, _ := states.Get(ctx, account.ID, "model-a", now)
+	second, _ := states.Get(ctx, account.ID, "model-a", time.Now().UTC())
 	if second.BackoffLevel != 1 {
 		t.Fatalf("expired backoff not reset: %+v", second)
 	}
-	explicit := ClassifiedError{Class: ClassRateLimit, Cooldown: 10 * time.Minute, ExplicitRetryAfter: true}
+	explicit := provider.ErrorClassification{Class: provider.ClassRateLimit, CooldownScope: provider.CooldownModel, Cooldown: 10 * time.Minute, ExplicitRetryAfter: true}
 	if err := manager.Apply(ctx, account.ID, "model-b", explicit); err != nil {
 		t.Fatal(err)
 	}
-	modelB, _ := states.Get(ctx, account.ID, "model-b", now)
-	if modelB.Until.Sub(now) != 10*time.Minute {
+	modelB, _ := states.Get(ctx, account.ID, "model-b", time.Now().UTC())
+	if modelB.Until == nil || modelB.LastErrorAt == nil || modelB.Until.Sub(*modelB.LastErrorAt) != 10*time.Minute {
 		t.Fatalf("model-b=%+v", modelB)
 	}
-	accountWide := ClassifiedError{Class: ClassTransient, Cooldown: time.Minute, AccountWide: true}
+	accountWide := provider.ErrorClassification{Class: provider.ClassTransient, CooldownScope: provider.CooldownAccount, Cooldown: time.Minute}
 	if err := manager.Apply(ctx, account.ID, "model-a", accountWide); err != nil {
 		t.Fatal(err)
 	}
-	global, err := states.Get(ctx, account.ID, "*", now)
+	global, err := states.Get(ctx, account.ID, "*", time.Now().UTC())
 	if err != nil || global.Until == nil {
 		t.Fatalf("global cooldown = %+v, %v", global, err)
 	}
-	zeroRetry := ClassifiedError{Class: ClassRateLimit, ExplicitRetryAfter: true}
+	zeroRetry := provider.ErrorClassification{Class: provider.ClassRateLimit, CooldownScope: provider.CooldownModel, ExplicitRetryAfter: true}
 	if err := manager.Apply(ctx, account.ID, "zero", zeroRetry); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := states.Get(ctx, account.ID, "zero", now); err != sql.ErrNoRows {
+	if _, err := states.Get(ctx, account.ID, "zero", time.Now().UTC()); err != sql.ErrNoRows {
 		t.Fatalf("Retry-After zero persisted cooldown: %v", err)
 	}
 	var wg sync.WaitGroup
@@ -90,8 +96,8 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	concurrent, err := states.Get(ctx, account.ID, "concurrent", now)
-	if err != nil || concurrent.BackoffLevel != 6 || concurrent.Until.Sub(now) != 30*time.Minute {
+	concurrent, err := states.Get(ctx, account.ID, "concurrent", time.Now().UTC())
+	if err != nil || concurrent.BackoffLevel != 6 || concurrent.Until == nil || concurrent.LastErrorAt == nil || concurrent.Until.Sub(*concurrent.LastErrorAt) != 30*time.Minute {
 		t.Fatalf("concurrent cooldown = %+v, %v", concurrent, err)
 	}
 	if err := database.Close(); err != nil {
@@ -103,27 +109,66 @@ func TestCooldownProgressionIsolationRecoveryAndRestart(t *testing.T) {
 	}
 	defer database.Close()
 	states = store.NewCooldownRepository(database.DB)
-	restored, err := states.Get(ctx, account.ID, "model-b", now)
+	restored, err := states.Get(ctx, account.ID, "model-b", time.Now().UTC())
 	if err != nil || restored.Until == nil {
 		t.Fatalf("restored=%+v %v", restored, err)
 	}
 	manager = NewCooldownManager(states, store.NewAccountRepository(database.DB, keys))
-	manager.now = func() time.Time { return now }
 	if err := manager.Success(ctx, account.ID, "model-b"); err != nil {
 		t.Fatal(err)
 	}
-	ready, err := states.Get(ctx, account.ID, "model-b", now)
+	ready, err := states.Get(ctx, account.ID, "model-b", time.Now().UTC())
 	if err != nil || ready.Until != nil || ready.BackoffLevel != 0 {
 		t.Fatalf("ready=%+v %v", ready, err)
 	}
 	if ready.LastErrorClass != modelB.LastErrorClass || ready.LastErrorAt == nil || !ready.LastErrorAt.Equal(*modelB.LastErrorAt) {
 		t.Fatalf("success erased error audit: before=%+v after=%+v", modelB, ready)
 	}
-	if err := manager.Apply(ctx, account.ID, "model-a", InvalidGrant("")); err != nil {
+	if err := manager.Apply(ctx, account.ID, "model-a", provider.ErrorClassification{Class: provider.ClassInvalidGrant, DisableAccount: true, ReloginRequired: true, CooldownScope: provider.CooldownAccount}); err != nil {
 		t.Fatal(err)
 	}
 	disabled, err := manager.accounts.Get(ctx, account.ID)
 	if err != nil || disabled.Enabled {
 		t.Fatalf("disabled=%+v %v", disabled, err)
+	}
+}
+func TestCooldownApplyReloginRequired(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	database, err := store.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, _ := appcrypto.DeriveKeys(bytes.Repeat([]byte{15}, 32))
+	accounts := store.NewAccountRepository(database.DB, keys)
+	account, err := accounts.UpsertLogin(ctx, store.Account{Provider: provider.XAI, Credentials: store.AccountCredentials{Issuer: "https://auth.x.ai", Subject: "relogin", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := store.NewCooldownRepository(database.DB)
+	manager := NewCooldownManager(states, accounts)
+	classification := provider.ErrorClassification{Class: provider.ClassInvalidGrant, ReloginRequired: true, DisableAccount: true, CooldownScope: provider.CooldownAccount, Cooldown: time.Minute}
+	if err := manager.Apply(ctx, account.ID, "model-a", classification); err != nil {
+		t.Fatalf("Apply relogin: %v", err)
+	}
+	marked, err := accounts.Get(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("get marked account: %v", err)
+	}
+	if marked.Enabled {
+		t.Fatalf("relogin did not disable account: %+v", marked)
+	}
+	if marked.Status != "relogin_required" {
+		t.Fatalf("status=%q want relogin_required", marked.Status)
+	}
+	if marked.LastError != "authentication expired; reconnect required" {
+		t.Fatalf("last_error=%q want sanitized relogin message", marked.LastError)
+	}
+	if _, err := states.Get(ctx, account.ID, "model-a", time.Now().UTC()); err != sql.ErrNoRows {
+		t.Fatalf("relogin persisted cooldown row: %v", err)
+	}
+	if _, err := states.Get(ctx, account.ID, "*", time.Now().UTC()); err != sql.ErrNoRows {
+		t.Fatalf("relogin persisted account-wide cooldown row: %v", err)
 	}
 }

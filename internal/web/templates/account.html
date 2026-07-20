@@ -1,76 +1,15 @@
 {{define "content"}}
-<header class="page-heading">
-  <div>
-    <a class="back-link" href="/admin/accounts">← All accounts</a>
-    <div class="eyebrow">Account detail</div>
-    <h1>{{displayLabel .Account.Label}}</h1>
-    <p class="quiet"><code>{{.Account.ID}}</code></p>
-  </div>
-  <span class="badge {{if .Account.Enabled}}badge-positive{{else}}badge-neutral{{end}}">{{if .Account.Enabled}}{{.Account.Status}}{{else}}Disabled{{end}}</span>
-</header>
+<header class="page-heading"><div><a class="back-link" href="/admin/accounts">← All accounts</a><div class="eyebrow">{{providerLabel .Account.Provider}} account</div><h1>{{displayLabel .Account.Label}}</h1><p class="quiet"><code>{{.Account.ID}}</code></p></div><span class="badge {{if .Account.NeedsRelogin}}badge-warning{{else if .Account.Enabled}}badge-positive{{else}}badge-neutral{{end}}">{{if .Account.Enabled}}{{.Account.StatusLabel}}{{else if .Account.NeedsRelogin}}{{.Account.StatusLabel}}{{else}}Disabled{{end}}</span></header>
 {{if .ActionError}}<div class="notice notice-error" role="alert">{{.ActionError}}</div>{{end}}
 {{if .Account.SanitizedError}}<div class="notice notice-warning" role="status">{{.Account.SanitizedError}}</div>{{end}}
-<dl class="detail-list">
-  <div><dt>Credential expiry</dt><dd>{{formatTime .Account.ExpiresAt}}</dd></div>
-  <div><dt>Last credential refresh</dt><dd>{{formatTime .Account.LastRefreshAt}}</dd></div>
-  <div><dt>Usage fetched</dt><dd>{{formatTime .Account.UsageFetchedAt}}{{if .Account.UsageStale}} <span class="badge badge-warning">Stale</span>{{end}}</dd></div>
-  <div><dt>Nearest cooldown</dt><dd>{{formatTime .Account.CooldownUntil}}</dd></div>
-</dl>
-<section class="section-block" aria-labelledby="settings-heading">
-  <h2 id="settings-heading">Account settings</h2>
-  <div class="form-grid">
-    <form class="stack compact-form" method="post" action="{{accountLabelURL .Account.ID}}">
-      {{.CSRFField}}
-      <label for="account-label">Display label</label>
-      <input id="account-label" name="label" type="text" maxlength="100" value="{{.Account.Label}}" required>
-      <button class="button button-secondary" type="submit">Save label</button>
-    </form>
-    <form class="stack compact-form" method="post" action="{{accountEnabledURL .Account.ID}}">
-      {{.CSRFField}}
-      <input type="hidden" name="enabled" value="{{if .Account.Enabled}}false{{else}}true{{end}}">
-      <span class="field-label">Routing availability</span>
-      <p class="quiet">{{if .Account.Enabled}}Disable this account without deleting its credentials.{{else}}Return this account to the routing pool.{{end}}</p>
-      <button class="button button-secondary" type="submit">{{if .Account.Enabled}}Disable account{{else}}Enable account{{end}}</button>
-    </form>
-    <form class="stack compact-form" method="post" action="{{accountRefreshURL .Account.ID}}">
-      {{.CSRFField}}
-      <span class="field-label">Refresh account</span>
-      <p class="quiet">Refresh credentials, discovered models, and usage in one operation.</p>
-      <button class="button button-secondary" type="submit">Refresh now</button>
-    </form>
-  </div>
-</section>
-<section class="section-block" aria-labelledby="models-heading">
-  <h2 id="models-heading">Discovered models</h2>
-  {{if .Account.Models}}
-  <div class="table-wrap"><table>
-    <thead><tr><th scope="col">Model</th><th scope="col">Support</th><th scope="col">Backend search</th><th scope="col">Context</th><th scope="col">Discovered</th></tr></thead>
-    <tbody>{{range .Account.Models}}<tr>
-      <th scope="row">{{if .DisplayName}}{{.DisplayName}}<small class="table-subtext"><code>{{.Name}}</code></small>{{else}}<code>{{.Name}}</code>{{end}}</th>
-      <td>{{if .Supported}}<span class="badge badge-positive">Supported</span>{{else}}<span class="badge badge-neutral">Unavailable</span>{{end}}{{if .Stale}} <span class="badge badge-warning">Stale</span>{{end}}</td>
-      <td>{{searchSupport .SupportsBackendSearch}}</td>
-      <td>{{formatInt .ContextWindow}} tokens</td>
-      <td>{{formatTime .DiscoveredAt}}</td>
-    </tr>{{end}}</tbody>
-  </table></div>
-  {{else}}<div class="empty-inline">No model capability snapshot is available yet.</div>{{end}}
-</section>
-<section class="section-block" aria-labelledby="cooldowns-heading">
-  <h2 id="cooldowns-heading">Model cooldowns</h2>
-  {{if .Account.Cooldowns}}
-  <div class="table-wrap"><table>
-    <thead><tr><th scope="col">Model</th><th scope="col">Until</th><th scope="col">Backoff</th><th scope="col">Last class</th></tr></thead>
-    <tbody>{{range .Account.Cooldowns}}<tr><th scope="row"><code>{{.Model}}</code></th><td>{{formatTime .Until}}</td><td>Level {{.BackoffLevel}}</td><td>{{if .LastErrorClass}}{{.LastErrorClass}}{{else}}None{{end}}</td></tr>{{end}}</tbody>
-  </table></div>
-  {{else}}<div class="empty-inline">No active or recorded model cooldowns.</div>{{end}}
-</section>
-<section class="danger-zone" aria-labelledby="danger-heading">
-  <h2 id="danger-heading">Delete account</h2>
-  <p>Deletion removes credentials, capability state, cooldown state, and usage history. This cannot be undone.</p>
-  <form class="stack compact-form" method="post" action="{{accountDeleteURL .Account.ID}}">
-    {{.CSRFField}}
-    <label class="check-row"><input type="checkbox" name="confirm" value="delete" required> I understand this permanently deletes the account.</label>
-    <button class="button button-danger" type="submit">Delete account permanently</button>
-  </form>
-</section>
+{{if and .Account.NeedsRelogin .Account.CanRelogin}}<div class="notice notice-warning" role="status">This {{providerLabel .Account.Provider}} account must be reconnected before it can route requests. <a href="{{oauthNewURL .Account.Provider}}">Start a new {{providerLabel .Account.Provider}} connection</a>.</div>{{end}}
+<dl class="detail-list"><div><dt>Provider</dt><dd>{{providerLabel .Account.Provider}}</dd></div><div><dt>Credential expiry</dt><dd>{{formatTime .Account.ExpiresAt}}</dd></div><div><dt>Last credential refresh</dt><dd>{{formatTime .Account.LastRefreshAt}}</dd></div><div><dt>Nearest cooldown</dt><dd>{{formatTime .Account.CooldownUntil}}</dd></div><div><dt>Upstream usage</dt><dd>{{if .Account.CanRefreshUsage}}{{formatTime .Account.UsageFetchedAt}}{{if .Account.UsageStale}} <span class="badge badge-warning">Stale</span>{{end}}{{else}}Unavailable{{end}}</dd></div></dl>
+<section class="section-block" aria-labelledby="settings-heading"><h2 id="settings-heading">Account settings</h2><div class="form-grid">
+<form class="stack compact-form" method="post" action="{{accountLabelURL .Account.ID}}">{{.CSRFField}}<label for="account-label">Display label</label><input id="account-label" name="label" type="text" maxlength="100" value="{{.Account.Label}}" required><button class="button button-secondary" type="submit">Save label</button></form>
+<form class="stack compact-form" method="post" action="{{accountEnabledURL .Account.ID}}">{{.CSRFField}}<input type="hidden" name="enabled" value="{{if .Account.Enabled}}false{{else}}true{{end}}"><span class="field-label">Routing availability</span><p class="quiet">{{if .Account.Enabled}}Disable this account without deleting its credentials.{{else}}Return this account to the routing pool.{{end}}</p><button class="button button-secondary" type="submit">{{if .Account.Enabled}}Disable account{{else}}Enable account{{end}}</button></form>
+{{if .Account.CanRefresh}}<form class="stack compact-form" method="post" action="{{accountRefreshURL .Account.ID}}">{{.CSRFField}}<span class="field-label">Refresh account</span><p class="quiet">Refresh credentials and every available provider capability.</p><button class="button button-secondary" type="submit">Refresh now</button></form>{{else}}<div class="stack compact-form"><span class="field-label">Credential maintenance</span><p class="quiet">In-place credential refresh is unavailable for {{providerLabel .Account.Provider}}.{{if .Account.CanRelogin}} Reconnect the account when authorization expires.{{end}}</p></div>{{end}}
+</div></section>
+<section class="section-block" aria-labelledby="models-heading"><h2 id="models-heading">Provider models</h2>{{if .Account.Models}}<div class="table-wrap"><table><thead><tr><th scope="col">Model</th><th scope="col">Owner</th><th scope="col">Capability</th><th scope="col">Backend search</th><th scope="col">Limits</th><th scope="col">Discovered</th></tr></thead><tbody>{{range .Account.Models}}<tr><th scope="row">{{if .DisplayName}}{{.DisplayName}}<small class="table-subtext"><code>{{.Name}}</code> · upstream <code>{{.UpstreamName}}</code></small>{{else}}<code>{{.Name}}</code>{{if ne .Name .UpstreamName}}<small class="table-subtext">upstream <code>{{.UpstreamName}}</code></small>{{end}}{{end}}</th><td>{{.OwnedBy}}</td><td>{{if not .DiscoveryAvailable}}<span class="badge badge-positive">Static support</span>{{else if not .CapabilityKnown}}<span class="badge badge-neutral">Not checked</span>{{else if .Supported}}<span class="badge badge-positive">Supported</span>{{else}}<span class="badge badge-neutral">Unavailable</span>{{end}}{{if .Stale}} <span class="badge badge-warning">Stale</span>{{end}}</td><td>{{if isXAI .Provider}}{{if .CapabilityKnown}}{{searchSupport .SupportsBackendSearch}}{{else}}Not checked{{end}}{{else}}Not applicable{{end}}</td><td>{{if .CapabilityKnown}}{{formatInt .ContextWindow}} context<small class="table-subtext">{{formatInt .MaxOutputTokens}} max output</small>{{else}}Provider-defined{{end}}</td><td>{{if .CapabilityKnown}}{{formatTime .DiscoveredAt}}{{else}}Not applicable{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty-inline">No statically configured models belong to this provider.</div>{{end}}</section>
+<section class="section-block" aria-labelledby="cooldowns-heading"><h2 id="cooldowns-heading">Model cooldowns</h2>{{if .Account.Cooldowns}}<div class="table-wrap"><table><thead><tr><th scope="col">Model</th><th scope="col">Until</th><th scope="col">Backoff</th><th scope="col">Last class</th></tr></thead><tbody>{{range .Account.Cooldowns}}<tr><th scope="row"><code>{{.Model}}</code></th><td>{{formatTime .Until}}</td><td>Level {{.BackoffLevel}}</td><td>{{if .LastErrorClass}}{{.LastErrorClass}}{{else}}None{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty-inline">No active or recorded model cooldowns.</div>{{end}}</section>
+<section class="danger-zone" aria-labelledby="danger-heading"><h2 id="danger-heading">Delete account</h2><p>Deletion removes credentials, capability state, cooldown state, and usage history. This cannot be undone.</p><form class="stack compact-form" method="post" action="{{accountDeleteURL .Account.ID}}">{{.CSRFField}}<label class="check-row"><input type="checkbox" name="confirm" value="delete" required> I understand this permanently deletes the account.</label><button class="button button-danger" type="submit">Delete account permanently</button></form></section>
 {{end}}

@@ -213,7 +213,8 @@ a,
 .primary-nav a,
 tbody tr,
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+select {
   transition:
     background var(--transition-fast) var(--ease-out),
     border-color var(--transition-fast) var(--ease-out),
@@ -942,7 +943,8 @@ label,
 }
 
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+select {
   width: 100%;
   min-height: var(--control-height);
   padding: var(--space-2) var(--space-3);
@@ -954,12 +956,14 @@ input[type="password"] {
 }
 
 input[type="text"]:hover,
-input[type="password"]:hover {
+input[type="password"]:hover,
+select:hover {
   border-color: var(--ink-muted);
 }
 
 input[type="text"]:focus,
-input[type="password"]:focus {
+input[type="password"]:focus,
+select:focus {
   border-color: var(--phosphor);
 }
 
@@ -1374,6 +1378,7 @@ meter::-moz-meter-bar {
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 summary:focus-visible,
 [tabindex]:focus-visible {
   outline: 2px solid var(--focus);

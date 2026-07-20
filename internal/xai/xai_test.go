@@ -10,7 +10,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"byos/internal/provider"
 )
+
+func generationRequest(canonical provider.CanonicalRequest) provider.GenerationRequest {
+	return provider.GenerationRequest{
+		Model:      provider.ResolvedModel{UpstreamName: "grok-4.5", Provider: provider.XAI},
+		Canonical:  canonical,
+		Credential: provider.Credential{Value: "token"},
+	}
+}
 
 func TestSSEParserLargeMultilineAndCancellation(t *testing.T) {
 	large := strings.Repeat("x", 70<<10)
@@ -51,32 +61,35 @@ func TestResponsesExecutorAndHeaders(t *testing.T) {
 		fmt.Fprint(w, "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.completed\"}\n\n")
 	}))
 	defer server.Close()
-	client := NewClient(HTTPConfig{BaseURL: server.URL + "/v1", ClientVersion: "0.2.99", UserAgent: "byos/test", RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
-	body := []byte(`{"model":"grok-4.5","stream":false,"stream":false,"store":true,"store":true,"tools":[{"type":"x_search"}]}`)
-	events, err := client.Execute(context.Background(), "token", "grok-4.5", body)
+	client := NewProviderClient(NewClient(HTTPConfig{BaseURL: server.URL + "/v1", ClientVersion: "0.2.99", UserAgent: "byos/test", RequestTimeout: time.Second, SSEIdleTimeout: time.Second}))
+	canonical := provider.CanonicalRequest{"model": "grok-4.5", "stream": false, "store": true, "tools": []any{map[string]any{"type": "x_search"}}}
+	events, err := client.Execute(context.Background(), generationRequest(canonical))
 	if err != nil || len(events) != 2 {
 		t.Fatalf("events=%v err=%v", events, err)
 	}
 	if captured["stream"] != true || captured["store"] != false {
 		t.Fatalf("body=%v", captured)
 	}
-	if _, err := client.Execute(context.Background(), "token", "grok-4.5", []byte(`{"tools":[]}`)); err == nil {
+	if canonical["stream"] != false || canonical["store"] != true {
+		t.Fatalf("canonical request mutated: %v", canonical)
+	}
+	if _, err := client.Execute(context.Background(), generationRequest(provider.CanonicalRequest{"tools": []any{}})); err == nil {
 		t.Fatal("missing search reached network")
 	}
-	if _, err := client.Execute(context.Background(), "token", "grok-4.5", []byte(`{"tools":[{"type":"x_search"}],"tool_choice":"none"}`)); err == nil {
+	if _, err := client.Execute(context.Background(), generationRequest(provider.CanonicalRequest{"tools": []any{map[string]any{"type": "x_search"}}, "tool_choice": "none"})); err == nil {
 		t.Fatal("disabled search reached network")
 	}
 }
 
 func TestPrepareDoesNotInflatePromptsWithHTMLEscaping(t *testing.T) {
 	text := strings.Repeat("<system-notice>", 6000)
-	body := []byte(`{"input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"` + text + `"}]}],"tools":[{"type":"x_search"}]}`)
-	prepared, err := (&Client{}).prepare(body)
+	canonical := provider.CanonicalRequest{"input": []any{map[string]any{"type": "message", "role": "developer", "content": []any{map[string]any{"type": "input_text", "text": text}}}}, "tools": []any{map[string]any{"type": "x_search"}}}
+	prepared, err := (&Client{}).prepare(canonical, encodeWireJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(prepared), `\u003c`) || len(prepared) > len(body)+128 {
-		t.Fatalf("request expanded from %d to %d bytes", len(body), len(prepared))
+	if strings.Contains(string(prepared), `\u003c`) || len(prepared) > len(text)+256 {
+		t.Fatalf("request expanded to %d bytes for %d bytes of text", len(prepared), len(text))
 	}
 }
 
@@ -86,8 +99,8 @@ func TestResponsesExecutorAcceptsIncompleteTerminal(t *testing.T) {
 		fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n")
 	}))
 	defer server.Close()
-	client := NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
-	events, err := client.Execute(context.Background(), "token", "grok-4.5", []byte(`{"tools":[{"type":"x_search"}]}`))
+	client := NewProviderClient(NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second}))
+	events, err := client.Execute(context.Background(), generationRequest(provider.CanonicalRequest{"tools": []any{map[string]any{"type": "x_search"}}}))
 	if err != nil || len(events) != 1 {
 		t.Fatalf("events=%v err=%v", events, err)
 	}
@@ -110,13 +123,13 @@ func TestResponsesExecutorErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(test.handler)
 			defer server.Close()
-			client := NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
-			body := []byte(`{"tools":[{"type":"x_search"}]}`)
+			client := NewProviderClient(NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second}))
+			canonical := provider.CanonicalRequest{"tools": []any{map[string]any{"type": "x_search"}}}
 			var err error
 			if test.stream {
-				_, err = client.Stream(context.Background(), "token", "grok-4.5", body)
+				_, err = client.Stream(context.Background(), generationRequest(canonical))
 			} else {
-				_, err = client.Execute(context.Background(), "token", "grok-4.5", body)
+				_, err = client.Execute(context.Background(), generationRequest(canonical))
 			}
 			if err == nil {
 				t.Fatal("expected error")
@@ -150,8 +163,8 @@ func TestResponsesTotalTimeoutAndBufferedCancellation(t *testing.T) {
 			<-r.Context().Done()
 		}))
 		defer server.Close()
-		client := NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: 50 * time.Millisecond, SSEIdleTimeout: time.Second})
-		_, err := client.Execute(context.Background(), "token", "grok-4.5", []byte(`{"tools":[{"type":"x_search"}]}`))
+		client := NewProviderClient(NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: 50 * time.Millisecond, SSEIdleTimeout: time.Second}))
+		_, err := client.Execute(context.Background(), generationRequest(provider.CanonicalRequest{"tools": []any{map[string]any{"type": "x_search"}}}))
 		if err == nil {
 			t.Fatal("request exceeded total timeout")
 		}
@@ -161,9 +174,9 @@ func TestResponsesTotalTimeoutAndBufferedCancellation(t *testing.T) {
 			fmt.Fprint(w, "data: {\"type\":\"response.created\"}\n\n")
 		}))
 		defer server.Close()
-		client := NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second})
+		client := NewProviderClient(NewClient(HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second, SSEIdleTimeout: time.Second}))
 		ctx, cancel := context.WithCancel(context.Background())
-		stream, err := client.Stream(ctx, "token", "grok-4.5", []byte(`{"tools":[{"type":"x_search"}]}`))
+		stream, err := client.Stream(ctx, generationRequest(provider.CanonicalRequest{"tools": []any{map[string]any{"type": "x_search"}}}))
 		if err != nil {
 			t.Fatal(err)
 		}

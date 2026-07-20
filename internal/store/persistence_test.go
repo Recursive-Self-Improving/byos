@@ -11,6 +11,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 )
 
 func openRepositories(t *testing.T) (*SQLite, appcrypto.Keys) {
@@ -33,7 +34,7 @@ func TestAccountPersistenceReloginAndPlaintextAbsence(t *testing.T) {
 	repo := NewAccountRepository(store.DB, keys)
 	expires := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	credentials := AccountCredentials{Issuer: "https://auth.x.ai", Subject: "subject-fixture", Email: "secret@example.com", AccessToken: "access-token-fixture", RefreshToken: "refresh-token-fixture", IDToken: "id-token-fixture", TokenEndpoint: "https://auth.x.ai/token", RawIdentity: json.RawMessage(`{"sub":"subject-fixture"}`)}
-	created, err := repo.UpsertLogin(ctx, Account{Label: "primary", Credentials: credentials, ExpiresAt: &expires})
+	created, err := repo.UpsertLogin(ctx, Account{Provider: provider.XAI, Label: "primary", Credentials: credentials, ExpiresAt: &expires})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,7 @@ func TestAccountPersistenceReloginAndPlaintextAbsence(t *testing.T) {
 		t.Fatal(err)
 	}
 	credentials.AccessToken = "rotated-access-token"
-	relogged, err := repo.UpsertLogin(ctx, Account{Label: "ignored", Credentials: credentials, ExpiresAt: &expires})
+	relogged, err := repo.UpsertLogin(ctx, Account{Provider: provider.XAI, Label: "ignored", Credentials: credentials, ExpiresAt: &expires})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestCapabilityAndCooldownSurviveReopen(t *testing.T) {
 	}
 	keys, _ := appcrypto.DeriveKeys(bytes.Repeat([]byte{8}, 32))
 	accounts := NewAccountRepository(first.DB, keys)
-	account, err := accounts.UpsertLogin(ctx, Account{Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cap-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+	account, err := accounts.UpsertLogin(ctx, Account{Provider: provider.XAI, Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "cap-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,27 +131,38 @@ func TestEncryptedOAuthUsageAndResponseRepositories(t *testing.T) {
 	store, keys := openRepositories(t)
 	defer store.Close()
 	accounts := NewAccountRepository(store.DB, keys)
-	account, err := accounts.UpsertLogin(ctx, Account{Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "repo-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
+	account, err := accounts.UpsertLogin(ctx, Account{Provider: provider.XAI, Credentials: AccountCredentials{Issuer: "https://auth.x.ai", Subject: "repo-sub", AccessToken: "token", TokenEndpoint: "https://auth.x.ai/token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	oauth := NewOAuthSessionRepository(store.DB, keys)
-	session := OAuthSession{State: "browser-state", DeviceCode: "device-secret", UserCode: "USER-CODE", VerificationURI: "https://auth.x.ai/device", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(time.Hour)}
+	session := OAuthSession{Provider: provider.XAI, FlowType: OAuthFlowDevice, State: "browser-state", DeviceCode: "device-secret", UserCode: "USER-CODE", VerificationURI: "https://auth.x.ai/device", TokenEndpoint: "https://auth.x.ai/token", PollInterval: 5 * time.Second, ExpiresAt: now.Add(time.Hour)}
 	if err := oauth.Create(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	got, err := oauth.GetPending(ctx, session.State, now)
+	got, err := oauth.GetPending(ctx, provider.XAI, OAuthFlowDevice, session.State, now)
 	if err != nil || got.DeviceCode != "device-secret" {
 		t.Fatalf("oauth = %+v, %v", got, err)
 	}
-	if err := oauth.Transition(ctx, session.State, "completed", ""); err != nil {
+	authorization := OAuthAuthorization{AccessToken: "oauth-access-token", AuthorizedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := oauth.Authorize(ctx, provider.XAI, OAuthFlowDevice, session.State, authorization, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := oauth.GetPending(ctx, session.State, now); err != sql.ErrNoRows {
-		t.Fatalf("terminal session resumed: %v", err)
+	if err := oauth.Complete(ctx, provider.XAI, OAuthFlowDevice, session.State, account.ID, now); err != nil {
+		t.Fatal(err)
 	}
-	if err := oauth.Transition(ctx, session.State, "failed", ""); err != sql.ErrNoRows {
+	_, pendingErr := oauth.GetPending(ctx, provider.XAI, OAuthFlowDevice, session.State, now)
+	if !errors.Is(pendingErr, sql.ErrNoRows) {
+		t.Fatalf("terminal session resumed: %v", pendingErr)
+	}
+	// A terminal session must not be classifiable as a cancellable conflict:
+	// GetPending returns a plain not-found for non-pending rows, while
+	// mutation methods (Fail below) distinguish ErrOAuthTerminalConflict.
+	if errors.Is(pendingErr, ErrOAuthTerminalConflict) {
+		t.Fatalf("GetPending must not surface terminal conflict: %v", pendingErr)
+	}
+	if err := oauth.Fail(ctx, provider.XAI, OAuthFlowDevice, session.State, "", now); !errors.Is(err, ErrOAuthTerminalConflict) {
 		t.Fatalf("terminal session mutated: %v", err)
 	}
 	usage := NewUsageRepository(store.DB, keys)
@@ -193,5 +205,55 @@ func TestEncryptedOAuthUsageAndResponseRepositories(t *testing.T) {
 	}
 	if count, err := oauth.Cleanup(ctx, now.Add(2*time.Hour)); err != nil || count != 1 {
 		t.Fatalf("oauth cleanup = %d, %v", count, err)
+	}
+}
+
+func TestDevinOAuthTransactionDurablePayloadInventory(t *testing.T) {
+	ctx := context.Background()
+	database, keys := openRepositories(t)
+	defer database.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	state := "inventory-raw-state"
+	verifier := "inventory-pkce-verifier"
+	redirectURI := "https://inventory.example.test/oauth/callback"
+	token := "inventory-opaque-token"
+	createConsumedDevinSession(t, database.DB, keys, state, verifier, redirectURI, now)
+	created, err := NewDevinOAuthTransaction(database.DB, keys).Complete(ctx, state, devinAccount(token, now.Add(time.Hour)), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accountEnvelope, oauthEnvelope string
+	if err := database.DB.QueryRowContext(ctx, `SELECT credentials_encrypted FROM accounts WHERE id=?`, created.ID).Scan(&accountEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	hash := stateHash(state)
+	if err := database.DB.QueryRowContext(ctx, `SELECT payload_encrypted FROM oauth_sessions WHERE state_hash=?`, hash[:]).Scan(&oauthEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	accountPlain, err := appcrypto.Decrypt(keys.OAuth(), accountEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthPlain, err := appcrypto.Decrypt(keys.OAuth(), oauthEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accountPayload, oauthPayload map[string]json.RawMessage
+	if err := json.Unmarshal(accountPlain, &accountPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(oauthPlain, &oauthPayload); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"code", "state", "user_jwt", "raw_state", "authorization_code"} {
+		if _, ok := accountPayload[forbidden]; ok {
+			t.Fatalf("account payload contains forbidden field %q", forbidden)
+		}
+		if _, ok := oauthPayload[forbidden]; ok {
+			t.Fatalf("oauth payload contains forbidden field %q", forbidden)
+		}
+	}
+	if len(oauthPayload) != 1 || string(oauthPayload["account_id"]) != `"`+created.ID+`"` {
+		t.Fatalf("completed oauth payload = %s", oauthPlain)
 	}
 }

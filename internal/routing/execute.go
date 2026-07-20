@@ -1,89 +1,56 @@
 package routing
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
 
-	oauthxai "byos/internal/oauth/xai"
-	"byos/internal/search"
+	"byos/internal/provider"
 	"byos/internal/store"
-	"byos/internal/xai"
 )
 
-// ModelResolver resolves public model names and aliases to an upstream model.
-type ModelResolver interface {
-	Resolve(string) (string, error)
+type accountSource interface {
+	List(context.Context) ([]store.Account, error)
+	Get(context.Context, string) (store.Account, error)
+}
+type modelCapabilitySource interface {
+	List(context.Context, string) ([]store.ModelCapability, error)
+}
+type cooldownSource interface {
+	Get(context.Context, string, string, time.Time) (store.Cooldown, error)
 }
 
-// ResolverFunc adapts a function to ModelResolver.
-type ResolverFunc func(string) (string, error)
-
-func (f ResolverFunc) Resolve(model string) (string, error) { return f(model) }
-
-type executionClient interface {
-	Execute(context.Context, string, string, []byte) ([]xai.Event, error)
-	Stream(context.Context, string, string, []byte) (*xai.Stream, error)
-}
-
-type credentialRefresher interface {
-	Refresh(context.Context, string) (store.Account, error)
-}
-type LocalUsageDelta struct{ Requests, Failures, InputTokens, OutputTokens int64 }
+type LocalUsageDelta struct{ Requests, Failures, InputTokens, OutputTokens, CacheReadTokens int64 }
 type UsageRecorder interface {
 	Record(context.Context, string, LocalUsageDelta) error
 }
 
-// Executor coordinates account selection, credential refresh, cooldowns, and xAI execution.
 type Executor struct {
 	scheduler    *Scheduler
-	client       executionClient
-	refresher    credentialRefresher
+	catalog      provider.ModelCatalog
+	registry     provider.CapabilityRegistry
 	cooldowns    *CooldownManager
-	accounts     *store.AccountRepository
-	capabilities *store.ModelCapabilityRepository
-	states       *store.CooldownRepository
-	resolver     ModelResolver
+	accounts     accountSource
+	capabilities modelCapabilitySource
+	states       cooldownSource
 	usage        UsageRecorder
-	now          func() time.Time
 }
 
-func NewExecutor(
-	scheduler *Scheduler,
-	client *xai.Client,
-	refresher *oauthxai.RefreshService,
-	cooldowns *CooldownManager,
-	accounts *store.AccountRepository,
-	capabilities *store.ModelCapabilityRepository,
-	states *store.CooldownRepository,
-	resolver ModelResolver,
-) *Executor {
-	return newExecutor(scheduler, client, refresher, cooldowns, accounts, capabilities, states, resolver)
+func NewExecutor(scheduler *Scheduler, catalog provider.ModelCatalog, registry provider.CapabilityRegistry, cooldowns *CooldownManager, accounts *store.AccountRepository, capabilities *store.ModelCapabilityRepository, states *store.CooldownRepository) *Executor {
+	return newExecutor(scheduler, catalog, registry, cooldowns, accounts, capabilities, states)
 }
 
-func newExecutor(
-	scheduler *Scheduler,
-	client executionClient,
-	refresher credentialRefresher,
-	cooldowns *CooldownManager,
-	accounts *store.AccountRepository,
-	capabilities *store.ModelCapabilityRepository,
-	states *store.CooldownRepository,
-	resolver ModelResolver,
-) *Executor {
+func newExecutor(scheduler *Scheduler, catalog provider.ModelCatalog, registry provider.CapabilityRegistry, cooldowns *CooldownManager, accounts accountSource, capabilities modelCapabilitySource, states cooldownSource) *Executor {
 	if scheduler == nil {
 		scheduler = NewScheduler()
 	}
-	return &Executor{
-		scheduler: scheduler, client: client, refresher: refresher, cooldowns: cooldowns,
-		accounts: accounts, capabilities: capabilities, states: states, resolver: resolver,
-		now: func() time.Time { return time.Now().UTC() },
-	}
+	return &Executor{scheduler: scheduler, catalog: catalog, registry: registry, cooldowns: cooldowns, accounts: accounts, capabilities: capabilities, states: states}
 }
 func (e *Executor) SetUsageRecorder(recorder UsageRecorder) { e.usage = recorder }
 
@@ -96,22 +63,28 @@ func (e *Executor) record(ctx context.Context, accountID string, delta LocalUsag
 	_ = e.usage.Record(recordCtx, accountID, delta)
 }
 
-func terminalUsage(event xai.Event) (LocalUsageDelta, bool) {
+func terminalUsage(event provider.Event) (LocalUsageDelta, bool) {
+	if event.Usage != (provider.Usage{}) {
+		return LocalUsageDelta{Requests: 1, InputTokens: event.Usage.InputTokens, OutputTokens: event.Usage.OutputTokens, CacheReadTokens: event.Usage.CacheReadTokens}, true
+	}
 	var raw struct {
 		Type     string `json:"type"`
 		Response struct {
 			Usage struct {
-				InputTokens  int64 `json:"input_tokens"`
-				OutputTokens int64 `json:"output_tokens"`
+				InputTokens        int64 `json:"input_tokens"`
+				OutputTokens       int64 `json:"output_tokens"`
+				InputTokensDetails struct {
+					CachedTokens int64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
 			} `json:"usage"`
 		} `json:"response"`
 	}
 	if json.Unmarshal(event.Data, &raw) != nil || (raw.Type != "response.completed" && raw.Type != "response.incomplete") {
 		return LocalUsageDelta{}, false
 	}
-	return LocalUsageDelta{Requests: 1, InputTokens: raw.Response.Usage.InputTokens, OutputTokens: raw.Response.Usage.OutputTokens}, true
+	return LocalUsageDelta{Requests: 1, InputTokens: raw.Response.Usage.InputTokens, OutputTokens: raw.Response.Usage.OutputTokens, CacheReadTokens: raw.Response.Usage.InputTokensDetails.CachedTokens}, true
 }
-func completedUsage(events []xai.Event) LocalUsageDelta {
+func completedUsage(events []provider.Event) LocalUsageDelta {
 	for index := len(events) - 1; index >= 0; index-- {
 		if delta, ok := terminalUsage(events[index]); ok {
 			return delta
@@ -120,23 +93,16 @@ func completedUsage(events []xai.Event) LocalUsageDelta {
 	return LocalUsageDelta{Requests: 1}
 }
 
-// Request is a canonical xAI Responses request plus optional response affinity.
 type Request struct {
 	Model              string
 	Body               []byte
 	PreferredAccountID string
 }
-
-// Result is a completed non-stream execution.
 type Result struct {
 	Model, AccountID string
-	Events           []xai.Event
+	Events           []provider.Event
 }
-
-// ExecutionError preserves the sanitized routing classification without exposing upstream response bodies.
-type ExecutionError struct {
-	Classified ClassifiedError
-}
+type ExecutionError struct{ Classified provider.ErrorClassification }
 
 func (e *ExecutionError) Error() string {
 	if e.Classified.PublicMessage != "" {
@@ -145,12 +111,18 @@ func (e *ExecutionError) Error() string {
 	return "request execution failed"
 }
 
+type executionPlan struct {
+	model        provider.ResolvedModel
+	capabilities provider.Capabilities
+	canonical    provider.CanonicalRequest
+}
+
 func (e *Executor) Execute(ctx context.Context, request Request) (Result, error) {
-	model, body, err := e.prepare(request)
+	plan, err := e.prepare(ctx, request)
 	if err != nil {
 		return Result{}, err
 	}
-	ordered, err := e.candidates(ctx, model, request.PreferredAccountID)
+	ordered, err := e.candidates(ctx, plan.model, plan.capabilities.Credentials, request.PreferredAccountID)
 	if err != nil {
 		if errors.Is(err, ErrNoAvailableAccounts) {
 			return Result{}, ErrModelUnavailable
@@ -163,10 +135,14 @@ func (e *Executor) Execute(ctx context.Context, request Request) (Result, error)
 		if err != nil {
 			return Result{}, err
 		}
-		account, classified, err := e.readyAccount(ctx, account)
+		if account.Provider != plan.model.Provider {
+			continue
+		}
+		credential, err := plan.capabilities.Credentials.Credential(ctx, account.ID)
 		if err != nil {
-			e.record(ctx, candidate.ID, LocalUsageDelta{Requests: 1, Failures: 1})
-			classified, applyErr := e.applyFailure(ctx, candidate.ID, model, classified)
+			classified := classifyExecutionError(err)
+			e.record(ctx, account.ID, LocalUsageDelta{Requests: 1, Failures: 1})
+			classified, applyErr := e.applyFailure(ctx, account.ID, plan.model.UpstreamName, classified)
 			if applyErr != nil {
 				return Result{}, applyErr
 			}
@@ -176,33 +152,32 @@ func (e *Executor) Execute(ctx context.Context, request Request) (Result, error)
 			}
 			return Result{}, last
 		}
-		events, err := e.client.Execute(ctx, account.Credentials.AccessToken, model, body)
+		events, err := plan.capabilities.Generation.Execute(ctx, provider.GenerationRequest{Model: plan.model, Canonical: plan.canonical, Credential: credential})
 		if err == nil {
-			if err := e.cooldowns.Success(ctx, account.ID, model); err != nil {
+			if err := e.cooldowns.Success(ctx, account.ID, plan.model.UpstreamName); err != nil {
 				return Result{}, err
 			}
 			e.record(ctx, account.ID, completedUsage(events))
-			return Result{Model: model, AccountID: account.ID, Events: events}, nil
+			return Result{Model: plan.model.UpstreamName, AccountID: account.ID, Events: events}, nil
 		}
-		classified = classifyExecutionError(err, e.now())
+		classified := classifyExecutionError(err)
 		if classified.RefreshSame {
-			refreshed, refreshClass, refreshErr := e.refresh(ctx, account.ID)
-			if refreshErr == nil {
-				events, err = e.client.Execute(ctx, refreshed.Credentials.AccessToken, model, body)
+			credential, recoveryClassification, retrySame := recoverAuthentication(ctx, plan.capabilities.Credentials, account.ID, err, classified)
+			classified = recoveryClassification
+			if retrySame {
+				events, err = plan.capabilities.Generation.Execute(ctx, provider.GenerationRequest{Model: plan.model, Canonical: plan.canonical, Credential: credential})
 				if err == nil {
-					if err := e.cooldowns.Success(ctx, account.ID, model); err != nil {
+					if err := e.cooldowns.Success(ctx, account.ID, plan.model.UpstreamName); err != nil {
 						return Result{}, err
 					}
 					e.record(ctx, account.ID, completedUsage(events))
-					return Result{Model: model, AccountID: account.ID, Events: events}, nil
+					return Result{Model: plan.model.UpstreamName, AccountID: account.ID, Events: events}, nil
 				}
-				classified = classifyExecutionError(err, e.now())
-			} else {
-				err, classified = refreshErr, refreshClass
+				classified = classifyExecutionError(err)
 			}
 		}
 		e.record(ctx, account.ID, LocalUsageDelta{Requests: 1, Failures: 1})
-		classified, applyErr := e.applyFailure(ctx, account.ID, model, classified)
+		classified, applyErr := e.applyFailure(ctx, account.ID, plan.model.UpstreamName, classified)
 		if applyErr != nil {
 			return Result{}, applyErr
 		}
@@ -217,53 +192,126 @@ func (e *Executor) Execute(ctx context.Context, request Request) (Result, error)
 	return Result{}, ErrNoAvailableAccounts
 }
 
-func (e *Executor) prepare(request Request) (string, []byte, error) {
-	if e.resolver == nil {
-		return "", nil, errors.New("model resolver is required")
+// recoverAuthentication performs exactly one provider-owned recovery. A typed,
+// sanitized recovery error replaces the original 401 classification. Generic
+// recovery failures preserve the original 401 disposition, and no failure path
+// returns a credential that could resend the rejected token.
+func recoverAuthentication(ctx context.Context, credentials provider.CredentialManager, accountID string, cause error, original provider.ErrorClassification) (provider.Credential, provider.ErrorClassification, bool) {
+	var upstream *provider.UpstreamError
+	if !errors.As(cause, &upstream) {
+		return provider.Credential{}, original, false
 	}
-	model, err := e.resolver.Resolve(request.Model)
+	if err := credentials.AuthenticationFailed(ctx, accountID, upstream); err != nil {
+		if classified, ok := typedErrorClassification(err); ok {
+			return provider.Credential{}, classified, false
+		}
+		return provider.Credential{}, original, false
+	}
+	credential, err := credentials.Credential(ctx, accountID)
 	if err != nil {
-		return "", nil, err
+		if classified, ok := typedErrorClassification(err); ok {
+			return provider.Credential{}, classified, false
+		}
+		return provider.Credential{}, original, false
 	}
-	if model == "" {
-		return "", nil, errors.New("resolved model is empty")
-	}
-	if err := search.Validate(request.Body); err != nil {
-		return "", nil, fmt.Errorf("x_search invariant: %w", err)
-	}
-	body := request.Body
-	var canonical map[string]any
-	if err := json.Unmarshal(body, &canonical); err != nil {
-		return "", nil, err
-	}
-	canonical["model"] = model
-	body, err = json.Marshal(canonical)
-	if err != nil {
-		return "", nil, fmt.Errorf("encode canonical request: %w", err)
-	}
-	return model, body, nil
+	return credential, original, true
 }
 
-func (e *Executor) candidates(ctx context.Context, model, preferred string) ([]Candidate, error) {
+func typedErrorClassification(err error) (provider.ErrorClassification, bool) {
+	var upstream *provider.UpstreamError
+	if !errors.As(err, &upstream) {
+		return provider.ErrorClassification{}, false
+	}
+	return upstream.Classification, true
+}
+
+func (e *Executor) prepare(ctx context.Context, request Request) (executionPlan, error) {
+	if e.catalog == nil {
+		return executionPlan{}, errors.New("model catalog is required")
+	}
+	resolved, err := e.catalog.Resolve(request.Model)
+	if err != nil {
+		if errors.Is(err, provider.ErrUnknownModel) {
+			return executionPlan{}, ErrModelUnavailable
+		}
+		return executionPlan{}, err
+	}
+	if !resolved.Provider.Valid() || resolved.UpstreamName == "" || resolved.PolicyKey == "" {
+		return executionPlan{}, errors.New("resolved model is incomplete")
+	}
+	if e.registry == nil {
+		return executionPlan{}, ErrModelUnavailable
+	}
+	capabilities, ok := e.registry.Capabilities(resolved.Provider, resolved.PolicyKey)
+	if !ok || capabilities.Policy == nil || capabilities.Generation == nil || capabilities.Credentials == nil {
+		return executionPlan{}, ErrModelUnavailable
+	}
+	canonical, err := decodeCanonicalRequest(request.Body)
+	if err != nil {
+		return executionPlan{}, err
+	}
+	if err := capabilities.Policy.Prepare(ctx, resolved, canonical); err != nil {
+		return executionPlan{}, err
+	}
+	canonical["model"] = resolved.UpstreamName
+	return executionPlan{model: resolved, capabilities: capabilities, canonical: canonical}, nil
+}
+
+func decodeCanonicalRequest(body []byte) (provider.CanonicalRequest, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var canonical provider.CanonicalRequest
+	if err := decoder.Decode(&canonical); err != nil {
+		return nil, err
+	}
+	if canonical == nil {
+		return nil, errors.New("canonical request must be a JSON object")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("canonical request must contain one JSON value")
+		}
+		return nil, err
+	}
+	return canonical, nil
+}
+
+func (e *Executor) candidates(ctx context.Context, resolved provider.ResolvedModel, credentials provider.CredentialManager, preferred string) ([]Candidate, error) {
 	accounts, err := e.accounts.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	now := e.now()
+	now := time.Now().UTC()
 	candidates := make([]Candidate, 0, len(accounts))
+	usability, checkUsability := credentials.(provider.CredentialUsability)
 	for _, account := range accounts {
-		candidate := Candidate{ID: account.ID, Enabled: account.Enabled, Valid: account.Status == "ready" && oauthxai.CredentialsUsable(account, now), Capabilities: make(map[string]bool), CooldownUntil: make(map[string]time.Time)}
+		if account.Provider != resolved.Provider {
+			continue
+		}
+		valid := account.Status == "ready"
+		if valid && checkUsability {
+			valid, err = usability.CredentialUsable(ctx, account.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		candidate := Candidate{ID: account.ID, Provider: account.Provider, Enabled: account.Enabled, Valid: valid, Capabilities: make(map[string]bool), CooldownUntil: make(map[string]time.Time)}
 		capabilities, err := e.capabilities.List(ctx, account.ID)
 		if err != nil {
 			return nil, err
 		}
 		candidate.CapabilitiesKnown = len(capabilities) > 0
 		for _, capability := range capabilities {
-			if capability.Supported && (capability.SupportsBackendSearch == nil || *capability.SupportsBackendSearch) {
-				candidate.Capabilities[capability.Model] = true
+			if !capability.Supported {
+				continue
 			}
+			if resolved.Provider == provider.XAI && capability.SupportsBackendSearch != nil && !*capability.SupportsBackendSearch {
+				continue
+			}
+			candidate.Capabilities[capability.Model] = true
 		}
-		for _, scope := range []string{model, "*"} {
+		for _, scope := range []string{resolved.UpstreamName, "*"} {
 			state, err := e.states.Get(ctx, account.ID, scope, now)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return nil, err
@@ -274,20 +322,19 @@ func (e *Executor) candidates(ctx context.Context, model, preferred string) ([]C
 		}
 		candidates = append(candidates, candidate)
 	}
-	ordered, err := e.scheduler.Order(model, candidates, preferred, now)
+	ordered, err := e.scheduler.OrderForProvider(resolved.Provider, resolved.UpstreamName, candidates, preferred, now)
 	if errors.Is(err, ErrNoAvailableAccounts) {
-		if classified, ok := allCoolingClassification(candidates, model, now); ok {
+		if classified, ok := allCoolingClassification(candidates, resolved.Provider, resolved.UpstreamName, now); ok {
 			return nil, &ExecutionError{Classified: classified}
 		}
 	}
 	return ordered, err
 }
 
-func allCoolingClassification(candidates []Candidate, model string, now time.Time) (ClassifiedError, bool) {
-	known := make([]Candidate, 0, len(candidates))
-	unknown := make([]Candidate, 0, len(candidates))
+func allCoolingClassification(candidates []Candidate, kind provider.Kind, model string, now time.Time) (provider.ErrorClassification, bool) {
+	known, unknown := make([]Candidate, 0, len(candidates)), make([]Candidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		if !candidate.Enabled || !candidate.Valid {
+		if candidate.Provider != kind || !candidate.Enabled || !candidate.Valid {
 			continue
 		}
 		if candidate.CapabilitiesKnown {
@@ -303,7 +350,7 @@ func allCoolingClassification(candidates []Candidate, model string, now time.Tim
 		eligible = unknown
 	}
 	if len(eligible) == 0 {
-		return ClassifiedError{}, false
+		return provider.ErrorClassification{}, false
 	}
 	var earliest time.Time
 	for _, candidate := range eligible {
@@ -312,49 +359,24 @@ func allCoolingClassification(candidates []Candidate, model string, now time.Tim
 			availableAt = global
 		}
 		if !availableAt.After(now) {
-			return ClassifiedError{}, false
+			return provider.ErrorClassification{}, false
 		}
 		if earliest.IsZero() || availableAt.Before(earliest) {
 			earliest = availableAt
 		}
 	}
-	return ClassifiedError{
-		Class: ClassRateLimit, ExplicitRetryAfter: true, Cooldown: earliest.Sub(now), RetryAfter: earliest,
-		PublicStatus: http.StatusTooManyRequests, PublicCode: "rate_limit_exceeded", PublicMessage: "all available accounts are rate limited",
-	}, true
+	return provider.ErrorClassification{Class: provider.ClassRateLimit, ExplicitRetryAfter: true, CooldownScope: provider.CooldownModel, Cooldown: earliest.Sub(now), RetryAfter: earliest, PublicStatus: http.StatusTooManyRequests, PublicCode: "rate_limit_exceeded", PublicMessage: "all available accounts are rate limited"}, true
 }
 
-func (e *Executor) readyAccount(ctx context.Context, account store.Account) (store.Account, ClassifiedError, error) {
-	if !oauthxai.NeedsRefresh(account, e.now()) {
-		return account, ClassifiedError{}, nil
-	}
-	refreshed, classified, err := e.refresh(ctx, account.ID)
-	return refreshed, classified, err
-}
-
-func (e *Executor) refresh(ctx context.Context, accountID string) (store.Account, ClassifiedError, error) {
-	account, err := e.refresher.Refresh(ctx, accountID)
-	if err == nil {
-		return account, ClassifiedError{}, nil
-	}
-	var oauthErr *oauthxai.OAuthError
-	if errors.As(err, &oauthErr) && oauthErr.Code == "invalid_grant" {
-		classified := InvalidGrant(oauthErr.Description)
-		return store.Account{}, classified, err
-	}
-	classified := Classify(0, nil, nil, err, nil, e.now())
-	return store.Account{}, classified, err
-}
-
-func (e *Executor) applyFailure(ctx context.Context, accountID, model string, classified ClassifiedError) (ClassifiedError, error) {
+func (e *Executor) applyFailure(ctx context.Context, accountID, model string, classified provider.ErrorClassification) (provider.ErrorClassification, error) {
 	if err := e.cooldowns.Apply(ctx, accountID, model, classified); err != nil {
 		return classified, err
 	}
 	scope := model
-	if classified.AccountWide {
+	if classified.CooldownScope == provider.CooldownAccount {
 		scope = "*"
 	}
-	now := e.now()
+	now := time.Now().UTC()
 	state, err := e.states.Get(ctx, accountID, scope, now)
 	if errors.Is(err, sql.ErrNoRows) {
 		return classified, nil
@@ -369,14 +391,25 @@ func (e *Executor) applyFailure(ctx context.Context, accountID, model string, cl
 	return classified, nil
 }
 
-func classifyExecutionError(err error, now time.Time) ClassifiedError {
-	var upstream *xai.UpstreamError
+func classifyExecutionError(err error) provider.ErrorClassification {
+	var upstream *provider.UpstreamError
 	if errors.As(err, &upstream) {
-		return Classify(upstream.Status, upstream.Headers, []byte(upstream.Body), nil, nil, now)
+		return upstream.Classification
+	}
+	base := provider.ErrorClassification{Class: provider.ClassUpstream, PublicStatus: http.StatusBadGateway, PublicCode: "provider_error", PublicMessage: "upstream provider error"}
+	if errors.Is(err, context.Canceled) {
+		base.Class = provider.ClassCancelled
+		base.PublicStatus = 499
+		base.PublicCode = "request_cancelled"
+		base.PublicMessage = "request cancelled"
+		return base
 	}
 	var networkErr net.Error
-	if !errors.Is(err, context.Canceled) && errors.As(err, &networkErr) {
-		err = &ConnectionSetupError{Err: err}
+	if errors.As(err, &networkErr) {
+		base.Class = provider.ClassConnection
+		base.RetryNext = true
+		base.PublicStatus = http.StatusServiceUnavailable
+		base.PublicCode = "provider_unavailable"
 	}
-	return Classify(0, nil, nil, err, nil, now)
+	return base
 }

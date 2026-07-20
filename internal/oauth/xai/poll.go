@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -50,7 +51,7 @@ func (s *Service) Poll(ctx context.Context, state string) (TokenResponse, error)
 	}
 }
 func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error) {
-	session, err := s.sessions.GetResumable(ctx, state, s.now())
+	session, err := s.sessions.GetResumable(ctx, provider.XAI, store.OAuthFlowDevice, state, s.now())
 	if err != nil {
 		return TokenResponse{}, err
 	}
@@ -65,7 +66,7 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 	for {
 		now := s.now()
 		if !now.Before(session.ExpiresAt) {
-			_ = s.sessions.Transition(context.Background(), state, "expired", oauthStatusMessage("expired_token"))
+			_ = s.sessions.Expire(context.Background(), provider.XAI, store.OAuthFlowDevice, state, oauthStatusMessage("expired_token"), s.now())
 			return TokenResponse{}, &OAuthError{Code: "expired_token"}
 		}
 		if !first {
@@ -78,10 +79,10 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 			}
 			now = s.now()
 			if !now.Before(session.ExpiresAt) {
-				_ = s.sessions.Transition(context.Background(), state, "expired", oauthStatusMessage("expired_token"))
+				_ = s.sessions.Expire(context.Background(), provider.XAI, store.OAuthFlowDevice, state, oauthStatusMessage("expired_token"), s.now())
 				return TokenResponse{}, &OAuthError{Code: "expired_token"}
 			}
-			if _, err := s.sessions.GetPending(ctx, state, now); err != nil {
+			if _, err := s.sessions.GetPending(ctx, provider.XAI, store.OAuthFlowDevice, state, now); err != nil {
 				return TokenResponse{}, err
 			}
 		}
@@ -100,7 +101,7 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 				token.ExpiresAt = s.now().Add(time.Duration(token.ExpiresIn) * time.Second)
 			}
 			authorization := store.OAuthAuthorization{AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken, TokenType: token.TokenType, ExpiresIn: token.ExpiresIn, AuthorizedAt: s.now(), ExpiresAt: token.ExpiresAt}
-			if err := s.sessions.Authorize(ctx, state, authorization, s.now()); err != nil {
+			if err := s.sessions.Authorize(ctx, provider.XAI, store.OAuthFlowDevice, state, authorization, s.now()); err != nil {
 				return TokenResponse{}, err
 			}
 			return token, nil
@@ -109,11 +110,14 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 		case "slow_down":
 			interval += 5 * time.Second
 			continue
-		case "access_denied", "expired_token":
-			_ = s.sessions.Transition(context.Background(), state, map[string]string{"access_denied": "failed", "expired_token": "expired"}[code], oauthStatusMessage(code))
+		case "access_denied":
+			_ = s.sessions.Fail(context.Background(), provider.XAI, store.OAuthFlowDevice, state, oauthStatusMessage(code), s.now())
+			return TokenResponse{}, &OAuthError{Code: code, Description: description}
+		case "expired_token":
+			_ = s.sessions.Expire(context.Background(), provider.XAI, store.OAuthFlowDevice, state, oauthStatusMessage(code), s.now())
 			return TokenResponse{}, &OAuthError{Code: code, Description: description}
 		default:
-			_ = s.sessions.Transition(context.Background(), state, "failed", oauthStatusMessage(code))
+			_ = s.sessions.Fail(context.Background(), provider.XAI, store.OAuthFlowDevice, state, oauthStatusMessage(code), s.now())
 			return TokenResponse{}, &OAuthError{Code: code, Description: description}
 		}
 	}
@@ -121,12 +125,12 @@ func (s *Service) poll(ctx context.Context, state string) (TokenResponse, error)
 
 func (s *Service) authorizedToken(ctx context.Context, state string, session store.OAuthSession) (TokenResponse, error) {
 	if session.Authorization == nil || strings.TrimSpace(session.Authorization.AccessToken) == "" {
-		_ = s.sessions.Transition(context.Background(), state, "failed", oauthStatusMessage("invalid_authorization"))
+		_ = s.sessions.Fail(context.Background(), provider.XAI, store.OAuthFlowDevice, state, oauthStatusMessage("invalid_authorization"), s.now())
 		return TokenResponse{}, errors.New("persisted xAI authorization is incomplete")
 	}
 	value := session.Authorization
 	if !value.ExpiresAt.IsZero() && !s.now().Before(value.ExpiresAt) {
-		_ = s.sessions.Transition(context.Background(), state, "expired", oauthStatusMessage("expired_token"))
+		_ = s.sessions.Expire(context.Background(), provider.XAI, store.OAuthFlowDevice, state, oauthStatusMessage("expired_token"), s.now())
 		return TokenResponse{}, &OAuthError{Code: "expired_token"}
 	}
 	select {
@@ -185,7 +189,7 @@ func (s *Service) exchange(ctx context.Context, endpoint, deviceCode string) (To
 	return TokenResponse{AccessToken: payload.AccessToken, RefreshToken: payload.RefreshToken, IDToken: payload.IDToken, TokenType: payload.TokenType, ExpiresIn: payload.ExpiresIn}, payload.Error, payload.ErrorDescription, nil
 }
 func (s *Service) Cancel(ctx context.Context, state string) error {
-	if err := s.sessions.Transition(ctx, state, "cancelled", "Device authorization was cancelled."); err != nil {
+	if err := s.sessions.Cancel(ctx, provider.XAI, store.OAuthFlowDevice, state, "Device authorization was cancelled.", s.now()); err != nil {
 		return err
 	}
 	s.Stop(state)

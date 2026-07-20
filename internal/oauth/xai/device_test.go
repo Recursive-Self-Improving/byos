@@ -15,6 +15,7 @@ import (
 	"time"
 
 	appcrypto "byos/internal/crypto"
+	"byos/internal/provider"
 	"byos/internal/store"
 )
 
@@ -64,7 +65,7 @@ func jsonResponse(body string) *http.Response {
 func TestStartDevicePersistsSafeNormalizedSession(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"access_token":"token"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestStartDevicePersistsSafeNormalizedSession(t *testing.T) {
 	if strings.Contains(string(encoded), "device-secret") {
 		t.Fatal("device code exposed")
 	}
-	pending, err := service.sessions.ListPending(context.Background(), service.now())
+	pending, err := service.sessions.ListPending(context.Background(), provider.XAI, store.OAuthFlowDevice, service.now())
 	if err != nil || len(pending) != 1 || pending[0].DeviceCode != "device-secret" {
 		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
@@ -83,7 +84,7 @@ func TestStartDevicePersistsSafeNormalizedSession(t *testing.T) {
 func TestPollPendingSlowDownSuccessAndDeduplicates(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`, `{"error":"slow_down"}`, `{"access_token":"access","refresh_token":"refresh","id_token":"id","expires_in":3600}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,20 +121,27 @@ func TestPollTerminalAndCancellationPaths(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service, database := oauthTestService(t, []string{test.body})
 			defer database.Close()
-			flow, _ := service.StartDevice(context.Background())
+			flow, _ := service.Start(context.Background())
 			_, err := service.Poll(context.Background(), flow.State)
 			var oauthErr *OAuthError
 			if !errors.As(err, &oauthErr) || oauthErr.Code != test.code {
 				t.Fatalf("error=%v", err)
 			}
-			if _, err := service.sessions.GetPending(context.Background(), flow.State, service.now()); err != sql.ErrNoRows {
-				t.Fatalf("terminal resumed: %v", err)
+			_, pendingErr := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now())
+			if !errors.Is(pendingErr, sql.ErrNoRows) {
+				t.Fatalf("terminal resumed: %v", pendingErr)
+			}
+			// GetPending returns a plain not-found for non-pending rows;
+			// it must not surface the cancellable terminal-conflict sentinel
+			// (that is reserved for mutation methods like Cancel/Fail).
+			if errors.Is(pendingErr, store.ErrOAuthTerminalConflict) {
+				t.Fatalf("GetPending must not surface terminal conflict: %v", pendingErr)
 			}
 		})
 	}
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, _ := service.StartDevice(context.Background())
+	flow, _ := service.Start(context.Background())
 	if err := service.Cancel(context.Background(), flow.State); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +153,7 @@ func TestPollTerminalAndCancellationPaths(t *testing.T) {
 func TestCancelStopsActivePoll(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +177,7 @@ func TestCancelStopsActivePoll(t *testing.T) {
 func TestPollLeaderContextCancellationStopsWorkerAndPreservesPending(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +191,7 @@ func TestPollLeaderContextCancellationStopsWorkerAndPreservesPending(t *testing.
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("poll error=%v", err)
 	}
-	if _, err := service.sessions.GetPending(context.Background(), flow.State, service.now()); err != nil {
+	if _, err := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now()); err != nil {
 		t.Fatalf("pending lost=%v", err)
 	}
 }
@@ -194,7 +202,7 @@ func TestPollDoesNotExchangeAfterLocalExpiry(t *testing.T) {
 	current := time.Now().UTC().Truncate(time.Second)
 	service.now = func() time.Time { return current }
 	state := "short-lived"
-	if err := service.sessions.Create(context.Background(), store.OAuthSession{State: state, DeviceCode: "device", UserCode: "CODE", VerificationURI: "https://auth.x.ai/verify", TokenEndpoint: "https://auth.x.ai/token", PollInterval: MinimumPollInterval, ExpiresAt: current.Add(3 * time.Second)}); err != nil {
+	if err := service.sessions.Create(context.Background(), store.OAuthSession{Provider: provider.XAI, FlowType: store.OAuthFlowDevice, State: state, DeviceCode: "device", UserCode: "CODE", VerificationURI: "https://auth.x.ai/verify", TokenEndpoint: "https://auth.x.ai/token", PollInterval: MinimumPollInterval, ExpiresAt: current.Add(3 * time.Second)}); err != nil {
 		t.Fatal(err)
 	}
 	var waits []time.Duration
@@ -216,7 +224,7 @@ func TestPollDoesNotExchangeAfterLocalExpiry(t *testing.T) {
 func TestJoinedPollCallerCancellationIsIndependent(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

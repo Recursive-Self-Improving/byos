@@ -11,6 +11,7 @@ require (
 	github.com/tiktoken-go/tokenizer v0.7.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.53.0
 )

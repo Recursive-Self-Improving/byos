@@ -1,25 +1,30 @@
 {{define "content"}}
 <header class="page-heading">
   <div>
-    <div class="eyebrow">xAI account pool</div>
+    <div class="eyebrow">Provider account pool</div>
     <h1>Accounts</h1>
-    <p class="lede">Enable, refresh, and inspect the accounts available to the scheduler.</p>
+    <p class="lede">Enable, reconnect, and inspect the provider accounts available to the scheduler.</p>
   </div>
   <a class="button button-primary" href="/admin/oauth/new">Connect account</a>
 </header>
+<form class="inline-form" method="get" action="/admin/accounts">
+  <div><label for="provider-filter">Provider</label><select id="provider-filter" name="provider"><option value="" {{if not .ProviderFilter}}selected{{end}}>All providers</option><option value="xai" {{if providerSelected .ProviderFilter "xai"}}selected{{end}}>xAI</option><option value="devin" {{if providerSelected .ProviderFilter "devin"}}selected{{end}}>Devin</option></select></div>
+  <button class="button button-secondary" type="submit">Filter accounts</button>
+</form>
 {{if .Accounts}}
 <div class="table-wrap">
 <table>
-  <thead><tr><th scope="col">Account</th><th scope="col">State</th><th scope="col">Token expiry</th><th scope="col">Cooldown</th><th scope="col">Models</th><th scope="col">Usage</th></tr></thead>
+  <thead><tr><th scope="col">Account</th><th scope="col">Provider</th><th scope="col">State</th><th scope="col">Credential expiry</th><th scope="col">Cooldown</th><th scope="col">Models</th><th scope="col">Usage</th></tr></thead>
   <tbody>
     {{range .Accounts}}
     <tr>
       <th scope="row"><a href="{{accountURL .ID}}">{{displayLabel .Label}}</a><small class="table-subtext"><code>{{.ID}}</code></small></th>
-      <td><span class="badge {{if .Enabled}}badge-positive{{else}}badge-neutral{{end}}">{{if .Enabled}}{{.Status}}{{else}}Disabled{{end}}</span>{{if .SanitizedError}}<small class="table-subtext text-danger">{{.SanitizedError}}</small>{{end}}</td>
+      <td><span class="badge badge-neutral">{{providerLabel .Provider}}</span></td>
+      <td><span class="badge {{if .NeedsRelogin}}badge-warning{{else if .Enabled}}badge-positive{{else}}badge-neutral{{end}}">{{if .Enabled}}{{.StatusLabel}}{{else if .NeedsRelogin}}{{.StatusLabel}}{{else}}Disabled{{end}}</span>{{if .SanitizedError}}<small class="table-subtext text-danger">{{.SanitizedError}}</small>{{end}}{{if and .NeedsRelogin .CanRelogin}}<small class="table-subtext"><a href="{{oauthNewURL .Provider}}">Reconnect {{providerLabel .Provider}}</a></small>{{end}}</td>
       <td>{{formatTime .ExpiresAt}}</td>
       <td>{{formatTime .CooldownUntil}}</td>
       <td>{{.ModelCount}}</td>
-      <td>{{if .UsageStale}}<span class="badge badge-warning">Stale</span>{{else}}{{formatTime .UsageFetchedAt}}{{end}}</td>
+      <td>{{if not .CanRefreshUsage}}<span class="badge badge-neutral">Unavailable</span>{{else if .UsageStale}}<span class="badge badge-warning">Stale</span>{{else}}{{formatTime .UsageFetchedAt}}{{end}}</td>
     </tr>
     {{end}}
   </tbody>
@@ -27,8 +32,8 @@
 </div>
 {{else}}
 <section class="empty-state">
-  <h2>No xAI accounts connected</h2>
-  <p>Start a device authorization flow to add the first account to the pool.</p>
+  <h2>No provider accounts found</h2>
+  <p>Connect xAI or Devin to add an account to the routing pool.</p>
   <a class="button button-primary" href="/admin/oauth/new">Connect the first account</a>
 </section>
 {{end}}

@@ -8,12 +8,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"byos/internal/provider"
+	"byos/internal/store"
 )
 
 func TestAuthorizedPollResultResumesWithoutTokenReexchange(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"access_token":"persisted-access","refresh_token":"persisted-refresh","id_token":"persisted-id","token_type":"Bearer","expires_in":3600}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +24,7 @@ func TestAuthorizedPollResultResumesWithoutTokenReexchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	persisted, err := service.Session(context.Background(), flow.State)
+	persisted, err := service.Get(context.Background(), flow.State)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +47,7 @@ func TestAuthorizedPollResultResumesWithoutTokenReexchange(t *testing.T) {
 	if err := restarted.Complete(context.Background(), flow.State, "acct_resumed"); err != nil {
 		t.Fatal(err)
 	}
-	completed, err := restarted.Session(context.Background(), flow.State)
+	completed, err := restarted.Get(context.Background(), flow.State)
 	if err != nil || completed.Status != "completed" || completed.AccountID != "acct_resumed" || completed.Authorization != nil {
 		t.Fatalf("completed session = %+v, %v", completed, err)
 	}
@@ -53,7 +56,7 @@ func TestAuthorizedPollResultResumesWithoutTokenReexchange(t *testing.T) {
 func TestStopLeavesActivePollPersistedForRestart(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"authorization_pending"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +76,7 @@ func TestStopLeavesActivePollPersistedForRestart(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("stopped poll error = %v", err)
 	}
-	pending, err := service.sessions.GetPending(context.Background(), flow.State, service.now())
+	pending, err := service.sessions.GetPending(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now())
 	if err != nil || pending.Status != "pending" || pending.DeviceCode == "" {
 		t.Fatalf("stopped session = %+v, %v", pending, err)
 	}
@@ -82,7 +85,7 @@ func TestStopLeavesActivePollPersistedForRestart(t *testing.T) {
 func TestTerminalOAuthErrorsPersistOnlySafeMessages(t *testing.T) {
 	service, database := oauthTestService(t, []string{`{"error":"access_denied","error_description":"tenant secret billing detail"}`})
 	defer database.Close()
-	flow, err := service.StartDevice(context.Background())
+	flow, err := service.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +97,7 @@ func TestTerminalOAuthErrorsPersistOnlySafeMessages(t *testing.T) {
 	if strings.Contains(err.Error(), "tenant secret") || strings.Contains(err.Error(), "billing detail") {
 		t.Fatalf("OAuth error leaked description: %v", err)
 	}
-	terminal, err := service.Session(context.Background(), flow.State)
+	terminal, err := service.Get(context.Background(), flow.State)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +107,7 @@ func TestTerminalOAuthErrorsPersistOnlySafeMessages(t *testing.T) {
 	if strings.Contains(terminal.SanitizedError, "tenant secret") || terminal.Authorization != nil {
 		t.Fatalf("unsafe terminal session = %+v", terminal)
 	}
-	if _, err := service.sessions.GetResumable(context.Background(), flow.State, service.now()); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := service.sessions.GetResumable(context.Background(), provider.XAI, store.OAuthFlowDevice, flow.State, service.now()); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("terminal session remained resumable: %v", err)
 	}
 }

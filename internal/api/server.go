@@ -10,13 +10,14 @@ import (
 	"byos/internal/api/middleware"
 )
 
-type ServerHandlers struct{ Health, Ready, Models, Chat, Responses, Messages, CountTokens, Admin, Web http.Handler }
+type ServerHandlers struct{ Health, Ready, Models, Chat, Responses, Messages, CountTokens, Admin, Web, Callback http.Handler }
 type ServerConfig struct {
 	Handlers      ServerHandlers
 	ClientKeys    *accounts.APIKeyService
 	AdminAPIKey   string
 	AdminAttempts middleware.AdminAttemptPolicy
 	AdminSources  middleware.SourceResolver
+	CallbackPath  string
 	MaxBodyBytes  int64
 	Logger        *slog.Logger
 }
@@ -42,7 +43,20 @@ func NewServer(config ServerConfig) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return recovery(logger, securityHeaders(requestIDs(mux)))
+	callbackPath := ""
+	if config.Handlers.Callback != nil && config.CallbackPath != "" {
+		callbackPath = config.CallbackPath
+	}
+	// The exact callback-vs-mux dispatch is built first, then wrapped in
+	// request IDs, security headers, and panic recovery so the unauthenticated
+	// callback still gets the same protective wrappers as the protected mux.
+	// AdminAuth remains inside the mux, so the auth split holds: only an exact
+	// GET on callbackPath bypasses admin auth; everything else is protected.
+	dispatch := http.Handler(mux)
+	if callbackPath != "" {
+		dispatch = exactCallbackDispatch(callbackPath, config.Handlers.Callback, mux)
+	}
+	return recovery(logger, securityHeaders(requestIDs(dispatch)))
 }
 func limitBody(max int64, next http.Handler) http.Handler {
 	if max <= 0 {
@@ -51,6 +65,39 @@ func limitBody(max int64, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, max)
 		next.ServeHTTP(w, r)
+	})
+}
+
+// exactGet wraps a handler so it only responds to GET requests whose URL path
+// exactly matches the registered path. Any other method or path variation
+// returns 404, ensuring the callback route cannot be reached by wildcard or
+// path traversal while the protected admin subtree handles everything else.
+func exactGet(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// exactCallbackDispatch routes only an exact GET on callbackPath to the
+// unauthenticated callback handler. Every other method or path — including
+// trailing-slash descendants, POST/PUT to the exact path, and any path that
+// merely shares a prefix — falls through to the protected mux so admin auth
+// remains the default. This deliberately does not rely on ServeMux subtree
+// semantics: the comparator is a literal method+URL.Path match.
+func exactCallbackDispatch(callbackPath string, callback http.Handler, protected http.Handler) http.Handler {
+	if callbackPath == "" {
+		return protected
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == callbackPath {
+			callback.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
 	})
 }
 func requestIDs(next http.Handler) http.Handler {

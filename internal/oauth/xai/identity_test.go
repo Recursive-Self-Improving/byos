@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -18,14 +19,23 @@ import (
 )
 
 type jwksFixture struct {
-	mu   sync.RWMutex
-	keys []jose.JSONWebKey
+	mu           sync.RWMutex
+	keys         []jose.JSONWebKey
+	requestCount int
 }
 
 func (f *jwksFixture) handler(w http.ResponseWriter, _ *http.Request) {
+	f.mu.Lock()
+	f.requestCount++
+	keys := f.keys
+	f.mu.Unlock()
+	_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: keys})
+}
+
+func (f *jwksFixture) requests() int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: f.keys})
+	return f.requestCount
 }
 func signIdentityTokenWithAlgorithm(t *testing.T, key any, algorithm jose.SignatureAlgorithm, kid, issuer, audience, subject string, expiry time.Time) string {
 	t.Helper()
@@ -76,8 +86,32 @@ func TestIdentityVerifierAndKeyRotation(t *testing.T) {
 	fixture.keys = []jose.JSONWebKey{{Key: &key2.PublicKey, KeyID: "two", Algorithm: string(jose.RS256), Use: "sig"}}
 	fixture.mu.Unlock()
 	rotated := signIdentityToken(t, key2, "two", Issuer, DefaultClientID, "subject", time.Now().Add(time.Hour))
-	if _, err := verifier.Verify(context.Background(), rotated); err != nil {
-		t.Fatalf("rotated key rejected: %v", err)
+	// go-oidc's RemoteKeySet updates its JWKS cache asynchronously: the first
+	// Verify returns as soon as the fetch completes (inflight.done), but a
+	// background goroutine still needs to nil the inflight marker afterwards.
+	// A second Verify that races ahead of that goroutine reuses the stale
+	// inflight — which holds the pre-rotation keys — and rejects the rotated
+	// token. In production key rotation never occurs between consecutive
+	// verifications nanoseconds apart, so this is a test-synchronization issue.
+	// Retry with runtime.Gosched until the keyset performs a fresh post-rotation
+	// fetch (observed via the fixture request counter), proving the rotated
+	// keys were retrieved and the token accepted on their merits — not from a
+	// stale cache.
+	before := fixture.requests()
+	var lastErr error
+	for range 100 {
+		if _, err := verifier.Verify(context.Background(), rotated); err == nil {
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		runtime.Gosched()
+	}
+	if lastErr != nil {
+		t.Fatalf("rotated key rejected: %v", lastErr)
+	}
+	if fixture.requests() <= before {
+		t.Fatal("rotated key accepted without fetching rotated JWKS")
 	}
 }
 func TestIdentityVerifierRejectsInvalidClaims(t *testing.T) {

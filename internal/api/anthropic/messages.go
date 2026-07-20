@@ -1,13 +1,15 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"byos/internal/api"
+	"byos/internal/provider"
 	"byos/internal/routing"
-	"byos/internal/search"
 	"byos/internal/translate/registry"
 )
 
@@ -36,11 +38,6 @@ func (h MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canonical, err := h.Transform.Request(metadata.Model, body, metadata.Stream)
-	if err != nil {
-		api.AnthropicError(w, api.Invalid(err))
-		return
-	}
-	canonical, err = search.Inject(canonical)
 	if err != nil {
 		api.AnthropicError(w, api.Invalid(err))
 		return
@@ -74,9 +71,16 @@ func (h MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher, _ := w.(http.Flusher)
 	var state registry.StreamState
+	committed := false
 	for {
 		event, err := stream.Next(r.Context())
 		if err != nil {
+			if committed && r.Context().Err() == nil && !isStreamCancellation(err) {
+				_, _ = w.Write(registry.SSE("error", []byte(`{"type":"error","error":{"type":"api_error","message":"stream terminated"}}`)))
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 			return
 		}
 		chunks, err := h.Transform.Stream(stream.Model(), body, event.Data, &state)
@@ -86,6 +90,9 @@ func (h MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, chunk := range chunks {
 			_, _ = w.Write(chunk)
 		}
+		if len(chunks) > 0 {
+			committed = true
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -93,4 +100,12 @@ func (h MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func isStreamCancellation(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	var execution *routing.ExecutionError
+	return errors.As(err, &execution) && execution.Classified.Class == provider.ClassCancelled
 }
