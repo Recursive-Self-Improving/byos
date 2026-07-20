@@ -229,9 +229,9 @@ const (
 // AuthorizationRef binds every lifecycle operation to a provider before an
 // implementation reads persisted state or performs network I/O. State is the
 // raw OAuth state used internally for callback/PKCE completion; SessionID is
-// the public opaque handle for status/cancel lookups. At least one of State
-// or SessionID must be set; callback completion uses State, while admin/CLI
-// status and cancel use SessionID.
+// the public opaque handle for status/cancel lookups. At least one must be set.
+// Authenticated manual callback completion supplies both so raw state is bound
+// to the management session shown to the caller.
 type AuthorizationRef struct {
 	Provider  Kind
 	State     string
@@ -241,8 +241,8 @@ type AuthorizationRef struct {
 // Authorization contains only values safe to return to a caller starting an
 // authorization flow. Provider codes, tokens, PKCE verifiers, and verified
 // identity claims must remain behind the lifecycle implementation. SessionID
-// is the public handle callers use to poll or cancel the flow; Ref.State is
-// the raw OAuth state retained only for callback completion.
+// is the public handle callers use to poll or cancel the flow; raw callback
+// state is never returned in this projection.
 type Authorization struct {
 	Ref                     AuthorizationRef
 	SessionID               SessionID

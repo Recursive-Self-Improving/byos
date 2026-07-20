@@ -98,11 +98,18 @@ func (l *ProviderLifecycle) Complete(ctx context.Context, ref provider.Authoriza
 	if err := requireDevinCallbackRef(ref); err != nil {
 		return provider.AccountResult{}, err
 	}
-	result := l.completions.DoChan(ref.State, func() (any, error) {
+	completionKey := ref.State
+	if ref.SessionID != "" {
+		completionKey += "\x00" + ref.SessionID.String()
+	}
+	result := l.completions.DoChan(completionKey, func() (any, error) {
 		now := l.now()
 		session, err := l.sessionWithExpiry(ctx, ref.State, now)
 		if err != nil {
 			return provider.AccountResult{}, sanitizedLookupError(err)
+		}
+		if ref.SessionID != "" && session.SessionID != ref.SessionID.String() {
+			return provider.AccountResult{}, ErrNotFound
 		}
 		if session.Status == string(provider.AuthorizationExpired) {
 			return provider.AccountResult{}, errors.New("Devin authorization has expired")
@@ -269,9 +276,10 @@ func requireDevinManagementRef(ref provider.AuthorizationRef) error {
 	return nil
 }
 
-// requireDevinCallbackRef validates a provider-bound ref for the callback
-// completion path, which uses raw state for PKCE consume/exchange. SessionID
-// is not accepted here; completion is driven only by the OAuth callback.
+// requireDevinCallbackRef validates a provider-bound ref for callback
+// completion. Raw state drives PKCE consume/exchange; authenticated manual
+// completion may also supply SessionID so the pasted callback is bound to the
+// management session shown in the UI.
 func requireDevinCallbackRef(ref provider.AuthorizationRef) error {
 	if ref.Provider != provider.Devin {
 		return fmt.Errorf("Devin authorization reference: %w", provider.ErrProviderMismatch)

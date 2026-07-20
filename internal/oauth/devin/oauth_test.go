@@ -46,15 +46,13 @@ func TestAuthorizationURLExactQueryAndConfiguredCallback(t *testing.T) {
 		origin string
 		want   string
 	}{
-		{origin: "https://byos.example.test", want: "https://byos.example.test/admin/api/v1/oauth/devin/callback"},
-		{origin: "https://byos.example.test/", want: "https://byos.example.test/admin/api/v1/oauth/devin/callback"},
-		{origin: "http://127.0.0.1:59653", want: "http://127.0.0.1:59653/admin/api/v1/oauth/devin/callback"},
-		{origin: "http://localhost:59653", want: "http://localhost:59653/admin/api/v1/oauth/devin/callback"},
-		{origin: "http://[::1]:59653", want: "http://[::1]:59653/admin/api/v1/oauth/devin/callback"},
+		{origin: "http://127.0.0.1:59653", want: "http://127.0.0.1:59653/callback"},
+		{origin: "http://localhost:59653", want: "http://localhost:59653/callback"},
+		{origin: "http://[::1]:59653", want: "http://[::1]:59653/callback"},
 	}
 	for _, test := range tests {
 		t.Run(test.origin, func(t *testing.T) {
-			callback, err := CallbackURL(OAuthConfig{CallbackOrigin: test.origin, CallbackPath: "/admin/api/v1/oauth/devin/callback"})
+			callback, err := CallbackURL(OAuthConfig{CallbackOrigin: test.origin, CallbackPath: "/callback"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,19 +80,48 @@ func TestAuthorizationURLExactQueryAndConfiguredCallback(t *testing.T) {
 
 func TestCallbackURLRejectsUnsafeConfiguration(t *testing.T) {
 	for _, config := range []OAuthConfig{
-		{}, {CallbackOrigin: "http://byos.example.test", CallbackPath: "/callback"},
-		{CallbackOrigin: "http://127.0.0.1.evil.test", CallbackPath: "/callback"},
-		{CallbackOrigin: "ftp://127.0.0.1", CallbackPath: "/callback"},
-
-		{CallbackOrigin: "https://user@byos.example.test", CallbackPath: "/callback"},
-		{CallbackOrigin: "https://byos.example.test/base", CallbackPath: "/callback"},
-		{CallbackOrigin: "https://byos.example.test", CallbackPath: "callback"},
-		{CallbackOrigin: "https://byos.example.test", CallbackPath: "//evil.test/callback"},
-		{CallbackOrigin: "https://byos.example.test", CallbackPath: "/callback?secret=x"},
+		{},
+		{CallbackOrigin: "https://byos.example.test", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://byos.example.test:59653", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://127.0.0.1.evil.test:59653", CallbackPath: "/callback"},
+		{CallbackOrigin: "ftp://127.0.0.1:59653", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://127.0.0.1", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://127.0.0.1:0", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://user@127.0.0.1:59653", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://127.0.0.1:59653/base", CallbackPath: "/callback"},
+		{CallbackOrigin: "http://127.0.0.1:59653", CallbackPath: "callback"},
+		{CallbackOrigin: "http://127.0.0.1:59653", CallbackPath: "//evil.test/callback"},
+		{CallbackOrigin: "http://127.0.0.1:59653", CallbackPath: "/callback?secret=x"},
 	} {
 		if _, err := CallbackURL(config); !errors.Is(err, ErrInvalidCallback) {
 			t.Fatalf("config=%+v err=%v", config, err)
 		}
+	}
+}
+
+func TestParseCallbackURLBindsExactLoopbackRedirect(t *testing.T) {
+	const expected = "http://127.0.0.1:59653/callback"
+	state, code, err := ParseCallbackURL(expected+"?code=authorization-code&state=oauth-state", expected)
+	if err != nil || state != "oauth-state" || code != "authorization-code" {
+		t.Fatalf("state=%q code=%q err=%v", state, code, err)
+	}
+	for _, value := range []string{
+		"https://byos.example.test/callback?state=s&code=c",
+		"http://127.0.0.1:59654/callback?state=s&code=c",
+		"http://127.0.0.1:59653/other?state=s&code=c",
+		expected + "?state=s&state=s2&code=c",
+		expected + "?state=s&code=c&extra=x",
+		expected + "#state=s&code=c",
+	} {
+		if _, _, err := ParseCallbackURL(value, expected); !errors.Is(err, ErrInvalidCallback) {
+			t.Fatalf("callback %q err=%v", value, err)
+		}
+	}
+	if _, _, err := ParseCallbackURL(expected+"?error=denied&state=s&code=c", expected); !errors.Is(err, ErrInvalidAuthorization) {
+		t.Fatalf("provider rejection err=%v", err)
+	}
+	if _, _, err := ParseCallbackQuery(strings.Repeat("x", maxCallbackQueryBytes+1)); !errors.Is(err, ErrInvalidCallback) {
+		t.Fatalf("oversized query err=%v", err)
 	}
 }
 

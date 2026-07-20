@@ -112,6 +112,7 @@ type OAuthService interface {
 	Start(context.Context, Provider) (OAuthFlow, error)
 	Get(context.Context, Provider, string) (OAuthFlow, error)
 	Cancel(context.Context, Provider, string) error
+	CompleteDevinCallback(context.Context, string, string) (string, error)
 }
 
 type OAuthFlow struct {

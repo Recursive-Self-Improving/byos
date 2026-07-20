@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -15,8 +16,11 @@ const (
 	AuthorizationEndpoint = "https://app.devin.ai/auth/cli/continue"
 	ExchangeEndpoint      = "https://api.devin.ai/auth/cli/token"
 
-	verifierBytes = 96
-	stateBytes    = 32
+	verifierBytes         = 96
+	stateBytes            = 32
+	maxCallbackURLBytes   = 16 << 10
+	maxCallbackQueryBytes = 8 << 10
+	maxCallbackValueBytes = 4 << 10
 )
 
 // OAuthConfig contains the deployment-specific callback address. The callback
@@ -59,9 +63,9 @@ func generateState(random io.Reader) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// CallbackURL constructs and validates the configured callback URL. HTTPS is
-// accepted for deployed services; plain HTTP is accepted only for loopback
-// callbacks, matching Devin's native CLI OAuth flow.
+// CallbackURL constructs and validates the configured callback URL. Devin's
+// CLI authorization endpoint accepts native-style HTTP loopback redirects;
+// public HTTPS redirect URIs are rejected by the provider.
 func CallbackURL(config OAuthConfig) (string, error) {
 	originText := strings.TrimSuffix(config.CallbackOrigin, "/")
 	origin, err := url.Parse(originText)
@@ -77,22 +81,69 @@ func CallbackURL(config OAuthConfig) (string, error) {
 }
 
 func validCallbackOrigin(origin *url.URL) bool {
-	if origin == nil || origin.Host == "" || origin.User != nil {
+	if origin == nil || origin.Scheme != "http" || origin.Host == "" || origin.User != nil {
 		return false
 	}
-	switch origin.Scheme {
-	case "https":
+	port, err := strconv.ParseUint(origin.Port(), 10, 16)
+	if err != nil || port == 0 {
+		return false
+	}
+	host := origin.Hostname()
+	if strings.EqualFold(host, "localhost") {
 		return true
-	case "http":
-		host := origin.Hostname()
-		if strings.EqualFold(host, "localhost") {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
 	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ParseCallbackURL validates a browser-copied Devin loopback callback against
+// the exact redirect URI advertised when the flow started, then extracts the
+// single-use state and authorization code. It never returns the input URL.
+func ParseCallbackURL(value, expectedRedirectURI string) (state, code string, err error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxCallbackURLBytes {
+		return "", "", ErrInvalidCallback
+	}
+	candidate, err := url.Parse(value)
+	if err != nil || candidate.Opaque != "" || candidate.User != nil || candidate.Fragment != "" || candidate.RawPath != "" || !validCallbackOrigin(candidate) {
+		return "", "", ErrInvalidCallback
+	}
+	expected, err := url.Parse(expectedRedirectURI)
+	if err != nil || expected.Opaque != "" || expected.User != nil || expected.RawQuery != "" || expected.Fragment != "" || expected.RawPath != "" || !validCallbackOrigin(expected) {
+		return "", "", ErrInvalidCallback
+	}
+	if candidate.Scheme != expected.Scheme || candidate.Host != expected.Host || candidate.Path != expected.Path {
+		return "", "", ErrInvalidCallback
+	}
+	return ParseCallbackQuery(candidate.RawQuery)
+}
+
+// ParseCallbackQuery accepts only the exact successful Devin callback shape.
+// Bounding RawQuery before url.ParseQuery prevents unauthenticated callbacks
+// from turning oversized attacker input into unbounded parsing work.
+func ParseCallbackQuery(rawQuery string) (state, code string, err error) {
+	if rawQuery == "" || len(rawQuery) > maxCallbackQueryBytes {
+		return "", "", ErrInvalidCallback
+	}
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "", "", ErrInvalidCallback
+	}
+	if _, present := query["error"]; present {
+		return "", "", ErrInvalidAuthorization
+	}
+	if _, present := query["error_description"]; present {
+		return "", "", ErrInvalidAuthorization
+	}
+	if len(query) != 2 {
+		return "", "", ErrInvalidCallback
+	}
+	states, stateOK := query["state"]
+	codes, codeOK := query["code"]
+	if !stateOK || !codeOK || len(states) != 1 || len(codes) != 1 || states[0] == "" || codes[0] == "" || len(states[0]) > maxCallbackValueBytes || len(codes[0]) > maxCallbackValueBytes {
+		return "", "", ErrInvalidCallback
+	}
+	return states[0], codes[0], nil
 }
 
 // AuthorizationURL builds the exact Devin browser authorization request.

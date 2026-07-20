@@ -86,15 +86,18 @@ type oauthServiceCall struct {
 }
 
 type fakeOAuthService struct {
-	startFlow      OAuthFlow
-	flows          map[string]OAuthFlow
-	startErr       error
-	getErr         error
-	cancelErr      error
-	startCalls     int
-	startProviders []Provider
-	getCalls       []oauthServiceCall
-	cancelled      []oauthServiceCall
+	startFlow         OAuthFlow
+	flows             map[string]OAuthFlow
+	startErr          error
+	getErr            error
+	cancelErr         error
+	completeErr       error
+	startCalls        int
+	startProviders    []Provider
+	getCalls          []oauthServiceCall
+	cancelled         []oauthServiceCall
+	completedSession  string
+	completedCallback string
 }
 
 func (s *fakeOAuthService) Start(_ context.Context, selected Provider) (OAuthFlow, error) {
@@ -122,6 +125,22 @@ func (s *fakeOAuthService) Get(_ context.Context, selected Provider, sessionID s
 		return OAuthFlow{}, ErrNotFound
 	}
 	return flow, nil
+}
+func (s *fakeOAuthService) CompleteDevinCallback(_ context.Context, sessionID, callbackURL string) (string, error) {
+	s.completedSession = sessionID
+	s.completedCallback = callbackURL
+	if s.completeErr != nil {
+		return "", s.completeErr
+	}
+	key := oauthManagementRef(ProviderDevin, sessionID)
+	flow, ok := s.flows[key]
+	if !ok {
+		return "", ErrNotFound
+	}
+	flow.Status = "completed"
+	flow.AccountID = "acct_test"
+	s.flows[key] = flow
+	return flow.AccountID, nil
 }
 func (s *fakeOAuthService) Cancel(_ context.Context, selected Provider, sessionID string) error {
 	if s.cancelErr != nil {

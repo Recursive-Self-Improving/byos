@@ -62,7 +62,7 @@ func newLifecycleFixture(t *testing.T) (*store.SQLite, *store.OAuthSessionReposi
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	lifecycle := &ProviderLifecycle{
 		sessions: sessions, client: exchange, transaction: transaction,
-		config: OAuthConfig{CallbackOrigin: "https://byos.example.test", CallbackPath: "/oauth/devin/callback"},
+		config: OAuthConfig{CallbackOrigin: "http://127.0.0.1:59653", CallbackPath: "/callback"},
 		now:    func() time.Time { return now },
 	}
 	return database, sessions, lifecycle, exchange, transaction, now
@@ -77,7 +77,7 @@ func createPendingLifecycleSession(t *testing.T, sessions *store.OAuthSessionRep
 	expires := now.Add(pendingSessionTTL)
 	if err := sessions.Create(context.Background(), store.OAuthSession{
 		Provider: provider.Devin, FlowType: store.OAuthFlowCallbackPKCE, State: state, SessionID: string(sessionID),
-		Pending:   &store.OAuthPendingPayload{Verifier: verifier, RedirectURI: "https://byos.example.test/oauth/devin/callback", ExpiresAt: expires},
+		Pending:   &store.OAuthPendingPayload{Verifier: verifier, RedirectURI: "http://127.0.0.1:59653/callback", ExpiresAt: expires},
 		ExpiresAt: expires,
 	}); err != nil {
 		t.Fatal(err)
@@ -124,6 +124,25 @@ func TestProviderLifecycleMismatchAndMissingCodeStopBeforeDependencies(t *testin
 	session, err := sessions.Get(context.Background(), provider.Devin, store.OAuthFlowCallbackPKCE, "state")
 	if err != nil || session.Status != "pending" || session.Pending == nil {
 		t.Fatalf("session mutated: %+v %v", session, err)
+	}
+}
+
+func TestProviderLifecycleManualCompletionBindsSessionID(t *testing.T) {
+	_, sessions, lifecycle, exchange, transaction, now := newLifecycleFixture(t)
+	sessionID := createPendingLifecycleSession(t, sessions, "manual-state", "manual-verifier", now)
+	wrongSessionID, err := provider.NewSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Complete(context.Background(), provider.AuthorizationRef{Provider: provider.Devin, State: "manual-state", SessionID: wrongSessionID}, provider.AuthorizationCompletion{Code: "manual-code"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mismatched session error=%v", err)
+	}
+	if exchange.calls.Load() != 0 || transaction.calls.Load() != 0 {
+		t.Fatal("mismatched session invoked completion dependencies")
+	}
+	result, err := lifecycle.Complete(context.Background(), provider.AuthorizationRef{Provider: provider.Devin, State: "manual-state", SessionID: sessionID}, provider.AuthorizationCompletion{Code: "manual-code"})
+	if err != nil || result.AccountID != "acct_devin" {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
 

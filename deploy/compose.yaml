@@ -3,14 +3,15 @@
 # and starts the service with `serve --config /etc/byos/compose.yaml`.
 #
 # The default Compose publication (127.0.0.1:8080) needs no Devin OAuth
-# setting: BYOS automatically advertises the matching HTTP loopback callback,
-# following Devin's native CLI flow. Set callback_origin only when the browser
-# reaches this service through a remote/public HTTPS origin instead of the
-# Docker host's loopback address (see README "Devin provider setup").
+# setting: BYOS automatically advertises the matching HTTP loopback callback.
+# For a remote deployment, explicitly advertise Devin's native loopback URI
+# and finish by pasting the browser callback into the authenticated Web UI
+# (see README "Devin provider setup").
 #
 # No secrets belong in this file. Provide BYOS_MASTER_KEY, BYOS_ADMIN_PASSWORD,
 # and BYOS_ADMIN_API_KEY through the BYOS_* environment variables in
 # docker-compose.yml (or a local .env file).
 devin:
   oauth:
-    # callback_origin: "https://byos.example.com"
+    # callback_origin: "http://127.0.0.1:59653"
+    # callback_path: "/callback"

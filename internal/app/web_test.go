@@ -21,6 +21,7 @@ import (
 	"byos/internal/api/admin"
 	"byos/internal/config"
 	"byos/internal/models"
+	oauthdevin "byos/internal/oauth/devin"
 	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
@@ -225,6 +226,8 @@ type adapterOAuthAccounts struct {
 	startKinds   []provider.Kind
 	resumeSignal chan provider.Kind
 	cancelErr    error
+	lastRef      provider.AuthorizationRef
+	lastComplete provider.AuthorizationCompletion
 }
 
 func (a *adapterOAuthAccounts) sessionLocked(kind provider.Kind, sessionID provider.SessionID) (string, provider.AuthorizationSession, bool) {
@@ -304,7 +307,7 @@ func (a *adapterOAuthAccounts) StartLogin(_ context.Context, kind provider.Kind)
 	return provider.Authorization{}, web.ErrNotFound
 }
 
-func (a *adapterOAuthAccounts) CompleteLogin(ctx context.Context, kind provider.Kind, ref provider.AuthorizationRef, _ provider.AuthorizationCompletion) (store.Account, error) {
+func (a *adapterOAuthAccounts) CompleteLogin(ctx context.Context, kind provider.Kind, ref provider.AuthorizationRef, completion provider.AuthorizationCompletion) (store.Account, error) {
 	a.calls.Add(1)
 	if a.started != nil {
 		a.once.Do(func() { close(a.started) })
@@ -316,6 +319,8 @@ func (a *adapterOAuthAccounts) CompleteLogin(ctx context.Context, kind provider.
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.lastRef = ref
+	a.lastComplete = completion
 	key, value, ok := a.sessionLocked(kind, ref.SessionID)
 	if !ok {
 		return store.Account{}, web.ErrNotFound
@@ -324,6 +329,50 @@ func (a *adapterOAuthAccounts) CompleteLogin(ctx context.Context, kind provider.
 	value.AccountID = "acct_adapter"
 	a.sessions[key] = value
 	return store.Account{ID: "acct_adapter", Provider: kind}, nil
+}
+
+func TestWebOAuthManualDevinCallbackUsesBoundSession(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	const sessionID = "manual_devin_session"
+	release := make(chan struct{})
+	close(release)
+	accountsService := &adapterOAuthAccounts{
+		sessions: map[string]provider.AuthorizationSession{
+			sessionID: {
+				Authorization: provider.Authorization{
+					Ref:       provider.AuthorizationRef{Provider: provider.Devin, SessionID: provider.SessionID(sessionID)},
+					SessionID: provider.SessionID(sessionID), VerificationURL: "https://app.devin.ai/auth/cli/continue", ExpiresAt: now.Add(time.Minute),
+				},
+				Status: provider.AuthorizationPending,
+			},
+		},
+		release: release,
+	}
+	adapter := newWebOAuthAdapter(context.Background(), accountsService)
+	adapter.now = func() time.Time { return now }
+	adapter.devinCallbackURL = "http://127.0.0.1:59653/callback"
+	if _, err := adapter.Start(context.Background(), web.ProviderDevin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.CompleteDevinCallback(context.Background(), sessionID, "https://byos.example.test/callback?state=s&code=c"); !errors.Is(err, oauthdevin.ErrInvalidCallback) {
+		t.Fatalf("public callback error=%v", err)
+	}
+	if accountsService.calls.Load() != 0 {
+		t.Fatal("invalid callback reached account completion")
+	}
+	accountID, err := adapter.CompleteDevinCallback(context.Background(), sessionID, "http://127.0.0.1:59653/callback?code=manual-code&state=manual-state")
+	if err != nil || accountID != "acct_adapter" {
+		t.Fatalf("account=%q err=%v", accountID, err)
+	}
+	accountsService.mu.Lock()
+	ref, completion := accountsService.lastRef, accountsService.lastComplete
+	accountsService.mu.Unlock()
+	if ref.Provider != provider.Devin || ref.State != "manual-state" || ref.SessionID != provider.SessionID(sessionID) || completion.Code != "manual-code" {
+		t.Fatalf("completion ref=%+v completion=%+v", ref, completion)
+	}
+	if adapter.authorizationURL(provider.Devin, sessionID) != "" {
+		t.Fatal("completed manual callback retained authorization URL")
+	}
 }
 
 func TestWebOAuthStartAndGetShareOneCompletion(t *testing.T) {

@@ -2,11 +2,14 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	oauthdevin "byos/internal/oauth/devin"
 )
 
 type oauthPage struct {
@@ -175,6 +178,40 @@ func (h *Handler) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *Handler) handleOAuthCompleteDevin(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAuthentication(w, r); !ok {
+		return
+	}
+	sessionID, ok := resourceID(r.PathValue("session"))
+	if !ok {
+		h.renderError(w, r, http.StatusNotFound, "Connection flow not found.")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		h.renderError(w, r, http.StatusBadRequest, "The callback form could not be read.")
+		return
+	}
+	callbackURL := strings.TrimSpace(r.PostForm.Get("callback_url"))
+	if callbackURL == "" {
+		h.renderError(w, r, http.StatusBadRequest, "Paste the complete localhost callback URL from the browser address bar.")
+		return
+	}
+	if _, err := h.services.OAuth.CompleteDevinCallback(r.Context(), sessionID, callbackURL); err != nil {
+		switch {
+		case errors.Is(err, oauthdevin.ErrInvalidAuthorization):
+			h.renderError(w, r, http.StatusBadRequest, "Devin reported that authorization was not approved.")
+		case errors.Is(err, oauthdevin.ErrInvalidCallback):
+			h.renderError(w, r, http.StatusBadRequest, "The pasted URL is not the callback for this Devin connection.")
+		case isNotFound(err):
+			h.renderError(w, r, http.StatusNotFound, "Connection flow not found.")
+		default:
+			h.renderError(w, r, http.StatusBadGateway, "Devin authorization could not be completed.")
+		}
+		return
+	}
+	h.redirect(w, r, oauthPageURL(ProviderDevin, sessionID))
 }
 
 func (h *Handler) handleOAuthCancel(w http.ResponseWriter, r *http.Request) {

@@ -308,8 +308,8 @@ func cliDevinConfig(t *testing.T, listen string) config.Config {
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
 	cfg.Server.Listen = listen
-	cfg.Devin.OAuth.CallbackOrigin = "https://byos.example.invalid"
-	cfg.Devin.OAuth.CallbackPath = "/oauth/devin/callback"
+	cfg.Devin.OAuth.CallbackOrigin = "http://127.0.0.1:59653"
+	cfg.Devin.OAuth.CallbackPath = "/callback"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate config: %v", err)
 	}

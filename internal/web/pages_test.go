@@ -164,7 +164,7 @@ func TestOAuthProviderSelectionAndDevinLifecycle(t *testing.T) {
 	}
 
 	response, body = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=devin&session_id=devin_session", nil)
-	for _, required := range []string{"Approve the connection with Devin", "Open Devin authorization", `data-oauth-flow`, `data-status-url="/admin/oauth/devin/status/devin_session"`, `action="/admin/oauth/devin/cancel/devin_session"`} {
+	for _, required := range []string{"Approve the connection with Devin", "Open Devin authorization", "Localhost callback URL", `data-oauth-flow`, `data-status-url="/admin/oauth/devin/status/devin_session"`, `action="/admin/oauth/devin/complete/devin_session"`, `action="/admin/oauth/devin/cancel/devin_session"`} {
 		if response.StatusCode != http.StatusOK || !strings.Contains(body, required) {
 			t.Fatalf("Devin flow missing %q: status=%d body=%s", required, response.StatusCode, body)
 		}
@@ -228,6 +228,31 @@ func TestOAuthProviderSelectionAndDevinLifecycle(t *testing.T) {
 	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=devin&session_id=devin_session", nil)
 	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/accounts/acct_test" {
 		t.Fatalf("completed Devin page = %d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+}
+
+func TestDevinManualCallbackFormCompletesRemoteFlow(t *testing.T) {
+	fixture := newWebFixture(t)
+	browser, token := loginBrowser(t, fixture)
+	fixture.oauth.startFlow = OAuthFlow{SessionID: "manual_session", Status: "pending", AuthorizationURL: "https://app.devin.ai/auth/cli/continue", ExpiresAt: fixture.clock.Now().Add(5 * time.Minute), PollAfter: 2 * time.Second}
+	response, _ := browser.request(t, http.MethodPost, "/admin/oauth/new", url.Values{"provider": {"devin"}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("start status=%d", response.StatusCode)
+	}
+	const callbackURL = "http://127.0.0.1:59653/callback?code=manual-code-secret&state=manual-state-secret"
+	response, body := browser.request(t, http.MethodPost, "/admin/oauth/devin/complete/manual_session", url.Values{"callback_url": {callbackURL}, "gorilla.csrf.Token": {token}})
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/oauth/new?provider=devin&session_id=manual_session" {
+		t.Fatalf("complete status=%d location=%q body=%s", response.StatusCode, response.Header.Get("Location"), body)
+	}
+	if fixture.oauth.completedSession != "manual_session" || fixture.oauth.completedCallback != callbackURL {
+		t.Fatalf("manual callback session=%q callback=%q", fixture.oauth.completedSession, fixture.oauth.completedCallback)
+	}
+	if strings.Contains(body, "manual-code-secret") || strings.Contains(body, "manual-state-secret") {
+		t.Fatalf("manual callback leaked in response: %s", body)
+	}
+	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=devin&session_id=manual_session", nil)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/accounts/acct_test" {
+		t.Fatalf("completed page status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
 	}
 }
 

@@ -74,13 +74,22 @@ func (f *fakeAccounts) Refresh(_ context.Context, id string) (store.Account, err
 }
 
 type fakeCompletion struct {
-	resumed []string
-	ensured []string
+	resumed          []string
+	ensured          []string
+	devinSessionID   string
+	devinCallbackURL string
+	devinAccountID   string
+	devinCompleteErr error
 }
 
 func (f *fakeCompletion) Resume(state string) { f.resumed = append(f.resumed, state) }
 func (f *fakeCompletion) EnsureCompletion(state string) {
 	f.ensured = append(f.ensured, state)
+}
+func (f *fakeCompletion) CompleteDevinCallback(_ context.Context, sessionID, callbackURL string) (string, error) {
+	f.devinSessionID = sessionID
+	f.devinCallbackURL = callbackURL
+	return f.devinAccountID, f.devinCompleteErr
 }
 
 type fakeUsage struct {
@@ -565,6 +574,25 @@ func TestDevinAuthorizationUsesSessionIDNotState(t *testing.T) {
 	requireStatus(t, cancelled, http.StatusNoContent)
 	if accountsService.loginState != "safe-session-id" {
 		t.Fatalf("Devin cancel state = %q", accountsService.loginState)
+	}
+}
+
+func TestDevinManualCallbackCompletionIsAuthenticatedManagementFlow(t *testing.T) {
+	completion := &fakeCompletion{devinAccountID: "devin_1"}
+	handler := NewHandler(Services{Completion: completion})
+	const callbackURL = "http://127.0.0.1:59653/callback?code=manual-code-secret&state=manual-state-secret"
+	response := request(t, handler, http.MethodPost, basePath+"/oauth/devin/complete/safe-session-id", `{"callback_url":"`+callbackURL+`"}`)
+	requireStatus(t, response, http.StatusOK)
+	if completion.devinSessionID != "safe-session-id" || completion.devinCallbackURL != callbackURL {
+		t.Fatalf("completion session=%q callback=%q", completion.devinSessionID, completion.devinCallbackURL)
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "manual-code-secret") || strings.Contains(body, "manual-state-secret") || strings.Contains(body, callbackURL) {
+		t.Fatalf("manual callback leaked: %s", body)
+	}
+	view := decodeMap(t, response)
+	if view["status"] != "completed" || view["account_id"] != "devin_1" || view["session_id"] != "safe-session-id" {
+		t.Fatalf("completion view=%v", view)
 	}
 }
 

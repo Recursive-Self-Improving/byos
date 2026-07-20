@@ -55,7 +55,7 @@ func TestReadmeDevinExampleLoadsAndValidates(t *testing.T) {
 		t.Fatal("extracted empty YAML from README.md")
 	}
 	cfg := loadYAML(t, body)
-	if cfg.Server.Listen != "127.0.0.1:8080" || cfg.Devin.OAuth.CallbackOrigin != "https://byos.example.com" {
+	if cfg.Server.Listen != "127.0.0.1:8080" || cfg.Devin.OAuth.CallbackOrigin != "http://127.0.0.1:59653" || cfg.Devin.OAuth.CallbackPath != "/callback" {
 		t.Fatalf("unexpected: %+v", cfg)
 	}
 	if cfg.Devin.Runtime.UnaryTimeout.Duration() != 15*time.Second || cfg.Devin.Runtime.StreamDeadline.Duration() != 0 {

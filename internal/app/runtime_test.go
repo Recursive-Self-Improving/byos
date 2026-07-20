@@ -92,7 +92,7 @@ func TestRuntimeDefaultDevinOAuthStartsWithLoopbackCallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := parsed.Query().Get("redirect_uri"), "http://127.0.0.1:18080/admin/api/v1/oauth/devin/callback"; got != want {
+	if got, want := parsed.Query().Get("redirect_uri"), "http://127.0.0.1:18080/callback"; got != want {
 		t.Fatalf("redirect_uri=%q want=%q", got, want)
 	}
 	if parsed.Host != "app.devin.ai" || parsed.Path != "/auth/cli/continue" || parsed.Query().Get("code_challenge_method") != "S256" {
@@ -711,6 +711,8 @@ func TestRuntimeRunStopsOnCancellation(t *testing.T) {
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
 	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Devin.OAuth.CallbackOrigin = "http://127.0.0.1:59653"
+	cfg.Devin.OAuth.CallbackPath = "/callback"
 	runtime, err := New(t.Context(), cfg, secrets, nil)
 	if err != nil {
 		t.Fatal(err)

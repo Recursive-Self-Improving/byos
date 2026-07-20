@@ -4,11 +4,8 @@ import (
 	"testing"
 )
 
-func TestValidateCallbackPathAllowsDefaultAdminCallback(t *testing.T) {
-	// The default Devin callback path lives under /admin/api/v1/ and must be
-	// allowed: the outer exact dispatcher secures it, and AdminAuth protects
-	// every neighboring admin route.
-	if err := validateCallbackPath("/admin/api/v1/oauth/devin/callback"); err != nil {
+func TestValidateCallbackPathAllowsDefaultCallback(t *testing.T) {
+	if err := validateCallbackPath("/callback"); err != nil {
 		t.Fatalf("default callback path rejected: %v", err)
 	}
 }
@@ -106,6 +103,7 @@ func TestValidateCallbackPathRejectsConcreteWebDynamicRouteMatch(t *testing.T) {
 		"/admin/accounts/abc/delete",
 		"/admin/oauth/devin/authorize/sess",
 		"/admin/oauth/devin/status/sess",
+		"/admin/oauth/devin/complete/sess",
 		"/admin/oauth/devin/cancel/sess",
 		"/admin/usage/abc/refresh",
 		"/admin/models/abc/refresh",
@@ -151,6 +149,7 @@ func TestValidateCallbackPathRejectsConcreteDynamicRouteMatch(t *testing.T) {
 	// protected route.
 	for _, path := range []string{
 		"/admin/api/v1/oauth/devin/status/abc",
+		"/admin/api/v1/oauth/devin/complete/abc",
 		"/admin/api/v1/oauth/devin/cancel/abc",
 		"/admin/api/v1/oauth/xai/device/abc",
 		"/admin/api/v1/accounts/abc",
@@ -162,13 +161,6 @@ func TestValidateCallbackPathRejectsConcreteDynamicRouteMatch(t *testing.T) {
 		if err := validateCallbackPath(path); err == nil {
 			t.Fatalf("dynamic route match %q should be rejected", path)
 		}
-	}
-}
-
-func TestValidateCallbackPathDefaultCallbackDoesNotCollide(t *testing.T) {
-	// The default callback must not be rejected by the dynamic route checks.
-	if err := validateCallbackPath("/admin/api/v1/oauth/devin/callback"); err != nil {
-		t.Fatalf("default callback path rejected: %v", err)
 	}
 }
 

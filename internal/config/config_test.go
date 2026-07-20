@@ -26,6 +26,9 @@ func TestDefaultConfig(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Models.Entries, defaultModelEntries()) {
 		t.Fatalf("model entries = %#v", cfg.Models.Entries)
 	}
+	if cfg.Devin.OAuth.CallbackPath != "/callback" {
+		t.Fatalf("default Devin callback path = %q", cfg.Devin.OAuth.CallbackPath)
+	}
 	r := cfg.Devin.Runtime
 	if !reflect.DeepEqual(r.AllowedChatHosts, []string{"server.codeium.com"}) || r.UnaryTimeout.Duration() != 15*time.Second || r.StreamIdleTimeout.Duration() != time.Minute || r.StreamDeadline.Duration() != 0 || r.MaxUnaryCompressedBytes != 2<<20 || r.MaxUnaryDecompressedBytes != 8<<20 || r.MaxFrameCompressedBytes != 4<<20 || r.MaxFrameDecompressedBytes != 16<<20 || r.MaxStreamBytes != 64<<20 || r.MaxToolArgumentBytes != 4<<20 || r.MaxNonStreamBytes != 32<<20 {
 		t.Fatalf("unexpected Devin defaults: %+v", r)
@@ -37,13 +40,13 @@ func TestRailwayConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cfg.Server.TrustedProxies, []string{"100.0.0.0/8"}) || cfg.Server.Listen != DefaultListen || cfg.DataDir != DefaultDataDir || !reflect.DeepEqual(cfg.Models.Entries, defaultModelEntries()) {
+	if !reflect.DeepEqual(cfg.Server.TrustedProxies, []string{"100.0.0.0/8"}) || cfg.Server.Listen != DefaultListen || cfg.DataDir != DefaultDataDir || cfg.Devin.OAuth.CallbackOrigin != "http://127.0.0.1:59653" || cfg.Devin.OAuth.CallbackPath != "/callback" || !reflect.DeepEqual(cfg.Models.Entries, defaultModelEntries()) {
 		t.Fatalf("Railway config changed defaults: %+v", cfg)
 	}
 }
 
 func TestYAMLOverrideRoundTrip(t *testing.T) {
-	cfg := loadYAML(t, "server:\n  listen: 127.0.0.1:9090\n  trusted_proxies: [127.0.0.1, '10.0.0.0/8']\ndata_dir: /tmp/byos\nupstream:\n  request_timeout: 3m\noauth:\n  client_id: deployment-client\n  scopes: openid offline_access\ndevin:\n  oauth:\n    callback_origin: https://byos.example.com\n    callback_path: /oauth/devin/callback\n  runtime:\n    allowed_chat_hosts: [chat.example.com]\n    unary_timeout: 30s\n    stream_idle_timeout: 2m\n    stream_deadline: 10m\n    max_unary_compressed_bytes: 2097152\n    max_unary_decompressed_bytes: 8388608\n    max_frame_compressed_bytes: 4194304\n    max_frame_decompressed_bytes: 16777216\n    max_stream_bytes: 67108864\n    max_tool_argument_bytes: 4194304\n    max_non_stream_bytes: 33554432\n")
+	cfg := loadYAML(t, "server:\n  listen: 127.0.0.1:9090\n  trusted_proxies: [127.0.0.1, '10.0.0.0/8']\ndata_dir: /tmp/byos\nupstream:\n  request_timeout: 3m\noauth:\n  client_id: deployment-client\n  scopes: openid offline_access\ndevin:\n  oauth:\n    callback_origin: http://127.0.0.1:59653\n    callback_path: /callback\n  runtime:\n    allowed_chat_hosts: [chat.example.com]\n    unary_timeout: 30s\n    stream_idle_timeout: 2m\n    stream_deadline: 10m\n    max_unary_compressed_bytes: 2097152\n    max_unary_decompressed_bytes: 8388608\n    max_frame_compressed_bytes: 4194304\n    max_frame_decompressed_bytes: 16777216\n    max_stream_bytes: 67108864\n    max_tool_argument_bytes: 4194304\n    max_non_stream_bytes: 33554432\n")
 	if cfg.Upstream.RequestTimeout.Duration() != 3*time.Minute || cfg.Devin.Runtime.StreamDeadline.Duration() != 10*time.Minute {
 		t.Fatalf("override failed: %+v", cfg)
 	}
@@ -229,13 +232,12 @@ func TestStreamDeadlineOnlyShortensCallerContext(t *testing.T) {
 	}
 }
 
-func TestDevinActivationAcceptsPublicHTTPSAndLoopbackHTTP(t *testing.T) {
+func TestDevinActivationAcceptsOnlyLoopbackHTTP(t *testing.T) {
 	cfg := Default()
 	if err := cfg.Devin.ValidateEnabled(); err == nil {
 		t.Fatal("unset callback origin activated Devin")
 	}
 	for _, origin := range []string{
-		"https://byos.example.com",
 		"http://localhost:8080",
 		"http://127.0.0.1:8080",
 		"http://[::1]:8080",
@@ -245,10 +247,16 @@ func TestDevinActivationAcceptsPublicHTTPSAndLoopbackHTTP(t *testing.T) {
 			t.Fatalf("origin %q: %v", origin, err)
 		}
 	}
-	for _, origin := range []string{"http://byos.example.com", "ftp://127.0.0.1:8080"} {
+	for _, origin := range []string{
+		"https://byos.example.com",
+		"http://byos.example.com:8080",
+		"http://127.0.0.1",
+		"http://127.0.0.1:0",
+		"ftp://127.0.0.1:8080",
+	} {
 		cfg.Devin.OAuth.CallbackOrigin = origin
 		if err := cfg.Devin.ValidateEnabled(); err == nil {
-			t.Fatalf("unsafe origin %q accepted", origin)
+			t.Fatalf("unsupported origin %q accepted", origin)
 		}
 	}
 }

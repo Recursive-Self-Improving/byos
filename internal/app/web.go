@@ -10,6 +10,7 @@ import (
 
 	"byos/internal/accounts"
 	"byos/internal/models"
+	oauthdevin "byos/internal/oauth/devin"
 	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
@@ -487,9 +488,10 @@ type cachedAuthorizationURL struct {
 }
 
 type webOAuthAdapter struct {
-	ctx      context.Context
-	accounts webOAuthAccountManager
-	now      func() time.Time
+	ctx              context.Context
+	accounts         webOAuthAccountManager
+	devinCallbackURL string
+	now              func() time.Time
 
 	mu                sync.Mutex
 	active            map[string]*activeOAuthCompletion
@@ -571,6 +573,30 @@ func (a *webOAuthAdapter) Cancel(ctx context.Context, selected web.Provider, ses
 		active.cancel()
 	}
 	return a.accounts.CancelLogin(ctx, kind, provider.SessionID(sessionID))
+}
+
+// CompleteDevinCallback consumes a browser-copied loopback callback without
+// persisting or logging its raw URL. SessionID binds the callback state to the
+// exact management flow displayed to the authenticated administrator.
+func (a *webOAuthAdapter) CompleteDevinCallback(ctx context.Context, sessionID, callbackURL string) (string, error) {
+	if a == nil || a.accounts == nil || strings.TrimSpace(sessionID) == "" {
+		return "", web.ErrNotFound
+	}
+	state, code, err := oauthdevin.ParseCallbackURL(callbackURL, a.devinCallbackURL)
+	if err != nil {
+		return "", err
+	}
+	account, err := a.accounts.CompleteLogin(ctx, provider.Devin, provider.AuthorizationRef{
+		Provider: provider.Devin, State: state, SessionID: provider.SessionID(sessionID),
+	}, provider.AuthorizationCompletion{Code: code})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(account.ID) == "" {
+		return "", errors.New("Devin authorization completed without an account")
+	}
+	a.forgetAuthorizationURL(provider.Devin, sessionID)
+	return account.ID, nil
 }
 
 func (a *webOAuthAdapter) Run(ctx context.Context) error {

@@ -16,6 +16,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -473,7 +474,6 @@ type smokeRuntime struct {
 	refreshWorker      *accounts.RefreshWorker
 	webOAuth           *webOAuthAdapter
 	publicModels       publicCatalog
-	callbackPath       string
 	sessionService     *sessions.Service
 	responseRepo       *store.ResponseRepository
 }
@@ -510,8 +510,8 @@ func newSmokeRuntime(t *testing.T, dataDir string) *smokeRuntime {
 	cfg := config.Default()
 	cfg.DataDir = dataDir
 	cfg.Server.Listen = "127.0.0.1:0"
-	cfg.Devin.OAuth.CallbackOrigin = "https://callback.example.com"
-	cfg.Devin.OAuth.CallbackPath = "/admin/api/v1/oauth/devin/callback"
+	cfg.Devin.OAuth.CallbackOrigin = "http://127.0.0.1:59653"
+	cfg.Devin.OAuth.CallbackPath = "/callback"
 	cfg.Models.Allowlist = []string{"grok-4.5", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"}
 	cfg.Models.Aliases = map[string]string{"grok": "grok-4.5"}
 	if err := cfg.Validate(); err != nil {
@@ -681,6 +681,7 @@ func newSmokeRuntime(t *testing.T, dataDir string) *smokeRuntime {
 		CountTokens: http.HandlerFunc(apianthropic.CountTokensHandler),
 	}
 	webOAuth := newWebOAuthAdapter(ctx, accountService)
+	webOAuth.devinCallbackURL = "http://127.0.0.1:59653/callback"
 	handlers.Admin = admin.NewHandler(admin.Services{Accounts: accountService, Completion: webOAuth, Usage: usageService, UsageRefresh: usageWorker, Models: catalog, ModelsRefresh: modelWorker, Cooldowns: cooldownRepo, APIKeys: apiKeyService, Capabilities: capabilityRegistry})
 	handlers.Callback = admin.CallbackHandler(accountService)
 	webAccounts := &webAccountAdapter{accounts: accountService, models: catalog, static: staticCatalog, registry: capabilityRegistry, usage: usageService, cooldowns: cooldownRepo, now: func() time.Time { return time.Now().UTC() }}
@@ -744,7 +745,6 @@ func newSmokeRuntime(t *testing.T, dataDir string) *smokeRuntime {
 		refreshWorker:      refreshWorker,
 		webOAuth:           webOAuth,
 		publicModels:       publicModels,
-		callbackPath:       cfg.Devin.OAuth.CallbackPath,
 	}
 }
 
@@ -1196,27 +1196,31 @@ func TestC12SmokeHarness(t *testing.T) {
 		if auth.VerificationURL == "" {
 			t.Fatal("Devin authorization URL is empty")
 		}
-		// Extract state from the authorization URL.
 		parsed, err := url.Parse(auth.VerificationURL)
 		if err != nil {
 			t.Fatalf("parse Devin auth URL: %v", err)
 		}
 		state := parsed.Query().Get("state")
-		if state == "" {
-			t.Fatal("Devin authorization URL missing state parameter")
+		redirectURI := parsed.Query().Get("redirect_uri")
+		if state == "" || redirectURI != "http://127.0.0.1:59653/callback" {
+			t.Fatalf("Devin authorization state=%q redirect_uri=%q", state, redirectURI)
 		}
-		// Simulate the OAuth redirect: hit the callback endpoint with state
-		// and a fake code. The real admin.CallbackHandler extracts state+code
-		// and calls CompleteLogin, which exchanges the code via the fake
-		// Devin endpoint and persists the account.
-		callbackURL := sr.callbackPath + "?state=" + url.QueryEscape(state) + "&code=smoke-devin-code"
-		resp := sr.doRequest(t, http.MethodGet, callbackURL, "")
-		// The callback returns 204 No Content on success.
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
-			body := readBody(t, resp)
-			t.Fatalf("Devin callback: expected 200/204/302/303, got %d: %s", resp.StatusCode, body)
+		// Simulate Railway/browser-copy completion: Devin redirects to the
+		// advertised localhost URI, then the administrator submits that complete
+		// URL through the authenticated Admin API. The real adapter validates the
+		// exact redirect, binds state to SessionID, exchanges the code, and
+		// persists the account.
+		callbackURL := redirectURI + "?state=" + url.QueryEscape(state) + "&code=smoke-devin-code"
+		payload, err := json.Marshal(map[string]string{"callback_url": callbackURL})
+		if err != nil {
+			t.Fatal(err)
 		}
-		_ = resp.Body.Close()
+		resp := sr.doAdminRequest(t, http.MethodPost, "/admin/api/v1/oauth/devin/complete/"+auth.SessionID.String(), string(payload))
+		assertStatus(t, resp, http.StatusOK, "Devin manual callback")
+		body := readBody(t, resp)
+		if bytes.Contains(body, []byte(state)) || bytes.Contains(body, []byte("smoke-devin-code")) {
+			t.Fatalf("Devin manual callback response leaked secrets: %s", body)
+		}
 		// Verify the account was created.
 		accounts, err := sr.accountService.List(ctx)
 		if err != nil {

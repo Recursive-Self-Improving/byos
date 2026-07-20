@@ -32,7 +32,7 @@ func openPersistentLifecycle(t *testing.T, dir string, keyByte byte, exchange li
 		sessions:    sessions,
 		client:      exchange,
 		transaction: store.NewDevinOAuthTransaction(database.DB, keys),
-		config:      OAuthConfig{CallbackOrigin: "https://persistence.example.test", CallbackPath: "/oauth/devin/callback"},
+		config:      OAuthConfig{CallbackOrigin: "http://127.0.0.1:59653", CallbackPath: "/callback"},
 		now:         func() time.Time { return now },
 	}
 	return database, keys, sessions, lifecycle

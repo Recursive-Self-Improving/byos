@@ -282,10 +282,10 @@ func deriveWebCSRFKey(sessionKey [32]byte) [32]byte {
 	return sha256.Sum256(material[:])
 }
 
-// automaticDevinCallbackOrigin makes the default local service usable without
-// a separate public callback configuration. It advertises only a browser
-// loopback address and only when the server listens on a loopback or wildcard
-// TCP address. Remote/non-loopback deployments must configure explicit HTTPS.
+// automaticDevinCallbackOrigin makes a local service usable without explicit
+// OAuth settings. It advertises the service's browser-loopback address only
+// when server.listen is loopback or wildcard. Remote deployments configure a
+// provider-compatible loopback URI and use authenticated manual completion.
 func automaticDevinCallbackOrigin(listen string) string {
 	host, port, err := net.SplitHostPort(strings.TrimSpace(listen))
 	if err != nil {
@@ -381,10 +381,15 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 	if err != nil {
 		return fail(err)
 	}
-	devinLifecycle := oauthdevin.NewProviderLifecycle(oauthRepo, devinExchangeClient, store.NewDevinOAuthTransaction(database.DB, keys), oauthdevin.OAuthConfig{
+	devinOAuthConfig := oauthdevin.OAuthConfig{
 		CallbackOrigin: cfg.Devin.OAuth.CallbackOrigin,
 		CallbackPath:   cfg.Devin.OAuth.CallbackPath,
-	})
+	}
+	devinCallbackURL, err := oauthdevin.CallbackURL(devinOAuthConfig)
+	if err != nil {
+		return fail(err)
+	}
+	devinLifecycle := oauthdevin.NewProviderLifecycle(oauthRepo, devinExchangeClient, store.NewDevinOAuthTransaction(database.DB, keys), devinOAuthConfig)
 	capabilityRegistry, err := provider.NewCapabilityRegistry([]provider.CapabilityRegistration{
 		{
 			Provider:  provider.XAI,
@@ -458,6 +463,7 @@ func New(ctx context.Context, cfg config.Config, secrets config.Secrets, logger 
 		return executor.Stream(ctx, request)
 	}}, CountTokens: http.HandlerFunc(apianthropic.CountTokensHandler)}
 	webOAuth := newWebOAuthAdapter(ctx, accountService)
+	webOAuth.devinCallbackURL = devinCallbackURL
 	handlers.Admin = admin.NewHandler(admin.Services{Accounts: accountService, Completion: webOAuth, Usage: usageService, UsageRefresh: usageWorker, Models: catalog, ModelsRefresh: modelWorker, Cooldowns: cooldownRepo, APIKeys: apiKeyService, Capabilities: capabilityRegistry})
 	handlers.Callback = admin.CallbackHandler(accountService)
 	webAccounts := &webAccountAdapter{accounts: accountService, models: catalog, static: staticCatalog, registry: capabilityRegistry, usage: usageService, cooldowns: cooldownRepo, now: func() time.Time { return time.Now().UTC() }}
@@ -647,6 +653,7 @@ func validateCallbackPath(callbackPath string) error {
 		"/admin/oauth/new",
 		"/admin/oauth/{provider}/authorize/{session}",
 		"/admin/oauth/{provider}/status/{session}",
+		"/admin/oauth/devin/complete/{session}",
 		"/admin/oauth/{provider}/cancel/{session}",
 		"/admin/usage",
 		"/admin/usage/{id}/refresh",
@@ -660,6 +667,7 @@ func validateCallbackPath(callbackPath string) error {
 		"/admin/api/v1/oauth/xai/device/{state}",
 		"/admin/api/v1/oauth/devin/start",
 		"/admin/api/v1/oauth/devin/status/{session}",
+		"/admin/api/v1/oauth/devin/complete/{session}",
 		"/admin/api/v1/oauth/devin/cancel/{session}",
 		"/admin/api/v1/accounts",
 		"/admin/api/v1/accounts/{id}",

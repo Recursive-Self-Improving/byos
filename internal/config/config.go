@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,7 @@ const (
 	DefaultMaxBodyBytes        = 16 << 20
 	DefaultResponsesRetention  = 30 * 24 * time.Hour
 	DefaultDevinCallbackOrigin = ""
-	DefaultDevinCallbackPath   = "/admin/api/v1/oauth/devin/callback"
+	DefaultDevinCallbackPath   = "/callback"
 	DefaultDevinChatHost       = "server.codeium.com"
 )
 
@@ -403,27 +404,22 @@ func validateModelEntries(entries []ModelEntry) error {
 	return nil
 }
 
-// ValidateEnabled validates an explicit Devin callback origin. Deployed
-// services use a public HTTPS origin; local/native flows may use an HTTP
-// loopback origin, as Devin's CLI does.
+// ValidateEnabled validates the native-style loopback redirect accepted by
+// Devin's CLI authorization endpoint. Public HTTPS redirect URIs are rejected
+// by the provider and therefore fail configuration validation here.
 func (c DevinConfig) ValidateEnabled() error {
 	origin, err := url.Parse(c.OAuth.CallbackOrigin)
-	if err != nil || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || origin.Opaque != "" || (origin.Path != "" && origin.Path != "/") {
-		return errors.New("devin.oauth.callback_origin must be an HTTPS origin or HTTP loopback origin")
+	if err != nil || origin.Scheme != "http" || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || origin.Opaque != "" || (origin.Path != "" && origin.Path != "/") {
+		return errors.New("devin.oauth.callback_origin must be an HTTP loopback origin with an explicit port")
+	}
+	port, err := strconv.ParseUint(origin.Port(), 10, 16)
+	if err != nil || port == 0 {
+		return errors.New("devin.oauth.callback_origin must include a nonzero loopback port")
 	}
 	host := origin.Hostname()
-	switch origin.Scheme {
-	case "http":
-		ip := net.ParseIP(host)
-		if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
-			return errors.New("devin.oauth.callback_origin may use HTTP only with a loopback hostname")
-		}
-	case "https":
-		if net.ParseIP(host) != nil || strings.EqualFold(host, "localhost") || !validDNSName(strings.ToLower(host)) {
-			return errors.New("devin.oauth.callback_origin must use a public DNS hostname for HTTPS")
-		}
-	default:
-		return errors.New("devin.oauth.callback_origin must use HTTPS or loopback HTTP")
+	ip := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return errors.New("devin.oauth.callback_origin must use localhost or a loopback IP")
 	}
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 
 	"byos/internal/accounts"
 	"byos/internal/models"
+	oauthdevin "byos/internal/oauth/devin"
 	"byos/internal/provider"
 	"byos/internal/store"
 	"byos/internal/usage"
@@ -33,6 +34,7 @@ type AccountManager interface {
 type CompletionCoordinator interface {
 	Resume(string)
 	EnsureCompletion(string)
+	CompleteDevinCallback(context.Context, string, string) (string, error)
 }
 
 type UsageReader interface {
@@ -100,6 +102,7 @@ func NewHandler(services Services) http.Handler {
 	mux.HandleFunc("DELETE "+basePath+"/oauth/xai/device/{state}", h.cancelDevice)
 	mux.HandleFunc("POST "+basePath+"/oauth/devin/start", h.startDevin)
 	mux.HandleFunc("GET "+basePath+"/oauth/devin/status/{session}", h.pollDevin)
+	mux.HandleFunc("POST "+basePath+"/oauth/devin/complete/{session}", h.completeDevin)
 	mux.HandleFunc("POST "+basePath+"/oauth/devin/cancel/{session}", h.cancelDevin)
 	mux.HandleFunc("GET "+basePath+"/accounts", h.listAccounts)
 	mux.HandleFunc("PATCH "+basePath+"/accounts/{id}", h.patchAccount)
@@ -131,28 +134,16 @@ func handleDevinCallback(w http.ResponseWriter, r *http.Request, completer Callb
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is accepted")
 		return
 	}
-	query := r.URL.Query()
-	// Reject any provider-reported error by key presence, not by first-value
-	// non-emptiness. An explicit empty `error=` or a repeated
-	// `error=&error=denied` (query.Get returns "") must still be treated as an
-	// error signal and never reach the exchange path.
-	if errorValues, present := query["error"]; present {
-		_ = errorValues
-		writeError(w, http.StatusBadRequest, "callback_error", "authorization provider reported an error")
+	state, code, err := oauthdevin.ParseCallbackQuery(r.URL.RawQuery)
+	if err != nil {
+		if errors.Is(err, oauthdevin.ErrInvalidAuthorization) {
+			writeError(w, http.StatusBadRequest, "callback_error", "authorization provider reported an error")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_callback", "exactly one state and code are required")
+		}
 		return
 	}
-	if errorDescriptionValues, present := query["error_description"]; present {
-		_ = errorDescriptionValues
-		writeError(w, http.StatusBadRequest, "callback_error", "authorization provider reported an error")
-		return
-	}
-	state := query["state"]
-	code := query["code"]
-	if len(state) != 1 || len(code) != 1 || state[0] == "" || code[0] == "" {
-		writeError(w, http.StatusBadRequest, "invalid_callback", "exactly one state and code are required")
-		return
-	}
-	if _, err := completer.CompleteLogin(r.Context(), provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: state[0]}, provider.AuthorizationCompletion{Code: code[0]}); err != nil {
+	if _, err := completer.CompleteLogin(r.Context(), provider.Devin, provider.AuthorizationRef{Provider: provider.Devin, State: state}, provider.AuthorizationCompletion{Code: code}); err != nil {
 		writeError(w, http.StatusBadGateway, "callback_failed", "Devin authorization could not be completed")
 		return
 	}
@@ -371,6 +362,42 @@ func (h *handler) pollDevin(w http.ResponseWriter, r *http.Request) {
 	default:
 		internalError(w)
 	}
+}
+
+type devinCallbackRequest struct {
+	CallbackURL string `json:"callback_url"`
+}
+
+func (h *handler) completeDevin(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("session"))
+	if sessionID == "" {
+		writeJSON(w, http.StatusNotFound, authorizationView{Provider: string(provider.Devin), Status: "failed", Error: "Devin authorization not found"})
+		return
+	}
+	if h.services.Completion == nil {
+		internalError(w)
+		return
+	}
+	var input devinCallbackRequest
+	if err := decodeJSON(r, &input); err != nil || strings.TrimSpace(input.CallbackURL) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_callback", "callback_url is required")
+		return
+	}
+	accountID, err := h.services.Completion.CompleteDevinCallback(r.Context(), sessionID, input.CallbackURL)
+	if err != nil {
+		switch {
+		case errors.Is(err, oauthdevin.ErrInvalidAuthorization):
+			writeError(w, http.StatusBadRequest, "callback_error", "authorization provider reported an error")
+		case errors.Is(err, oauthdevin.ErrInvalidCallback):
+			writeError(w, http.StatusBadRequest, "invalid_callback", "callback_url is not valid for this Devin authorization")
+		case errors.Is(err, sql.ErrNoRows):
+			writeJSON(w, http.StatusNotFound, authorizationView{Provider: string(provider.Devin), SessionID: sessionID, Status: "failed", Error: "Devin authorization not found"})
+		default:
+			writeError(w, http.StatusBadGateway, "callback_failed", "Devin authorization could not be completed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, authorizationView{Provider: string(provider.Devin), SessionID: sessionID, Status: "completed", AccountID: accountID})
 }
 
 func (h *handler) cancelDevin(w http.ResponseWriter, r *http.Request) {

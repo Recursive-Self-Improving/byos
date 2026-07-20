@@ -111,6 +111,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /admin/oauth/new", h.page(http.HandlerFunc(h.handleOAuthStart)))
 	mux.Handle("GET /admin/oauth/{provider}/authorize/{session}", h.page(http.HandlerFunc(h.handleOAuthAuthorize)))
 	mux.Handle("GET /admin/oauth/{provider}/status/{session}", h.page(http.HandlerFunc(h.handleOAuthStatus)))
+	mux.Handle("POST /admin/oauth/devin/complete/{session}", h.page(http.HandlerFunc(h.handleOAuthCompleteDevin)))
 	mux.Handle("POST /admin/oauth/{provider}/cancel/{session}", h.page(http.HandlerFunc(h.handleOAuthCancel)))
 	mux.Handle("GET /admin/usage", h.page(http.HandlerFunc(h.handleUsage)))
 	mux.Handle("POST /admin/usage/{id}/refresh", h.page(http.HandlerFunc(h.handleUsageRefresh)))
@@ -227,6 +228,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"oauthNewURL":       oauthNewURL,
 		"oauthAuthorizeURL": oauthAuthorizeURL,
 		"oauthStatusURL":    oauthStatusURL,
+		"oauthCompleteURL":  oauthCompleteURL,
 		"oauthCancelURL":    oauthCancelURL,
 		"usageRefreshURL":   func(id string) string { return resourceURL("/admin/usage/", id, "/refresh") },
 		"modelRefreshURL":   func(id string) string { return resourceURL("/admin/models/", id, "/refresh") },
@@ -280,6 +282,14 @@ func oauthStatusURL(ref string) string {
 		return ""
 	}
 	return resourceURL("/admin/oauth/"+url.PathEscape(string(provider))+"/status/", sessionID, "")
+}
+
+func oauthCompleteURL(ref string) string {
+	provider, sessionID, ok := oauthManagementParts(ref)
+	if !ok || provider != ProviderDevin {
+		return ""
+	}
+	return resourceURL("/admin/oauth/devin/complete/", sessionID, "")
 }
 
 func oauthCancelURL(ref string) string {
