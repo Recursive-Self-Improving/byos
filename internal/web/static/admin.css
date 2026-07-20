@@ -992,6 +992,7 @@ select:focus {
   max-width: 44rem;
   align-items: flex-end;
   gap: var(--space-3);
+  margin-bottom: var(--space-6);
 }
 
 .inline-form > div {
