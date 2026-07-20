@@ -1,0 +1,18 @@
+# Operator configuration for Docker Compose deployments.
+# docker-compose.yml bind-mounts this file read-only at /etc/byos/compose.yaml
+# and starts the service with `serve --config /etc/byos/compose.yaml`.
+#
+# To start new Devin OAuth callback login flows, uncomment
+# devin.oauth.callback_origin below and set it to the public HTTPS origin where
+# the OAuth callback is reachable (see README "Devin provider setup").
+# callback_origin is required to start new Devin logins, not a runtime provider
+# activation gate: a deployment with persisted usable Devin accounts in /data
+# can still route Devin while it is empty. A fresh, empty deployment with no
+# persisted Devin accounts runs xAI-only until callback_origin is set.
+#
+# No secrets belong in this file. Provide BYOS_MASTER_KEY, BYOS_ADMIN_PASSWORD,
+# and BYOS_ADMIN_API_KEY through the BYOS_* environment variables in
+# docker-compose.yml (or a local .env file).
+devin:
+  oauth:
+    # callback_origin: "https://byos.example.com"

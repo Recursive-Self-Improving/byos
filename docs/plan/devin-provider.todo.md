@@ -2,9 +2,9 @@
 
 > Architecture: [`devin-provider.plan.md`](./devin-provider.plan.md)
 >
-> Status: **Chunks 1–10 complete; C11.1 is current**. Chunk 10 adds provider-aware Admin REST OAuth routes (`POST /admin/api/v1/oauth/devin/start`, `GET /admin/api/v1/oauth/devin/status/{sessionID}`, `POST /admin/api/v1/oauth/devin/cancel/{sessionID}`, plus the exact configured GET callback), provider-typed admin account/model/usage projections with capability-aware refresh/relogin, provider-selectable Web UI (`/admin/oauth/new` chooses `xai|devin`) with correct device versus callback instructions/status, and `byos login --provider xai|devin` CLI with a bounded callback-only HTTP listener reusing the same persisted start/status service. Devin status/cancel are OAuth-session-ID keyed and isolated across concurrent sessions; only the exact callback route bypasses admin bearer auth; capability projections carry only account ID, provider, and enabled state with no credential/raw token/identity/OAuth payload. The sequential Chunk 10 commit is not yet created until the parent commits the implementation diff.
+> Status: **Chunks 1–11 complete; C12.1 is current**. Chunk 10 adds provider-aware Admin REST OAuth routes (`POST /admin/api/v1/oauth/devin/start`, `GET /admin/api/v1/oauth/devin/status/{sessionID}`, `POST /admin/api/v1/oauth/devin/cancel/{sessionID}`, plus the exact configured GET callback), provider-typed admin account/model/usage projections with capability-aware refresh/relogin, provider-selectable Web UI (`/admin/oauth/new` chooses `xai|devin`) with correct device versus callback instructions/status, and `byos login --provider xai|devin` CLI with a bounded callback-only HTTP listener reusing the same persisted start/status service. Devin status/cancel are OAuth-session-ID keyed and isolated across concurrent sessions; only the exact callback route bypasses admin bearer auth; capability projections carry only account ID, provider, and enabled state with no credential/raw token/identity/OAuth payload. The sequential Chunk 10 commit is not yet created until the parent commits the implementation diff. Chunk 11 documents deployment, inventory, and attribution: the README/config/route inventory is exact; Compose binds `127.0.0.1` and mounts `deploy/compose.yaml` read-only with the config command; the Railway baked-config workflow is documented; fixed endpoints/bounds/timeouts/routes match C2.1; operator docs cover provider/security/persistence/single-replica semantics; `THIRD_PARTY_NOTICES` carries `devin-gateway`/`oh-my-pi` attribution; the exact README YAML extraction test passes; no Devin token environment variable or historical plan edits were introduced. The sequential Chunk 11 commit is not yet created until the parent commits the implementation diff.
 >
-> Current next item: **C11.1 — Inventory the already-shipped configuration and routes**.
+> Current next item: **C12.1 — Run focused provider and migration verification**.
 >
 > Chunk 1 review/fix record (2026-07-19): independent review found legacy v4 OAuth device-payload compatibility gaps. The fixes replaced permissive case-insensitive legacy decoding with exact top-level alias handling, including exact nested `Authorization` aliases and canonical-key precedence/null/error behavior; callback flows scrub legacy device-only fields. A follow-up finding that pending payload writes used PascalCase keys was fixed with an explicit three-key snake_case wire format (`verifier`, `redirect_uri`, `expires_at`) and exact-key decoding, including null, malformed-value, and non-exact-key coverage.
 >
@@ -70,6 +70,10 @@
 > Chunk 10 review/fix record (2026-07-20): independent review verified exact routes (`POST /admin/api/v1/oauth/devin/start`, `GET /admin/api/v1/oauth/devin/status/{sessionID}`, `POST /admin/api/v1/oauth/devin/cancel/{sessionID}`, configured GET callback) and OAuth-session-ID isolation: status/cancel for one concurrent session cannot observe or affect another, and unknown/wrong-provider IDs return not-found without mutation. Capability projections were confirmed to carry only account ID, provider, and enabled state with no credential, raw token, identity, or OAuth payload. The callback rejects wrong method/path/provider/error/code/state/replay without exchange and responses contain allowlisted lifecycle fields only. Web review confirmed xAI wording appears only in the xAI flow, Devin callback completion is observable after restart, and rendered HTML includes provider but no state/verifier/code/token/user JWT/raw billing. CLI matrix confirmed deterministic provider parsing/default, Devin completion through the same encrypted lifecycle, process-visible status transitions, clean timeout/cancellation, and no second callback implementation. A completion-cache fix removed a stale completion entry that could surface after relogin state changes; the secret-cache removal eliminated the last in-memory credential cache so no production path retains raw tokens beyond the request-local credential access. Two-session stress fixtures proved concurrent Devin status/cancel isolation and restart-safe callback completion.
 >
 > Chunk 10 gate evidence (2026-07-20): `go test -count=1 ./...` — 31 packages ok, 2 no tests; `go test -race -count=1 ./internal/api/admin ./internal/accounts ./internal/app ./internal/web ./cmd/byos ./internal/oauth/devin ./internal/routing` — 13 packages ok; `git diff --check` — clean. This tracker-only closure did not rerun gates or create the sequential commit; the Chunk 10 sequential commit `feat(admin): expose provider-aware oauth and account flows` is not yet created until the parent commits the implementation diff.
+>
+> Chunk 11 implementation record (2026-07-20): C11.1–C11.4 are complete. The README/config/route inventory is exact against shipped behavior: authorization, token, runtime base, callback origin/path, allowed chat hosts, fixed models (`grok`/`grok-4.5`→xAI; `kimi-k2-7`, `glm-5-2`, `swe-1-6-slow`→Devin), and the exact C2.1 bounds/timeouts (`unary_timeout` 15s, `stream_idle_timeout` 60s, compressed/decompressed unary/frame/stream ceilings) are documented without renaming or changing limit semantics. The Compose deployment binds the listener to `127.0.0.1` and mounts `deploy/compose.yaml` read-only with the config command; the Railway baked-config workflow is documented. Operator documentation covers provider ownership, login methods, HTTPS callback setup, persistent `/data`, stable `BYOS_MASTER_KEY`, single-replica semantics, Devin relogin-on-expiry with no refresh, xAI-only search/billing, local Devin usage, unavailable Devin quota, and the absence of any Devin token/client-secret environment variable. Fixed endpoints, bounds, timeouts, and routes match the implementation; examples contain placeholders only.
+>
+> Chunk 11 gate evidence (2026-07-20): `go test -count=1 ./...` — 31 packages ok, 2 no tests; `git diff --check` — clean. This tracker-only closure did not rerun gates or create the sequential commit; the Chunk 11 sequential commit `docs(devin): document provider setup and attribution` is not yet created until the parent commits the implementation diff.
 
 > Execution rule: items form one total order: each item depends on the immediately preceding item, chunks complete in numeric order, and the listed commit subject is used only after that chunk's observable definition of done passes. Do not edit the historical [`init.plan.md`](./init.plan.md) or [`init.todo.md`](./init.todo.md); its four unchecked blockers remain separately open and cannot be closed by this tracker.
 
@@ -507,7 +511,7 @@
   - Observable DoD: Admin REST, Web, and CLI can start/observe the correct provider flow and display safe provider-aware state; Devin status/cancel are OAuth-session-ID keyed and isolated; only the exact callback route is unauthenticated by admin session.
   - Sequential commit: `feat(admin): expose provider-aware oauth and account flows`.
 
-- [ ] **C11.1 — Inventory the already-shipped configuration and routes**
+- [x] **C11.1 — Inventory the already-shipped configuration and routes**
   - Chunk owner: **Chunk 11 — Deployment documentation, inventory, and attribution**.
   - Depends on: C10.5.
   - Files: config examples, route inventory/tests, deployment files only where behavior requires changes.
@@ -515,7 +519,7 @@
   - Observable DoD: examples match C2.1 defaults/ranges/semantics; fresh default config remains xAI-compatible; enabling Devin has explicit validated callback/host settings; route inventory contains only required public/admin/callback routes.
   - Verification: config parse/startup scenarios using the existing contract and route enumeration tests.
 
-- [ ] **C11.2 — Update operator and deployment documentation**
+- [x] **C11.2 — Update operator and deployment documentation**
   - Chunk owner: **Chunk 11**.
   - Depends on: C11.1.
   - Files: `README.md` and existing configuration/Compose/Railway documentation; do not create or modify historical plan files.
@@ -523,7 +527,7 @@
   - Observable DoD: documented commands/routes/config names match implementation; examples contain placeholders only; no claim implies multi-replica safety, Devin refresh, arbitrary discovered models, or official Devin quota.
   - Verification: manual doc-to-config/route inventory and secret/example scan.
 
-- [ ] **C11.3 — Complete source attribution and scope review**
+- [x] **C11.3 — Complete source attribution and scope review**
   - Chunk owner: **Chunk 11**.
   - Depends on: C11.2.
   - Files: existing license/notice material and source-reference inventory.
@@ -531,7 +535,7 @@
   - Observable DoD: licensing is approved, attribution is complete, and no standalone gateway token store/public auth/server stack, capacity, analytics, quota, media, plugin, or WebSocket code was absorbed.
   - Verification: source/symbol/license inventory review.
 
-- [ ] **C11.4 — Review and commit Chunk 11**
+- [x] **C11.4 — Review and commit Chunk 11**
   - Chunk owner: **Chunk 11**.
   - Depends on: C11.3.
   - Observable DoD: config, deployment, docs, and attribution exactly describe shipped behavior; historical plans remain byte-unchanged.
