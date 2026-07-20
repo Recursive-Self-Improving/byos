@@ -22,6 +22,18 @@
     });
   }
 
+  const providerSelect = document.querySelector("[data-oauth-provider]");
+  const providerStart = document.querySelector("[data-oauth-start]");
+  if (providerSelect && providerStart) {
+    const providerLabels = { xai: "xAI", devin: "Devin" };
+    const updateProviderStart = () => {
+      const label = providerLabels[providerSelect.value] || "provider";
+      providerStart.textContent = `Start ${label} connection`;
+    };
+    providerSelect.addEventListener("change", updateProviderStart);
+    updateProviderStart();
+  }
+
   const flow = document.querySelector("[data-oauth-flow]");
   if (!flow) return;
 

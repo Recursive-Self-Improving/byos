@@ -148,8 +148,12 @@ func TestOAuthProviderSelectionAndDevinLifecycle(t *testing.T) {
 	browser, token := loginBrowser(t, fixture)
 
 	response, body := browser.request(t, http.MethodGet, "/admin/oauth/new?provider=devin", nil)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `value="devin" selected`) || !strings.Contains(body, "Devin browser callback") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `value="devin" selected`) || !strings.Contains(body, "Devin browser callback") || !strings.Contains(body, `data-oauth-provider`) || !strings.Contains(body, `data-oauth-start>Start Devin connection`) {
 		t.Fatalf("Devin selector page = %d body=%s", response.StatusCode, body)
+	}
+	response, body = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=xai", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `value="xai" selected`) || !strings.Contains(body, `data-oauth-start>Start xAI connection`) {
+		t.Fatalf("xAI selector page = %d body=%s", response.StatusCode, body)
 	}
 	response, _ = browser.request(t, http.MethodGet, "/admin/oauth/new?provider=unknown", nil)
 	if response.StatusCode != http.StatusBadRequest || fixture.oauth.startCalls != 0 {
