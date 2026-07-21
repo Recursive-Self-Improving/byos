@@ -344,11 +344,19 @@ func projectWebUsage(account store.Account, snapshot usage.Snapshot, quotaAvaila
 			percent := snapshot.Monthly.Used / limit * 100
 			result.Monthly.Percent = &percent
 		}
+		if !snapshot.Monthly.ResetAt.IsZero() {
+			resetAt := snapshot.Monthly.ResetAt
+			result.Monthly.ResetAt = &resetAt
+		}
 	}
 	if snapshot.Weekly != nil {
 		limit := 100.0
 		percent := snapshot.Weekly.UsedPercent
 		result.Weekly = web.UsagePeriod{Used: percent, Limit: &limit, Percent: &percent, Unit: "percent"}
+		if !snapshot.Weekly.ResetAt.IsZero() {
+			resetAt := snapshot.Weekly.ResetAt
+			result.Weekly.ResetAt = &resetAt
+		}
 	}
 	if !snapshot.FetchedAt.IsZero() {
 		fetchedAt := snapshot.FetchedAt

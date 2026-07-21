@@ -215,6 +215,31 @@ func TestWebAdaptersProjectOnlySafeManagementData(t *testing.T) {
 	}
 }
 
+func TestProjectWebUsageSurfacesPeriodResetAt(t *testing.T) {
+	monthlyReset := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	weeklyReset := time.Date(2030, 1, 2, 0, 0, 0, 0, time.UTC)
+	account := store.Account{Provider: provider.XAI, ID: "acct_reset", Label: "Reset", Enabled: true, Status: "ready"}
+	snapshot := usage.Snapshot{
+		AccountID: account.ID,
+		Monthly:   &usage.Monthly{Limit: 100, Used: 25, Remaining: 75, ResetAt: monthlyReset},
+		Weekly:    &usage.Weekly{UsedPercent: 40, RemainingPercent: 60, ResetAt: weeklyReset},
+		FetchedAt: monthlyReset,
+	}
+	view := projectWebUsage(account, snapshot, true)
+	if view.Monthly.ResetAt == nil || !view.Monthly.ResetAt.Equal(monthlyReset) {
+		t.Fatalf("monthly ResetAt = %#v want %s", view.Monthly.ResetAt, monthlyReset)
+	}
+	if view.Weekly.ResetAt == nil || !view.Weekly.ResetAt.Equal(weeklyReset) {
+		t.Fatalf("weekly ResetAt = %#v want %s", view.Weekly.ResetAt, weeklyReset)
+	}
+
+	// Zero reset times stay nil so the template renders nothing.
+	zeroView := projectWebUsage(account, usage.Snapshot{AccountID: account.ID, Monthly: &usage.Monthly{Used: 1}, Weekly: &usage.Weekly{UsedPercent: 1}}, true)
+	if zeroView.Monthly.ResetAt != nil || zeroView.Weekly.ResetAt != nil {
+		t.Fatalf("zero reset times should not surface: monthly=%#v weekly=%#v", zeroView.Monthly.ResetAt, zeroView.Weekly.ResetAt)
+	}
+}
+
 type adapterOAuthAccounts struct {
 	mu           sync.Mutex
 	sessions     map[string]provider.AuthorizationSession

@@ -81,6 +81,18 @@ func TestUsagePageRendersCacheReadTokens(t *testing.T) {
 	}
 }
 
+func TestUsagePageRendersPeriodResetTime(t *testing.T) {
+	fixture := newWebFixture(t)
+	monthlyReset := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	weeklyReset := time.Date(2030, 1, 2, 0, 0, 0, 0, time.UTC)
+	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_reset", AccountLabel: "Reset account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Used: 25, Unit: "credits", ResetAt: &monthlyReset}, Weekly: UsagePeriod{Used: 40, Unit: "percent", ResetAt: &weeklyReset}, FetchedAt: &time.Time{}}}
+	browser, _ := loginBrowser(t, fixture)
+	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Resets 2030-01-01 00:00 UTC") || !strings.Contains(body, "Resets 2030-01-02 00:00 UTC") {
+		t.Fatalf("reset time missing: status=%d body=%s", response.StatusCode, body)
+	}
+}
+
 func TestOAuthFlowStartsResumesPollsCancelsAndRedirects(t *testing.T) {
 	fixture := newWebFixture(t)
 	browser, token := loginBrowser(t, fixture)

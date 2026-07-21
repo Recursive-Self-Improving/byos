@@ -154,6 +154,7 @@ type UsagePeriod struct {
 	Limit   *float64
 	Percent *float64
 	Unit    string
+	ResetAt *time.Time
 }
 
 type LocalUsage struct {
