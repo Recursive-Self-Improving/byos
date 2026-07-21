@@ -54,6 +54,29 @@ func TestAuthenticatedNavigationAndPageInventory(t *testing.T) {
 	}
 }
 
+func TestModelsPageShowsAliasBesideCanonicalModel(t *testing.T) {
+	fixture := newWebFixture(t)
+	alias := fixture.models.values[0]
+	alias.Name = "grok"
+	alias.OwnedBy = "byos"
+	fixture.models.values = append(fixture.models.values, alias)
+
+	browser, _ := loginBrowser(t, fixture)
+	response, body := browser.request(t, http.MethodGet, "/admin/models", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/models = %d", response.StatusCode)
+	}
+	if !strings.Contains(body, `<code>grok-4.5</code> · alias: <code>grok</code>`) {
+		t.Fatalf("model alias was not shown beside canonical model: %s", body)
+	}
+	if strings.Contains(body, "upstream <code>grok-4.5</code>") {
+		t.Fatalf("canonical upstream name was shown redundantly: %s", body)
+	}
+	if strings.Count(body, "<tr>") != 2 {
+		t.Fatalf("model alias rendered as a separate row: %s", body)
+	}
+}
+
 func TestDashboardUsesProductionReadiness(t *testing.T) {
 	fixture := newWebFixture(t, func(options *Options) { options.Services.Readiness = fakeReadinessService{ready: false} })
 	browser, _ := loginBrowser(t, fixture)

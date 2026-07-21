@@ -176,6 +176,7 @@ type ModelSupport struct {
 	AccountLabel          string
 	Name                  string
 	UpstreamName          string
+	Aliases               string
 	DisplayName           string
 	Supported             bool
 	CapabilityKnown       bool
