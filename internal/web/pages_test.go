@@ -66,8 +66,8 @@ func TestModelsPageShowsAliasBesideCanonicalModel(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("GET /admin/models = %d", response.StatusCode)
 	}
-	if !strings.Contains(body, `<code>grok-4.5</code></small><small class="table-subtext model-aliases">Alias: <code>grok</code>`) {
-		t.Fatalf("model alias was not spaced below the canonical model: %s", body)
+	if !strings.Contains(body, `<code>grok-4.5</code> <span class="model-aliases">(Alias: <code>grok</code>)</span>`) {
+		t.Fatalf("model alias was not shown inline beside the canonical model: %s", body)
 	}
 	if strings.Contains(body, "upstream <code>grok-4.5</code>") {
 		t.Fatalf("canonical upstream name was shown redundantly: %s", body)
