@@ -1207,13 +1207,15 @@ meter::-moz-meter-bar {
   background: var(--phosphor);
 }
 
-.meter-label {
-  display: block;
+.meter-row {
+  display: flex;
   margin-top: var(--space-1);
   color: var(--ink-muted);
   font-family: var(--font-data);
   font-size: var(--text-placard);
-  text-align: right;
+}
+.meter-row .meter-reset {
+  margin-left: auto;
 }
 
 /* --------------------------------------------------------------------------
