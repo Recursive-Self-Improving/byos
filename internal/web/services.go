@@ -150,11 +150,12 @@ type AccountUsage struct {
 }
 
 type UsagePeriod struct {
-	Used    float64
-	Limit   *float64
-	Percent *float64
-	Unit    string
-	ResetAt *time.Time
+	Available bool
+	Used      float64
+	Limit     *float64
+	Percent   *float64
+	Unit      string
+	ResetAt   *time.Time
 }
 
 type LocalUsage struct {

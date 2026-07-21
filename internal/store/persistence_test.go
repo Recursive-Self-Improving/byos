@@ -166,12 +166,19 @@ func TestEncryptedOAuthUsageAndResponseRepositories(t *testing.T) {
 		t.Fatalf("terminal session mutated: %v", err)
 	}
 	usage := NewUsageRepository(store.DB, keys)
+	if err := usage.Put(ctx, UsageSnapshot{AccountID: account.ID, Normalized: json.RawMessage(`{"monthly":{"limit":100,"used":25,"remaining":75,"reset_at":"2030-01-01T00:00:00Z"}}`), FetchedAt: now.Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
 	if err := usage.Put(ctx, UsageSnapshot{AccountID: account.ID, Normalized: json.RawMessage(`{"weekly":{"used_percent":20}}`), Raw: json.RawMessage(`{"billing_secret":"raw-secret"}`), FetchedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := usage.Latest(ctx, account.ID)
 	if err != nil || !bytes.Contains(snapshot.Raw, []byte("raw-secret")) {
 		t.Fatalf("usage = %+v, %v", snapshot, err)
+	}
+	completeUsage, err := usage.LatestComplete(ctx, account.ID)
+	if err != nil || !bytes.Contains(completeUsage.Normalized, []byte(`"used":25`)) || !completeUsage.FetchedAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("complete usage = %+v, %v", completeUsage, err)
 	}
 	responses := NewResponseRepository(store.DB, keys)
 	node := ResponseSession{ResponseID: "resp_1", Model: "grok-4.5", PreferredAccountID: account.ID, Input: []byte("prompt-fixture"), Output: []byte("output-fixture"), Store: true, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
@@ -200,7 +207,7 @@ func TestEncryptedOAuthUsageAndResponseRepositories(t *testing.T) {
 	if count, err := responses.Cleanup(ctx, now.Add(2*time.Hour)); err != nil || count != 1 {
 		t.Fatalf("response cleanup = %d, %v", count, err)
 	}
-	if count, err := usage.Cleanup(ctx, now.Add(time.Minute)); err != nil || count != 1 {
+	if count, err := usage.Cleanup(ctx, now.Add(time.Minute)); err != nil || count != 2 {
 		t.Fatalf("usage cleanup = %d, %v", count, err)
 	}
 	if count, err := oauth.Cleanup(ctx, now.Add(2*time.Hour)); err != nil || count != 1 {

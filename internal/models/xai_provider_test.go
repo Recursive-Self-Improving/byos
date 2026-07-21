@@ -56,6 +56,7 @@ func TestXAIProviderFallbackAndCredentialEndpointCounters(t *testing.T) {
 	}{
 		{name: "not found falls back", status: http.StatusNotFound, wantLegacy: 1},
 		{name: "schema falls back", status: http.StatusOK, body: `{"items":[]}`, wantLegacy: 1},
+		{name: "service unavailable falls back", status: http.StatusServiceUnavailable, wantLegacy: 1},
 		{name: "unauthorized does not fall back", status: http.StatusUnauthorized, wantErr: ErrCredential},
 		{name: "forbidden does not fall back", status: http.StatusForbidden, wantErr: ErrCredential},
 	} {

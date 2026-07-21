@@ -14,10 +14,17 @@ import (
 type SnapshotStore interface {
 	Put(context.Context, store.UsageSnapshot) error
 	Latest(context.Context, string) (store.UsageSnapshot, error)
+	LatestComplete(context.Context, string) (store.UsageSnapshot, error)
 }
 type CounterStore interface {
 	Add(context.Context, string, store.LocalUsageCounters) error
 	Get(context.Context, string) (store.LocalUsageCounters, error)
+}
+
+type normalizedSnapshot struct {
+	Monthly *Monthly `json:"monthly"`
+	Weekly  *Weekly  `json:"weekly"`
+	Unknown bool     `json:"unknown,omitempty"`
 }
 
 type Service struct {
@@ -43,8 +50,15 @@ func (s *Service) ApplyUsage(ctx context.Context, accountID string, observation 
 				return previous, errors.Join(fetchErr, marshalErr)
 			}
 			stored := store.UsageSnapshot{AccountID: accountID, Normalized: normalized, FetchedAt: previous.FetchedAt, Stale: true, Error: previous.Error}
-			if latest, latestErr := s.snapshots.Latest(ctx, accountID); latestErr == nil {
-				stored.Raw = latest.Raw
+			var rawSource store.UsageSnapshot
+			var rawErr error
+			if previous.Monthly != nil {
+				rawSource, rawErr = s.snapshots.LatestComplete(ctx, accountID)
+			} else {
+				rawSource, rawErr = s.snapshots.Latest(ctx, accountID)
+			}
+			if rawErr == nil {
+				stored.Raw = rawSource.Raw
 			}
 			if persistErr := s.snapshots.Put(ctx, stored); persistErr != nil {
 				return previous, errors.Join(fetchErr, persistErr)
@@ -85,6 +99,12 @@ func (s *Service) ApplyUsage(ctx context.Context, accountID string, observation 
 	return snapshot, nil
 }
 
+func decodeNormalized(raw json.RawMessage) (normalizedSnapshot, error) {
+	var normalized normalizedSnapshot
+	err := json.Unmarshal(raw, &normalized)
+	return normalized, err
+}
+
 func (s *Service) Latest(ctx context.Context, accountID string) (Snapshot, error) {
 	stored, err := s.snapshots.Latest(ctx, accountID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -94,13 +114,30 @@ func (s *Service) Latest(ctx context.Context, accountID string) (Snapshot, error
 	if err != nil {
 		return Snapshot{}, err
 	}
-	var normalized struct {
-		Monthly *Monthly `json:"monthly"`
-		Weekly  *Weekly  `json:"weekly"`
-		Unknown bool     `json:"unknown,omitempty"`
-	}
-	if err := json.Unmarshal(stored.Normalized, &normalized); err != nil {
+	normalized, err := decodeNormalized(stored.Normalized)
+	if err != nil {
 		return Snapshot{}, err
+	}
+	if normalized.Monthly == nil && !normalized.Unknown {
+		latestError := stored.Error
+		complete, completeErr := s.snapshots.LatestComplete(ctx, accountID)
+		switch {
+		case completeErr == nil:
+			completeNormalized, decodeErr := decodeNormalized(complete.Normalized)
+			if decodeErr != nil {
+				return Snapshot{}, decodeErr
+			}
+			stored = complete
+			normalized = completeNormalized
+			stored.Stale = true
+			if latestError != "" {
+				stored.Error = latestError
+			} else {
+				stored.Error = "usage refresh failed"
+			}
+		case !errors.Is(completeErr, sql.ErrNoRows):
+			return Snapshot{}, completeErr
+		}
 	}
 	local, err := s.Counters(ctx, accountID)
 	if err != nil {

@@ -29,28 +29,24 @@ type BillingAdapter struct{ client *xai.Client }
 func NewBillingAdapter(client *xai.Client) *BillingAdapter { return &BillingAdapter{client: client} }
 
 func (a *BillingAdapter) Fetch(ctx context.Context, token string) (BillingResult, error) {
-	result := BillingResult{}
-	rawParts := make(map[string]json.RawMessage, 2)
-	monthlyRaw, monthlyErr := a.get(ctx, token, "billing")
-	if monthlyErr == nil {
-		monthly, parseErr := parseMonthly(monthlyRaw)
-		monthlyErr = parseErr
-		if parseErr == nil {
-			result.Monthly = &monthly
-			rawParts["monthly"] = monthlyRaw
-		}
+	monthlyRaw, err := a.get(ctx, token, "billing")
+	if err != nil {
+		return BillingResult{}, err
 	}
+	monthly, err := parseMonthly(monthlyRaw)
+	if err != nil {
+		return BillingResult{}, err
+	}
+
+	result := BillingResult{Monthly: &monthly}
+	rawParts := map[string]json.RawMessage{"monthly": monthlyRaw}
 	weeklyRaw, weeklyErr := a.get(ctx, token, "billing?format=credits")
 	if weeklyErr == nil {
 		weekly, parseErr := parseWeekly(weeklyRaw)
-		weeklyErr = parseErr
 		if parseErr == nil && weekly != nil {
 			result.Weekly = weekly
 			rawParts["credits"] = weeklyRaw
 		}
-	}
-	if result.Monthly == nil && result.Weekly == nil {
-		return BillingResult{}, errors.Join(monthlyErr, weeklyErr, ErrSchema)
 	}
 	raw, err := json.Marshal(rawParts)
 	if err != nil {
@@ -119,9 +115,12 @@ func parseWeekly(payload []byte) (*Weekly, error) {
 	if periodType != "USAGE_PERIOD_TYPE_WEEKLY" {
 		return nil, nil
 	}
-	used, err := requiredNumber(config, "creditUsagePercent")
-	if err != nil || used < 0 || used > 100 {
-		return nil, ErrSchema
+	used := 0.0
+	if _, ok := config["creditUsagePercent"]; ok {
+		used, err = requiredNumber(config, "creditUsagePercent")
+		if err != nil || used > 100 {
+			return nil, ErrSchema
+		}
 	}
 	reset, err := requiredTime(config, "billingPeriodEnd")
 	if err != nil {

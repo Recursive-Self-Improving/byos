@@ -99,7 +99,7 @@ func TestUsagePageDisclosesSnapshotAuthority(t *testing.T) {
 
 func TestUsagePageFormatsTokenCountsWithThousandsSeparators(t *testing.T) {
 	fixture := newWebFixture(t)
-	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_cache", AccountLabel: "Cache account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Used: 25, Unit: "credits"}, Local: LocalUsage{Requests: 3, InputTokens: 1234, OutputTokens: 5678901, CacheReadTokens: 23456}, FetchedAt: &time.Time{}}}
+	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_cache", AccountLabel: "Cache account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Available: true, Used: 25, Unit: "credits"}, Local: LocalUsage{Requests: 3, InputTokens: 1234, OutputTokens: 5678901, CacheReadTokens: 23456}, FetchedAt: &time.Time{}}}
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "<dt>Input tokens</dt><dd>1,234</dd>") || !strings.Contains(body, "<dt>Output tokens</dt><dd>5,678,901</dd>") || !strings.Contains(body, "<dt>Cache read tokens</dt><dd>23,456</dd>") {
@@ -107,11 +107,21 @@ func TestUsagePageFormatsTokenCountsWithThousandsSeparators(t *testing.T) {
 	}
 }
 
+func TestUsagePageDoesNotFabricateMissingProviderPeriods(t *testing.T) {
+	fixture := newWebFixture(t)
+	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_missing", AccountLabel: "Missing periods", QuotaAvailable: true, CanRefresh: true, SanitizedStatus: "Usage data is not available yet."}}
+	browser, _ := loginBrowser(t, fixture)
+	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)
+	if response.StatusCode != http.StatusOK || strings.Contains(body, `class="usage-number">0.0`) || strings.Count(body, `class="usage-number">Unavailable</p>`) != 2 {
+		t.Fatalf("missing periods rendered as values: %d %s", response.StatusCode, body)
+	}
+}
+
 func TestUsagePageRendersPeriodResetTime(t *testing.T) {
 	fixture := newWebFixture(t)
 	monthlyReset := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	weeklyReset := time.Date(2030, 1, 2, 0, 0, 0, 0, time.UTC)
-	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_reset", AccountLabel: "Reset account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Used: 25, Unit: "credits", ResetAt: &monthlyReset}, Weekly: UsagePeriod{Used: 40, Unit: "percent", ResetAt: &weeklyReset}, FetchedAt: &time.Time{}}}
+	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_reset", AccountLabel: "Reset account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Available: true, Used: 25, Unit: "credits", ResetAt: &monthlyReset}, Weekly: UsagePeriod{Available: true, Used: 40, Unit: "percent", ResetAt: &weeklyReset}, FetchedAt: &time.Time{}}}
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Resets 2030-01-01 00:00 UTC") || !strings.Contains(body, "Resets 2030-01-02 00:00 UTC") {
@@ -474,8 +484,8 @@ func TestUsageKeepsWeeklyPercentagesPerAccount(t *testing.T) {
 	firstPercent := 60.0
 	secondPercent := 70.0
 	fixture.usage.values = []AccountUsage{
-		{Provider: ProviderXAI, AccountID: "acct_one", AccountLabel: "First", QuotaAvailable: true, Weekly: UsagePeriod{Used: 60, Percent: &firstPercent, Unit: "percent"}},
-		{Provider: ProviderXAI, AccountID: "acct_two", AccountLabel: "Second", QuotaAvailable: true, Weekly: UsagePeriod{Used: 70, Percent: &secondPercent, Unit: "percent"}},
+		{Provider: ProviderXAI, AccountID: "acct_one", AccountLabel: "First", QuotaAvailable: true, Weekly: UsagePeriod{Available: true, Used: 60, Percent: &firstPercent, Unit: "percent"}},
+		{Provider: ProviderXAI, AccountID: "acct_two", AccountLabel: "Second", QuotaAvailable: true, Weekly: UsagePeriod{Available: true, Used: 70, Percent: &secondPercent, Unit: "percent"}},
 	}
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)

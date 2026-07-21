@@ -82,7 +82,7 @@ func TestXAIProviderSanitizesErrorsAndPreservesStatusMetadata(t *testing.T) {
 	if !errors.As(err, &status) || status.Status != http.StatusTooManyRequests || status.RetryAfter != "11" {
 		t.Fatalf("error = %#v", err)
 	}
-	if calls.Load() != 2 {
+	if calls.Load() != 1 {
 		t.Fatalf("calls = %d", calls.Load())
 	}
 	if strings.Contains(err.Error(), "private-billing-body-sentinel") || strings.Contains(err.Error(), "credential-sentinel") {

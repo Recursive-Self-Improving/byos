@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -48,36 +49,43 @@ func TestBillingCombinedSchemasAndHeaders(t *testing.T) {
 	}
 }
 
-func TestBillingMonthlyOnlyAndWeeklyOnly(t *testing.T) {
-	tests := []struct {
-		name                        string
-		monthlyStatus, weeklyStatus int
-		wantMonthly, wantWeekly     bool
-	}{
-		{"monthly only", http.StatusOK, http.StatusServiceUnavailable, true, false},
-		{"weekly only", http.StatusServiceUnavailable, http.StatusOK, false, true},
+func TestBillingRequiresMonthlyAndAllowsMissingWeekly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery == "format=credits" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(monthlyFixture))
+	}))
+	defer server.Close()
+
+	result, err := NewBillingAdapter(xai.NewClient(xai.HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second})).Fetch(context.Background(), "token")
+	if err != nil || result.Monthly == nil || result.Weekly != nil {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.RawQuery == "format=credits" {
-					w.WriteHeader(test.weeklyStatus)
-					if test.weeklyStatus == http.StatusOK {
-						_, _ = w.Write([]byte(weeklyFixture))
-					}
-					return
-				}
-				w.WriteHeader(test.monthlyStatus)
-				if test.monthlyStatus == http.StatusOK {
-					_, _ = w.Write([]byte(monthlyFixture))
-				}
-			}))
-			defer server.Close()
-			result, err := NewBillingAdapter(xai.NewClient(xai.HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second})).Fetch(context.Background(), "token")
-			if err != nil || (result.Monthly != nil) != test.wantMonthly || (result.Weekly != nil) != test.wantWeekly {
-				t.Fatalf("result=%+v err=%v", result, err)
-			}
-		})
+}
+
+func TestBillingRejectsWeeklyOnlyWhenMonthlyRefreshFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery == "format=credits" {
+			_, _ = w.Write([]byte(weeklyFixture))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	result, err := NewBillingAdapter(xai.NewClient(xai.HTTPConfig{BaseURL: server.URL, RequestTimeout: time.Second})).Fetch(context.Background(), "token")
+	var upstream *HTTPError
+	if !errors.As(err, &upstream) || upstream.Status != http.StatusServiceUnavailable || result.Monthly != nil || result.Weekly != nil {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestBillingWeeklyFreshPeriodDefaultsMissingPercentToZero(t *testing.T) {
+	weekly, err := parseWeekly([]byte(`{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"},"billingPeriodEnd":"2026-07-20T00:00:00Z"}}`))
+	if err != nil || weekly == nil || weekly.UsedPercent != 0 || weekly.RemainingPercent != 100 {
+		t.Fatalf("weekly=%+v err=%v", weekly, err)
 	}
 }
 
@@ -131,6 +139,18 @@ func (m *memorySnapshots) Latest(_ context.Context, id string) (store.UsageSnaps
 		return store.UsageSnapshot{}, sql.ErrNoRows
 	}
 	return v[len(v)-1], nil
+}
+func (m *memorySnapshots) LatestComplete(_ context.Context, id string) (store.UsageSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	values := m.values[id]
+	for index := len(values) - 1; index >= 0; index-- {
+		var normalized normalizedSnapshot
+		if json.Unmarshal(values[index].Normalized, &normalized) == nil && normalized.Monthly != nil {
+			return values[index], nil
+		}
+	}
+	return store.UsageSnapshot{}, sql.ErrNoRows
 }
 
 type memoryCounters struct {
@@ -200,6 +220,40 @@ func TestServiceStaleFallbackAndUnknown(t *testing.T) {
 	restartedUnknown, err := NewService(snapshots, counters).Latest(context.Background(), "missing")
 	if err != nil || !restartedUnknown.Unknown || !restartedUnknown.Stale || restartedUnknown.Error != "usage refresh failed" || restartedUnknown.Monthly != nil || restartedUnknown.Weekly != nil || !restartedUnknown.FetchedAt.Equal(observedAt) || restartedUnknown.Local.Requests != 7 || restartedUnknown.Local.Failures != 2 || restartedUnknown.Local.InputTokens != 11 || restartedUnknown.Local.OutputTokens != 13 {
 		t.Fatalf("restarted unknown=%+v err=%v", restartedUnknown, err)
+	}
+}
+
+func TestServiceRecoversLastCompleteMonthlySnapshotAfterPartialSuccess(t *testing.T) {
+	snapshots := &memorySnapshots{values: map[string][]store.UsageSnapshot{}}
+	counters := &memoryCounters{values: map[string]store.LocalUsageCounters{}}
+	service := NewService(snapshots, counters)
+	reset := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := service.ApplyUsage(context.Background(), "partial", provider.UsageSnapshot{
+		Monthly:   &provider.MonthlyUsage{Limit: 100, Used: 25, Remaining: 75, ResetAt: reset},
+		Raw:       []byte(`{"monthly":"complete"}`),
+		FetchedAt: reset,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := marshalNormalized(Snapshot{AccountID: "partial", Weekly: &Weekly{UsedPercent: 20, RemainingPercent: 80}, FetchedAt: reset.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshots.Put(context.Background(), store.UsageSnapshot{AccountID: "partial", Normalized: partial, Raw: []byte(`{"weekly":"partial"}`), FetchedAt: reset.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := service.Latest(context.Background(), "partial")
+	if err != nil || recovered.Monthly == nil || recovered.Monthly.Used != 25 || !recovered.Monthly.ResetAt.Equal(reset) || !recovered.Stale || recovered.Error != "usage refresh failed" || !recovered.FetchedAt.Equal(reset) {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	if _, err := service.ApplyUsage(context.Background(), "partial", provider.UsageSnapshot{}, errors.New("monthly unavailable")); err == nil {
+		t.Fatal("partial fallback refresh succeeded")
+	}
+	stored, err := snapshots.Latest(context.Background(), "partial")
+	storedNormalized, decodeErr := decodeNormalized(stored.Normalized)
+	if err != nil || decodeErr != nil || storedNormalized.Monthly == nil || storedNormalized.Monthly.Used != 25 || string(stored.Raw) != `{"monthly":"complete"}` || !stored.Stale {
+		t.Fatalf("stored=%+v normalized=%+v err=%v decode=%v", stored, storedNormalized, err, decodeErr)
 	}
 }
 

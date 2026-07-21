@@ -24,7 +24,10 @@ func (u *Upstream) Discover(ctx context.Context, token string) ([]Model, error) 
 		return models, nil
 	}
 	if err != nil && !fallback {
-		return nil, err
+		var status *HTTPError
+		if !errors.As(err, &status) || status.Status < 500 || status.Status > 599 {
+			return nil, err
+		}
 	}
 	models, _, err = u.fetch(ctx, token, "models")
 	return models, err

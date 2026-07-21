@@ -39,12 +39,20 @@ func (r *UsageRepository) Put(ctx context.Context, v UsageSnapshot) error {
 	return err
 }
 func (r *UsageRepository) Latest(ctx context.Context, accountID string) (UsageSnapshot, error) {
+	return r.latest(ctx, `SELECT id,account_id,normalized_json,raw_encrypted,fetched_at,stale,COALESCE(error,'') FROM usage_snapshots WHERE account_id=? ORDER BY fetched_at DESC,id DESC LIMIT 1`, accountID)
+}
+
+func (r *UsageRepository) LatestComplete(ctx context.Context, accountID string) (UsageSnapshot, error) {
+	return r.latest(ctx, `SELECT id,account_id,normalized_json,raw_encrypted,fetched_at,stale,COALESCE(error,'') FROM usage_snapshots WHERE account_id=? AND json_type(normalized_json,'$.monthly')='object' ORDER BY fetched_at DESC,id DESC LIMIT 1`, accountID)
+}
+
+func (r *UsageRepository) latest(ctx context.Context, query, accountID string) (UsageSnapshot, error) {
 	var v UsageSnapshot
 	var normalized string
 	var encrypted sql.NullString
 	var fetched int64
 	var stale int
-	if err := r.db.QueryRowContext(ctx, `SELECT id,account_id,normalized_json,raw_encrypted,fetched_at,stale,COALESCE(error,'') FROM usage_snapshots WHERE account_id=? ORDER BY fetched_at DESC,id DESC LIMIT 1`, accountID).Scan(&v.ID, &v.AccountID, &normalized, &encrypted, &fetched, &stale, &v.Error); err != nil {
+	if err := r.db.QueryRowContext(ctx, query, accountID).Scan(&v.ID, &v.AccountID, &normalized, &encrypted, &fetched, &stale, &v.Error); err != nil {
 		return UsageSnapshot{}, err
 	}
 	v.Normalized = json.RawMessage(normalized)
