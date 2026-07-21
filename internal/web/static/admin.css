@@ -432,6 +432,10 @@ select {
   text-transform: none;
 }
 
+.model-aliases {
+  margin-top: var(--space-2);
+}
+
 /* --------------------------------------------------------------------------
    5. STRUCTURE — flight-plan line, module seams
    -------------------------------------------------------------------------- */
@@ -832,6 +836,19 @@ tbody tr:hover > :first-child {
 
 tbody tr:last-child > * {
   border-bottom: 0;
+}
+
+.models-table .model-refresh {
+  width: 9.5rem;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.models-table .model-refresh form {
+  display: flex;
+  margin: 0;
+  justify-content: center;
 }
 
 /* numeric column alignment — only where the whole column is numeric:
