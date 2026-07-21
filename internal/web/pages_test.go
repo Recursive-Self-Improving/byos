@@ -97,13 +97,13 @@ func TestUsagePageDisclosesSnapshotAuthority(t *testing.T) {
 	}
 }
 
-func TestUsagePageRendersCacheReadTokens(t *testing.T) {
+func TestUsagePageFormatsTokenCountsWithThousandsSeparators(t *testing.T) {
 	fixture := newWebFixture(t)
-	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_cache", AccountLabel: "Cache account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Used: 25, Unit: "credits"}, Local: LocalUsage{Requests: 3, InputTokens: 11, OutputTokens: 13, CacheReadTokens: 7}, FetchedAt: &time.Time{}}}
+	fixture.usage.values = []AccountUsage{{Provider: ProviderXAI, AccountID: "acct_cache", AccountLabel: "Cache account", QuotaAvailable: true, CanRefresh: true, Monthly: UsagePeriod{Used: 25, Unit: "credits"}, Local: LocalUsage{Requests: 3, InputTokens: 1234, OutputTokens: 5678901, CacheReadTokens: 23456}, FetchedAt: &time.Time{}}}
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/usage", nil)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Cache read tokens") || !strings.Contains(body, ">7<") {
-		t.Fatalf("cache-read projection missing: %d %s", response.StatusCode, body)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "<dt>Input tokens</dt><dd>1,234</dd>") || !strings.Contains(body, "<dt>Output tokens</dt><dd>5,678,901</dd>") || !strings.Contains(body, "<dt>Cache read tokens</dt><dd>23,456</dd>") {
+		t.Fatalf("formatted token counts missing: %d %s", response.StatusCode, body)
 	}
 }
 

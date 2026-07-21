@@ -235,7 +235,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"keyRevokeURL":      func(id string) string { return resourceURL("/admin/api-keys/", id, "/revoke") },
 		"formatTime":        formatTime,
 		"timeAttr":          func(value time.Time) string { return value.UTC().Format(time.RFC3339) },
-		"formatCount":       func(value uint64) string { return strconv.FormatUint(value, 10) },
+		"formatCount":       formatCount,
 		"formatInt":         func(value int64) string { return strconv.FormatInt(value, 10) },
 		"formatFloat":       formatFloat,
 		"percentValue":      percentValue,
@@ -331,6 +331,26 @@ func formatTime(value any) string {
 		return "Not available"
 	}
 	return instant.UTC().Format("2006-01-02 15:04 UTC")
+}
+
+func formatCount(value uint64) string {
+	var buffer [26]byte // 20 digits plus separators for the largest uint64.
+	index := len(buffer)
+	digits := 0
+	for {
+		if digits == 3 {
+			index--
+			buffer[index] = ','
+			digits = 0
+		}
+		index--
+		buffer[index] = byte(value%10) + '0'
+		value /= 10
+		digits++
+		if value == 0 {
+			return string(buffer[index:])
+		}
+	}
 }
 
 func formatFloat(value any) string {
