@@ -850,6 +850,10 @@ tbody tr:last-child > * {
   white-space: nowrap;
 }
 
+.models-table thead .model-refresh {
+  padding-left: calc(var(--space-4) + var(--space-2));
+}
+
 .models-table .model-refresh form {
   display: flex;
   margin: 0;
