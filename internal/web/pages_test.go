@@ -56,27 +56,66 @@ func TestAuthenticatedNavigationAndPageInventory(t *testing.T) {
 
 func TestModelsPageShowsAliasBesideCanonicalModel(t *testing.T) {
 	fixture := newWebFixture(t)
-	alias := fixture.models.values[0]
-	alias.Name = "grok"
-	alias.OwnedBy = "byos"
-	fixture.models.values = append(fixture.models.values, alias)
+	canonical := fixture.models.values[0]
+	canonical.Allowlisted = false
+	grok := canonical
+	grok.Name = "grok"
+	grok.OwnedBy = "byos"
+	grok.Allowlisted = true
+	fast := canonical
+	fast.Name = "fast"
+	fast.OwnedBy = "byos"
+	fixture.models.values = []ModelSupport{grok, fast, canonical}
 
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/models", nil)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("GET /admin/models = %d", response.StatusCode)
 	}
-	if !strings.Contains(body, `<code>grok-4.5</code> <span class="model-aliases">(Alias: <code>grok</code>)</span>`) {
-		t.Fatalf("model alias was not shown inline beside the canonical model: %s", body)
+	if !strings.Contains(body, `<code>grok-4.5</code> <span class="model-aliases">(Alias: <code>grok, fast</code>)</span>`) {
+		t.Fatalf("model aliases were not shown inline beside the canonical model: %s", body)
 	}
 	if strings.Contains(body, "upstream <code>grok-4.5</code>") {
 		t.Fatalf("canonical upstream name was shown redundantly: %s", body)
+	}
+	if !strings.Contains(body, `<span class="badge badge-positive">Allowlisted</span>`) {
+		t.Fatalf("alias allowlist state was not retained on the canonical row: %s", body)
 	}
 	if !strings.Contains(body, `<th class="model-refresh" scope="col">Refresh</th>`) || !strings.Contains(body, `<td class="model-refresh">`) {
 		t.Fatalf("refresh column is missing aligned presentation hooks: %s", body)
 	}
 	if strings.Count(body, "<tr>") != 2 {
-		t.Fatalf("model alias rendered as a separate row: %s", body)
+		t.Fatalf("model aliases rendered as separate rows: %s", body)
+	}
+}
+
+func TestAccountPageShowsAliasesBesideCanonicalModel(t *testing.T) {
+	fixture := newWebFixture(t)
+	canonical := fixture.accounts.detail.Models[0]
+	grok := canonical
+	grok.Name = "grok"
+	grok.OwnedBy = "byos"
+	grok.DisplayName = "Alias display name"
+	fast := grok
+	fast.Name = "fast"
+	fixture.accounts.detail.Models = []AccountModel{grok, fast, canonical}
+
+	browser, _ := loginBrowser(t, fixture)
+	response, body := browser.request(t, http.MethodGet, "/admin/accounts/acct_test", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/accounts/acct_test = %d", response.StatusCode)
+	}
+	if !strings.Contains(body, `Grok 4.5<small class="table-subtext"><code>grok-4.5</code> <span class="model-aliases">(Alias: <code>grok, fast</code>)</span></small>`) {
+		t.Fatalf("account model aliases were not shown beside the canonical model: %s", body)
+	}
+	if strings.Contains(body, "Alias display name") || strings.Contains(body, ">byos<") {
+		t.Fatalf("alias metadata replaced canonical model metadata: %s", body)
+	}
+	if strings.Contains(body, "upstream <code>grok-4.5</code>") {
+		t.Fatalf("canonical upstream name was shown redundantly: %s", body)
+	}
+	if strings.Count(body, "<tr>") != 2 {
+		t.Fatalf("account model aliases rendered as separate rows: %s", body)
 	}
 }
 

@@ -84,6 +84,7 @@ type AccountModel struct {
 	Provider              Provider
 	Name                  string
 	UpstreamName          string
+	Aliases               string
 	OwnedBy               string
 	DisplayName           string
 	Supported             bool

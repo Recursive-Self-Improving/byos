@@ -250,7 +250,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 	pages := []string{"login", "dashboard", "accounts", "account", "oauth", "usage", "models", "api_keys", "error"}
 	parsed := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
-		tmpl, err := template.New("layout.html").Funcs(functions).ParseFS(assets, "templates/layout.html", "templates/"+page+".html")
+		tmpl, err := template.New("layout.html").Funcs(functions).ParseFS(assets, "templates/layout.html", "templates/model_name.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse Web UI template %s: %w", page, err)
 		}

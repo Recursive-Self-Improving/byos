@@ -62,6 +62,7 @@ func (h *Handler) renderAccount(w http.ResponseWriter, r *http.Request, id strin
 		}
 		return
 	}
+	account.Models = collapseAccountModelAliases(account.ID, account.Models)
 	data := accountPage{layoutData: h.layout(r, displayLabel(account.Label), "accounts"), Account: account, ActionError: actionError}
 	h.render(w, "account", status, data)
 }

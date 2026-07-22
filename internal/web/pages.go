@@ -219,36 +219,6 @@ type modelsPage struct {
 	Models []ModelSupport
 }
 
-func collapseModelAliases(models []ModelSupport) []ModelSupport {
-	collapsed := make([]ModelSupport, 0, len(models))
-	byUpstream := make(map[string]int, len(models))
-	for _, model := range models {
-		key := string(model.Provider) + "\x00" + model.AccountID + "\x00" + model.UpstreamName
-		index, exists := byUpstream[key]
-		if !exists {
-			byUpstream[key] = len(collapsed)
-			collapsed = append(collapsed, model)
-			continue
-		}
-
-		current := &collapsed[index]
-		if model.Name == model.UpstreamName && current.Name != current.UpstreamName {
-			alias := current.Name
-			model.Aliases = alias
-			*current = model
-			continue
-		}
-		if model.Name != current.Name {
-			if current.Aliases != "" {
-				current.Aliases += ", "
-			}
-			current.Aliases += model.Name
-		}
-		current.Allowlisted = current.Allowlisted || model.Allowlisted
-	}
-	return collapsed
-}
-
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAuthentication(w, r); !ok {
 		return
