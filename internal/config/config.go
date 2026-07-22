@@ -152,7 +152,7 @@ func Default() Config {
 			OAuth:   DevinOAuthConfig{CallbackOrigin: DefaultDevinCallbackOrigin, CallbackPath: DefaultDevinCallbackPath},
 			Runtime: DevinRuntimeConfig{AllowedChatHosts: []string{DefaultDevinChatHost}, UnaryTimeout: Duration(15 * time.Second), StreamIdleTimeout: Duration(time.Minute), MaxUnaryCompressedBytes: 2 << 20, MaxUnaryDecompressedBytes: 8 << 20, MaxFrameCompressedBytes: 4 << 20, MaxFrameDecompressedBytes: 16 << 20, MaxStreamBytes: 64 << 20, MaxToolArgumentBytes: 4 << 20, MaxNonStreamBytes: 32 << 20},
 		},
-		Models: ModelsConfig{Default: DefaultModel, Aliases: map[string]string{"grok": DefaultModel}, Allowlist: []string{DefaultModel}, Entries: defaultModelEntries()},
+		Models: ModelsConfig{Default: DefaultModel, Aliases: map[string]string{"grok": "grok-4.5"}, Allowlist: []string{DefaultModel}, Entries: defaultModelEntries()},
 		Limits: LimitsConfig{MaxBodyBytes: DefaultMaxBodyBytes}, Usage: UsageConfig{RefreshInterval: Duration(5 * time.Minute)},
 		Responses: ResponsesConfig{Retention: Duration(DefaultResponsesRetention)},
 	}
@@ -160,11 +160,15 @@ func Default() Config {
 
 func defaultModelEntries() []ModelEntry {
 	return []ModelEntry{
-		{PublicName: "grok", UpstreamName: DefaultModel, Provider: ProviderXAI, OwnedBy: "byos", PolicyKey: "xai"},
-		{PublicName: DefaultModel, UpstreamName: DefaultModel, Provider: ProviderXAI, OwnedBy: "xai", PolicyKey: "xai"},
-		{PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
+		{PublicName: "grok", UpstreamName: "grok-4.5", Provider: ProviderXAI, OwnedBy: "byos", PolicyKey: "xai"},
+		{PublicName: "glm", UpstreamName: "glm-5-2", Provider: ProviderDevin, OwnedBy: "byos", PolicyKey: "devin"},
+		{PublicName: "swe", UpstreamName: "swe-1-7", Provider: ProviderDevin, OwnedBy: "byos", PolicyKey: "devin"},
+		// {PublicName: "kimi", UpstreamName: "kimi-k2-7", Provider: ProviderDevin, OwnedBy: "byos", PolicyKey: "devin"},
+		{PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: ProviderXAI, OwnedBy: "xai", PolicyKey: "xai"},
 		{PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
-		{PublicName: "swe-1-6-slow", UpstreamName: "swe-1-6-slow", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
+		{PublicName: "swe-1-6", UpstreamName: "swe-1-6", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
+		{PublicName: "swe-1-7", UpstreamName: "swe-1-7", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
+		// {PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
 	}
 }
 
