@@ -513,7 +513,7 @@ func newStreamMultiFixture(t *testing.T) *streamMultiFixture {
 	devinCreds := &recordingCredentials{values: map[string]string{devinAccount.ID: "devin-token"}}
 	xaiClient := &fakeStreamGeneration{ledger: &ledger}
 	devinClient := &fakeStreamGeneration{ledger: &ledger}
-	catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+	catalog := fakeCatalog{ledger: &ledger, models: staticConfiguredModels()}
 	registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
 		"xai/xai":     {Policy: ledgerPolicy{ledger: &ledger, policy: xai.RequestPolicy{}}, Generation: xaiClient, Credentials: xaiCreds},
 		"devin/devin": {Policy: passthroughPolicy{}, Generation: devinClient, Credentials: devinCreds},
@@ -524,17 +524,18 @@ func newStreamMultiFixture(t *testing.T) *streamMultiFixture {
 	return &streamMultiFixture{executor: executor, xaiClient: xaiClient, devinClient: devinClient, xaiCreds: xaiCreds, devinCreds: devinCreds, accounts: accountRepo, db: db.DB, close: func() { db.Close() }, ledger: &ledger, usage: &usage, xaiAccount: xaiAccount, devinAccount: devinAccount}
 }
 
-// TestStreamDispatchesAllFiveStaticNamesToExactProviderWithNoCrossProviderCalls
-// asserts C9.3 for streaming: every fixed static model and every protocol body
-// shape opens exactly one stream on the resolved provider's client with the
-// correct upstream name, never touches the other provider's client or
+// TestStreamDispatchesAllConfiguredStaticNamesToExactProviderWithNoCrossProviderCalls
+// asserts C9.3 for streaming: every configured static model and every protocol
+// body shape opens exactly one stream on the resolved provider's client with
+// the correct upstream name, never touches the other provider's client or
 // credentials, and commits the first event from the serving provider.
-func TestStreamDispatchesAllFiveStaticNamesToExactProviderWithNoCrossProviderCalls(t *testing.T) {
+func TestStreamDispatchesAllConfiguredStaticNamesToExactProviderWithNoCrossProviderCalls(t *testing.T) {
 	f := newStreamMultiFixture(t)
 	defer f.close()
 	ctx := context.Background()
-	for _, name := range []string{"grok", "grok-4.5", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
-		resolved := staticFiveModels()[name]
+	configured := staticConfiguredModels()
+	for _, name := range staticConfiguredModelNames() {
+		resolved := configured[name]
 		for bodyIndex, body := range streamProtocolBodies(name) {
 			f.xaiClient.steps = []streamStep{{stream: &fakeStream{events: []provider.Event{{Event: "response.completed", Data: []byte(`{"type":"response.completed"}`)}}}}}
 			f.devinClient.steps = []streamStep{{stream: &fakeStream{events: []provider.Event{{Event: "response.completed", Data: []byte(`{"type":"response.completed"}`)}}}}}
@@ -602,7 +603,7 @@ func TestStreamManagedAffinitySkipsWrongProviderWithoutCrossProviderCredential(t
 		wantProvider provider.Kind
 	}{
 		{name: "xAI model with Devin preferred", model: "grok-4.5", preferredXAI: false, wantProvider: provider.XAI},
-		{name: "Devin model with xAI preferred", model: "kimi-k2-7", preferredXAI: true, wantProvider: provider.Devin},
+		{name: "Devin model with xAI preferred", model: "glm", preferredXAI: true, wantProvider: provider.Devin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStreamMultiFixture(t)
@@ -677,7 +678,7 @@ func TestStreamDevinUnauthorizedPrecommitRecoveryPersistsReloginAndFailsOver(t *
 			usage := []usageRecord{}
 			creds := &recordingCredentials{values: map[string]string{first.ID: "devin-one", second.ID: "devin-two"}, recoveryErr: &provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: provider.ErrorClassification{Class: provider.ClassUnauthorized, RetryNext: true, DisableAccount: true, ReloginRequired: true, CooldownScope: provider.CooldownAccount, PublicStatus: http.StatusUnauthorized, PublicCode: "provider_authentication_error", PublicMessage: "account requires login"}}}
 			client := &fakeStreamGeneration{ledger: &ledger}
-			catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+			catalog := fakeCatalog{ledger: &ledger, models: staticConfiguredModels()}
 			registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
 				"devin/devin": {Policy: passthroughPolicy{}, Generation: client, Credentials: creds},
 			}}
@@ -688,7 +689,7 @@ func TestStreamDevinUnauthorizedPrecommitRecoveryPersistsReloginAndFailsOver(t *
 				{stream: &fakeStream{errs: []error{&provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: provider.ErrorClassification{Class: provider.ClassUnauthorized, RefreshSame: true, RetryNext: true, CooldownScope: provider.CooldownAccount, PublicStatus: status, PublicCode: "provider_authentication_error"}}}}},
 				{stream: &fakeStream{events: []provider.Event{{Data: []byte("failover-event")}}}},
 			}
-			stream, err := executor.Stream(ctx, Request{Model: "kimi-k2-7", Body: []byte(`{"model":"kimi-k2-7","stream":true}`), PreferredAccountID: first.ID})
+			stream, err := executor.Stream(ctx, Request{Model: "glm", Body: []byte(`{"model":"glm","stream":true}`), PreferredAccountID: first.ID})
 			if err != nil {
 				t.Fatalf("err=%v", err)
 			}
@@ -772,7 +773,7 @@ func TestStreamDevinCommittedErrorRecordsFailureOnceWithoutReplay(t *testing.T) 
 	f := newStreamMultiFixture(t)
 	defer f.close()
 	f.devinClient.steps = []streamStep{{stream: &fakeStream{events: []provider.Event{{Data: []byte("committed")}}, errs: []error{errors.New("truncated")}}}}
-	stream, err := f.executor.Stream(context.Background(), Request{Model: "kimi-k2-7", Body: []byte(`{"model":"kimi-k2-7","stream":true}`)})
+	stream, err := f.executor.Stream(context.Background(), Request{Model: "glm", Body: []byte(`{"model":"glm","stream":true}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -786,7 +787,7 @@ func TestStreamDevinCommittedErrorRecordsFailureOnceWithoutReplay(t *testing.T) 
 		t.Fatal(err)
 	}
 	want := usageRecord{accountID: stream.AccountID(), delta: LocalUsageDelta{Requests: 1, Failures: 1}}
-	if stream.Model() != "kimi-k2-7" || len(f.devinClient.requests) != 1 || len(f.xaiClient.requests) != 0 || len(*f.usage) != 1 || (*f.usage)[0] != want {
+	if stream.Model() != "glm-5-2" || len(f.devinClient.requests) != 1 || len(f.xaiClient.requests) != 0 || len(*f.usage) != 1 || (*f.usage)[0] != want {
 		t.Fatalf("model=%q devinAttempts=%d xaiAttempts=%d usage=%+v, want [%+v]", stream.Model(), len(f.devinClient.requests), len(f.xaiClient.requests), *f.usage, want)
 	}
 }
@@ -798,7 +799,7 @@ func TestStreamDevinTerminalUsageRecordedExactlyOnce(t *testing.T) {
 	f := newStreamMultiFixture(t)
 	defer f.close()
 	f.devinClient.steps = []streamStep{{stream: &fakeStream{events: []provider.Event{{Event: "response.completed", Usage: provider.Usage{InputTokens: 53, OutputTokens: 61}}}}}}
-	stream, err := f.executor.Stream(context.Background(), Request{Model: "swe-1-6-slow", Body: []byte(`{"model":"swe-1-6-slow","stream":true}`)})
+	stream, err := f.executor.Stream(context.Background(), Request{Model: "swe", Body: []byte(`{"model":"swe","stream":true}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +809,7 @@ func TestStreamDevinTerminalUsageRecordedExactlyOnce(t *testing.T) {
 	if err := stream.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if stream.Model() != "swe-1-6-slow" || !stream.Committed() {
+	if stream.Model() != "swe-1-7" || !stream.Committed() {
 		t.Fatalf("model=%q committed=%v", stream.Model(), stream.Committed())
 	}
 	want := usageRecord{accountID: stream.AccountID(), delta: LocalUsageDelta{Requests: 1, InputTokens: 53, OutputTokens: 61}}

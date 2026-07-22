@@ -251,12 +251,14 @@ func TestRegistryConstructionPermitsAbsentOptionalCapabilities(t *testing.T) {
 	}
 }
 
-// TestPublicCatalogListsAllFiveNamesOnlyWhenProviderRoutable asserts C9.2: with
-// both providers' complete trios registered and routable accounts for each
-// provider, the public catalog lists exactly the five fixed static names. When
-// a provider's capability registration is missing, that provider's static names
-// are suppressed from the public listing even when accounts exist.
-func TestPublicCatalogListsAllFiveNamesOnlyWhenProviderRoutable(t *testing.T) {
+const testDevinDefaultModel = "glm"
+
+// TestPublicCatalogListsAllConfiguredNamesOnlyWhenProviderRoutable asserts
+// C9.2: with both providers' complete trios registered and routable accounts
+// for each provider, the public catalog lists exactly the seven configured
+// static names. When a provider's capability registration is missing, that
+// provider's static names are suppressed even when accounts exist.
+func TestPublicCatalogListsAllConfiguredNamesOnlyWhenProviderRoutable(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, t.TempDir())
 	if err != nil {
@@ -268,7 +270,7 @@ func TestPublicCatalogListsAllFiveNamesOnlyWhenProviderRoutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	accountRepo := store.NewAccountRepository(database.DB, keys)
-	for _, account := range []store.Account{xaiRuntimeAccount("five-routable-xai"), devinRuntimeAccount("five-routable-devin")} {
+	for _, account := range []store.Account{xaiRuntimeAccount("catalog-routable-xai"), devinRuntimeAccount("catalog-routable-devin")} {
 		if _, err := accountRepo.UpsertLogin(ctx, account); err != nil {
 			t.Fatal(err)
 		}
@@ -285,20 +287,20 @@ func TestPublicCatalogListsAllFiveNamesOnlyWhenProviderRoutable(t *testing.T) {
 	cooldowns := store.NewCooldownRepository(database.DB)
 	now := func() time.Time { return time.Now().UTC() }
 
-	// Both providers registered: all five names listed.
+	// Both providers registered: all seven names listed.
 	both := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, config.DefaultModel, testCapabilityRegistry(t, accountRepo))
 	listed, err := both.PublicModels(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 5 {
-		t.Fatalf("both providers: public models=%+v, want five", listed)
+	if len(listed) != 7 {
+		t.Fatalf("both providers: public models=%+v, want seven", listed)
 	}
 	seen := map[string]bool{}
 	for _, model := range listed {
 		seen[model.ID] = true
 	}
-	for _, name := range []string{"grok", "grok-4.5", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+	for _, name := range []string{"grok", "glm", "swe", "grok-4.5", "glm-5-2", "swe-1-6", "swe-1-7"} {
 		if !seen[name] {
 			t.Fatalf("both providers: missing %q in %+v", name, listed)
 		}
@@ -320,18 +322,18 @@ func TestPublicCatalogListsAllFiveNamesOnlyWhenProviderRoutable(t *testing.T) {
 		}
 	}
 
-	// Only Devin registered: xAI static names suppressed, only the three Devin
+	// Only Devin registered: xAI static names suppressed, only the five Devin
 	// names listed.
-	devinOnly := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", testCapabilityRegistryFor(t, accountRepo, config.ModelEntry{Provider: config.ProviderDevin, PolicyKey: "devin"}))
+	devinOnly := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, testCapabilityRegistryFor(t, accountRepo, config.ModelEntry{Provider: config.ProviderDevin, PolicyKey: "devin"}))
 	devinListed, err := devinOnly.PublicModels(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(devinListed) != 3 {
-		t.Fatalf("Devin-only: public models=%+v, want three Devin names", devinListed)
+	if len(devinListed) != 5 {
+		t.Fatalf("Devin-only: public models=%+v, want five Devin names", devinListed)
 	}
 	for _, model := range devinListed {
-		if model.ID != "kimi-k2-7" && model.ID != "glm-5-2" && model.ID != "swe-1-6-slow" {
+		if model.ID != "glm" && model.ID != "swe" && model.ID != "glm-5-2" && model.ID != "swe-1-6" && model.ID != "swe-1-7" {
 			t.Fatalf("Devin-only: xAI name leaked into listing: %+v", devinListed)
 		}
 	}
@@ -369,7 +371,7 @@ func TestReadinessFollowsDevinDefaultAccountAndCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{"kimi-k2-7"}, nil)
+	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{testDevinDefaultModel}, nil)
 	resolver, err := models.NewStaticCatalogOverlay(static, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +380,7 @@ func TestReadinessFollowsDevinDefaultAccountAndCapabilities(t *testing.T) {
 	now := func() time.Time { return time.Now().UTC() }
 
 	// No Devin account: readiness false even with Devin trio registered.
-	noAccount := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", testCapabilityRegistry(t, accountRepo))
+	noAccount := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, testCapabilityRegistry(t, accountRepo))
 	if ready, err := noAccount.Ready(ctx); err != nil || ready {
 		t.Fatalf("no Devin account: ready=%v err=%v", ready, err)
 	}
@@ -389,20 +391,20 @@ func TestReadinessFollowsDevinDefaultAccountAndCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = devinAccount
-	withAccount := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", testCapabilityRegistry(t, accountRepo))
+	withAccount := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, testCapabilityRegistry(t, accountRepo))
 	if ready, err := withAccount.Ready(ctx); err != nil || !ready {
 		t.Fatalf("usable Devin account + trio: ready=%v err=%v", ready, err)
 	}
 
 	// Devin trio missing: readiness false even with usable Devin account.
 	xaiOnlyRegistry := testCapabilityRegistryFor(t, accountRepo, config.ModelEntry{Provider: config.ProviderXAI, PolicyKey: "xai"})
-	missingTrio := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", xaiOnlyRegistry)
+	missingTrio := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, xaiOnlyRegistry)
 	if ready, err := missingTrio.Ready(ctx); err != nil || ready {
 		t.Fatalf("Devin trio missing: ready=%v err=%v", ready, err)
 	}
 
 	// Nil registry: readiness false.
-	nilRegistry := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", nil)
+	nilRegistry := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, nil)
 	if ready, err := nilRegistry.Ready(ctx); err != nil || ready {
 		t.Fatalf("nil registry: ready=%v err=%v", ready, err)
 	}
@@ -428,7 +430,7 @@ func TestReadinessFollowsXAIAndDevinDefaultsSymmetrically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{config.DefaultModel, "kimi-k2-7"}, map[string]string{"grok": config.DefaultModel})
+	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{config.DefaultModel, testDevinDefaultModel}, map[string]string{"grok": config.DefaultModel})
 	resolver, err := models.NewStaticCatalogOverlay(static, map[string]string{"grok": config.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -445,7 +447,7 @@ func TestReadinessFollowsXAIAndDevinDefaultsSymmetrically(t *testing.T) {
 	if ready, err := xaiDefault.Ready(ctx); err != nil || ready {
 		t.Fatalf("xAI default with only Devin account: ready=%v err=%v", ready, err)
 	}
-	devinDefault := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", registry)
+	devinDefault := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, registry)
 	if ready, err := devinDefault.Ready(ctx); err != nil || !ready {
 		t.Fatalf("Devin default with Devin account: ready=%v err=%v", ready, err)
 	}
@@ -594,7 +596,7 @@ func TestReadinessDevinNilExpiryFailsClosedAndTransitionsRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{"kimi-k2-7"}, nil)
+	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{testDevinDefaultModel}, nil)
 	resolver, err := models.NewStaticCatalogOverlay(static, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -602,7 +604,7 @@ func TestReadinessDevinNilExpiryFailsClosedAndTransitionsRelogin(t *testing.T) {
 	cooldowns := store.NewCooldownRepository(database.DB)
 	now := func() time.Time { return time.Now().UTC() }
 	registry, _, devinCounter := testCountingCapabilityRegistry(t, accountRepo)
-	projection := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", registry)
+	projection := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, registry)
 
 	// Readiness must fail closed: nil ExpiresAt means the real Devin
 	// CredentialManager cannot project usability.
@@ -632,7 +634,7 @@ func TestReadinessDevinNilExpiryFailsClosedAndTransitionsRelogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, model := range listed {
-		if model.ID == "kimi-k2-7" || model.ID == "glm-5-2" || model.ID == "swe-1-6-slow" {
+		if model.ID == "glm" || model.ID == "swe" || model.ID == "glm-5-2" || model.ID == "swe-1-6" || model.ID == "swe-1-7" {
 			t.Fatalf("Devin model listed with nil-expiry account: %+v", listed)
 		}
 	}
@@ -674,7 +676,7 @@ func TestReadinessDevinExpiredExpiryFailsClosedAndTransitionsRelogin(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{"kimi-k2-7"}, nil)
+	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{testDevinDefaultModel}, nil)
 	resolver, err := models.NewStaticCatalogOverlay(static, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -682,7 +684,7 @@ func TestReadinessDevinExpiredExpiryFailsClosedAndTransitionsRelogin(t *testing.
 	cooldowns := store.NewCooldownRepository(database.DB)
 	now := func() time.Time { return time.Now().UTC() }
 	registry, _, devinCounter := testCountingCapabilityRegistry(t, accountRepo)
-	projection := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", registry)
+	projection := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, registry)
 
 	if ready, err := projection.Ready(ctx); err != nil || ready {
 		t.Fatalf("expired ExpiresAt with future OpaqueTokenExpiresAt: ready=%v err=%v", ready, err)
@@ -786,7 +788,7 @@ func TestReadinessCountsCredentialUsableOnlyForProviderMatchedAccounts(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{"kimi-k2-7"}, nil)
+	catalog := models.NewCatalog(store.NewModelCapabilityRepository(database.DB), []string{testDevinDefaultModel}, nil)
 	resolver, err := models.NewStaticCatalogOverlay(static, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -794,7 +796,7 @@ func TestReadinessCountsCredentialUsableOnlyForProviderMatchedAccounts(t *testin
 	cooldowns := store.NewCooldownRepository(database.DB)
 	now := func() time.Time { return time.Now().UTC() }
 	registry, xaiCounter, devinCounter := testCountingCapabilityRegistry(t, accountRepo)
-	devinDefault := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, "kimi-k2-7", registry)
+	devinDefault := newPublicCatalog(catalog, static, resolver, accountRepo, cooldowns, now, testDevinDefaultModel, registry)
 
 	if ready, err := devinDefault.Ready(ctx); err != nil || !ready {
 		t.Fatalf("Devin default with usable Devin account: ready=%v err=%v", ready, err)
@@ -831,7 +833,7 @@ func TestRuntimeConstructionValidatesStaticCatalogCapabilities(t *testing.T) {
 	}
 	defer runtime.Close()
 	// Every fixed static model must resolve to a complete trio in the runtime
-	// registry, so all five names pass the capability gate when accounts exist.
+	// registry, so all configured names pass the capability gate when accounts exist.
 	static, err := models.NewStaticCatalog(cfg.Models.Entries)
 	if err != nil {
 		t.Fatal(err)
@@ -859,8 +861,8 @@ func TestRuntimeReadinessEndpointReportsDevinDefaultReady(t *testing.T) {
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
 	// Configure a Devin default through the allowlist surface.
-	cfg.Models.Default = "kimi-k2-7"
-	cfg.Models.Allowlist = []string{"kimi-k2-7"}
+	cfg.Models.Default = testDevinDefaultModel
+	cfg.Models.Allowlist = []string{testDevinDefaultModel}
 	runtime, err := New(t.Context(), cfg, secrets, nil)
 	if err != nil {
 		t.Fatalf("runtime with Devin default rejected: %v", err)

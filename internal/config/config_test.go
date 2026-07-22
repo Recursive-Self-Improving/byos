@@ -122,9 +122,9 @@ func TestFixedModelEntriesRejectMutation(t *testing.T) {
 		func(c *Config) { c.Models.Entries = nil },
 		func(c *Config) { c.Models.Entries = append(c.Models.Entries, c.Models.Entries[0]) },
 		func(c *Config) { c.Models.Entries[0].Provider = ProviderDevin },
-		func(c *Config) { c.Models.Entries[1].OwnedBy = "byos" },
+		func(c *Config) { c.Models.Entries[1].OwnedBy = "xai" },
 		func(c *Config) { c.Models.Entries[2].PublicName = "other" },
-		func(c *Config) { c.Models.Entries[3].PolicyKey = "xai" },
+		func(c *Config) { c.Models.Entries[3].PolicyKey = "devin" },
 		func(c *Config) { c.Models.Entries[4].UpstreamName = "other" },
 		func(c *Config) { c.Models.Entries[2].Provider = ProviderKind("XAI") },
 	}
@@ -160,20 +160,20 @@ func TestLegacyModelsRespectStaticCatalogOwnership(t *testing.T) {
 		{name: "canonical public name collision", mutate: func(m *ModelsConfig) {
 			m.Aliases[DefaultModel] = DefaultModel
 		}},
-		{name: "kimi public name collision", mutate: func(m *ModelsConfig) {
-			m.Aliases["kimi-k2-7"] = DefaultModel
+		{name: "glm alias public name collision", mutate: func(m *ModelsConfig) {
+			m.Aliases["glm"] = DefaultModel
 		}},
-		{name: "glm public name collision", mutate: func(m *ModelsConfig) {
+		{name: "glm canonical public name collision", mutate: func(m *ModelsConfig) {
 			m.Aliases["glm-5-2"] = DefaultModel
 		}},
-		{name: "swe public name collision", mutate: func(m *ModelsConfig) {
-			m.Aliases["swe-1-6-slow"] = DefaultModel
+		{name: "swe alias public name collision", mutate: func(m *ModelsConfig) {
+			m.Aliases["swe"] = DefaultModel
 		}},
 		{name: "grok redirect", mutate: func(m *ModelsConfig) {
 			m.Aliases["grok"] = "other"
 		}},
 		{name: "alias targets Devin model", mutate: func(m *ModelsConfig) {
-			m.Aliases["fast"] = "kimi-k2-7"
+			m.Aliases["fast"] = "glm-5-2"
 		}},
 		{name: "alias targets unknown model", mutate: func(m *ModelsConfig) {
 			m.Aliases["fast"] = "other"
@@ -183,8 +183,8 @@ func TestLegacyModelsRespectStaticCatalogOwnership(t *testing.T) {
 			m.Aliases["fast"] = "turbo"
 		}},
 		{name: "Devin default", valid: true, mutate: func(m *ModelsConfig) {
-			m.Default = "kimi-k2-7"
-			m.Allowlist = []string{"kimi-k2-7"}
+			m.Default = "glm"
+			m.Allowlist = []string{"glm"}
 		}},
 		{name: "unknown default", mutate: func(m *ModelsConfig) {
 			m.Default = "other"
@@ -298,12 +298,13 @@ func loadYAMLError(t *testing.T, body string) (Config, error) {
 }
 
 // TestConfigAcceptsAnyFixedStaticPublicModelAsDefault asserts C9.2: config
-// accepts any of the five fixed static public model names as the default while
+// accepts every fixed static public model name as the default while
 // preserving Grok alias ownership (models.aliases.grok stays fixed at the
 // canonical xAI model). This guards against the prior xAI-only default/allowlist
 // boundary that prevented Devin defaults.
 func TestConfigAcceptsAnyFixedStaticPublicModelAsDefault(t *testing.T) {
-	for _, name := range []string{DefaultModel, "grok", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+	for _, entry := range defaultModelEntries() {
+		name := entry.PublicName
 		t.Run(name, func(t *testing.T) {
 			cfg := Default()
 			cfg.Models.Default = name
@@ -319,7 +320,7 @@ func TestConfigAcceptsAnyFixedStaticPublicModelAsDefault(t *testing.T) {
 }
 
 // TestConfigRejectsNonFixedDefaultWhilePreservingGrokAlias asserts C9.2: a
-// default that is not one of the five fixed static public names (and not a
+// default that is not a fixed static public name (and not a
 // permitted xAI alias) is rejected, while the Grok alias ownership constraint
 // stays intact.
 func TestConfigRejectsNonFixedDefaultWhilePreservingGrokAlias(t *testing.T) {
@@ -339,9 +340,9 @@ func TestConfigRejectsNonFixedDefaultWhilePreservingGrokAlias(t *testing.T) {
 // when the default is a Devin model.
 func TestConfigGrokAliasStaysFixedAtCanonicalXAIModel(t *testing.T) {
 	cfg := Default()
-	cfg.Models.Default = "kimi-k2-7"
-	cfg.Models.Allowlist = []string{"kimi-k2-7"}
-	cfg.Models.Aliases["grok"] = "kimi-k2-7"
+	cfg.Models.Default = "glm"
+	cfg.Models.Allowlist = []string{"glm"}
+	cfg.Models.Aliases["grok"] = "glm"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("grok alias redirect to Devin accepted")
 	}

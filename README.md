@@ -11,7 +11,7 @@ BYOS (Bring Your Own Subscription) is a single-process Go service that exposes O
 - Streaming responses over server-sent events (SSE).
 - Two provider backends with provider-aware routing, cooldowns, and failover:
   - **xAI** owns `grok` (alias of `grok-4.5`) and `grok-4.5`; xAI alone injects the mandatory `x_search` tool and maps explicit `tool_choice:"none"` to `"auto"`.
-  - **Devin** owns `kimi-k2-7`, `glm-5-2`, and `swe-1-6-slow`; Devin preserves canonical `none`, `auto`, and selected tool choices and receives no injected search tool.
+  - **Devin** owns `glm` (alias of `glm-5-2`), `swe` (alias of `swe-1-7`), `glm-5-2`, `swe-1-6`, and `swe-1-7`; Devin preserves canonical `none`, `auto`, and selected tool choices and receives no injected search tool.
 - Multiple accounts per provider with model-aware round-robin routing, cooldowns, and failover confined to the resolved provider.
 - xAI device-flow login and Devin callback-PKCE login through the admin Web UI, Admin REST, and `byos login --provider`.
 - Encrypted SQLite persistence for account credentials, OAuth state, usage snapshots, and response sessions.
@@ -168,11 +168,13 @@ BYOS routes requests through a fixed static catalog. Each public model is owned 
 | --- | --- | --- | --- | --- |
 | `grok` | `grok-4.5` | xAI | `byos` | Mandatory `x_search`; `none` becomes `auto` |
 | `grok-4.5` | `grok-4.5` | xAI | `xai` | Mandatory `x_search`; `none` becomes `auto` |
-| `kimi-k2-7` | `kimi-k2-7` | Devin | `devin` | No injected search; `none`/`auto`/selected preserved |
+| `glm` | `glm-5-2` | Devin | `byos` | No injected search; `none`/`auto`/selected preserved |
+| `swe` | `swe-1-7` | Devin | `byos` | No injected search; `none`/`auto`/selected preserved |
 | `glm-5-2` | `glm-5-2` | Devin | `devin` | No injected search; `none`/`auto`/selected preserved |
-| `swe-1-6-slow` | `swe-1-6-slow` | Devin | `devin` | No injected search; `none`/`auto`/selected preserved |
+| `swe-1-6` | `swe-1-6` | Devin | `devin` | No injected search; `none`/`auto`/selected preserved |
+| `swe-1-7` | `swe-1-7` | Devin | `devin` | No injected search; `none`/`auto`/selected preserved |
 
-The default model is `grok-4.5`. The `grok` alias resolves to the same canonical xAI upstream as `grok-4.5` while retaining its own `byos` ownership metadata. Model discovery is optional and cannot expand this fixed set; discovered capabilities only mark existing fixed models as supported, unsupported, or unknown within their provider.
+The default model is `grok-4.5`. The concise aliases `grok`, `glm`, and `swe` resolve to `grok-4.5`, `glm-5-2`, and `swe-1-7` respectively while retaining `byos` ownership metadata. Model discovery is optional and cannot expand this fixed set; discovered capabilities only mark existing fixed models as supported, unsupported, or unknown within their provider.
 
 ### Devin provider setup
 

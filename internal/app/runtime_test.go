@@ -255,10 +255,10 @@ func TestPublicModelsAndReadinessAreProviderAware(t *testing.T) {
 		},
 		{
 			name:         "devin known capability ready without backend search",
-			entry:        config.ModelEntry{PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: config.ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
+			entry:        config.ModelEntry{PublicName: "glm", UpstreamName: "glm-5-2", Provider: config.ProviderDevin, OwnedBy: "byos", PolicyKey: "devin"},
 			account:      devinRuntimeAccount("devin-known"),
-			capabilities: []store.ModelCapability{{Model: "kimi-k2-7", Supported: true, SupportsBackendSearch: &falseValue}},
-			wantModels:   []apiopenai.Model{{ID: "kimi-k2-7", OwnedBy: "devin"}}, wantReady: http.StatusOK,
+			capabilities: []store.ModelCapability{{Model: "glm-5-2", Supported: true, SupportsBackendSearch: &falseValue}},
+			wantModels:   []apiopenai.Model{{ID: "glm", OwnedBy: "byos"}}, wantReady: http.StatusOK,
 		},
 		{
 			name:       "devin unknown capability ready stays provider local",
@@ -338,7 +338,7 @@ func TestPublicModelsAndReadinessAreProviderAware(t *testing.T) {
 		})
 	}
 }
-func TestAliasDefaultDoesNotChangeFiveModelPublicProjection(t *testing.T) {
+func TestAliasDefaultDoesNotChangeStaticModelPublicProjection(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, t.TempDir())
 	if err != nil {
@@ -350,7 +350,7 @@ func TestAliasDefaultDoesNotChangeFiveModelPublicProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts := store.NewAccountRepository(database.DB, keys)
-	for _, account := range []store.Account{xaiRuntimeAccount("five-model-xai"), devinRuntimeAccount("five-model-devin")} {
+	for _, account := range []store.Account{xaiRuntimeAccount("static-model-xai"), devinRuntimeAccount("static-model-devin")} {
 		if _, err := accounts.UpsertLogin(ctx, account); err != nil {
 			t.Fatal(err)
 		}
@@ -370,8 +370,8 @@ func TestAliasDefaultDoesNotChangeFiveModelPublicProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 5 {
-		t.Fatalf("public models=%+v, want exact five static IDs", listed)
+	if len(listed) != len(config.Default().Models.Entries) {
+		t.Fatalf("public models=%+v, want exact configured static IDs", listed)
 	}
 	for _, model := range listed {
 		if model.ID == "fast" {
@@ -451,7 +451,7 @@ func TestNeutralExecutorCompositionRejectsUnregisteredProvidersBeforeDispatch(t 
 	}
 	cooldownStates := store.NewCooldownRepository(database.DB)
 	executor := routing.NewExecutor(routing.NewScheduler(), modelCatalog, registry, routing.NewCooldownManager(cooldownStates, accounts), accounts, store.NewModelCapabilityRepository(database.DB), cooldownStates)
-	for _, model := range []string{"unknown", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+	for _, model := range []string{"unknown", "glm", "swe", "glm-5-2", "swe-1-6", "swe-1-7"} {
 		before := requests
 		body := []byte(`{"model":"public","input":"hello"}`)
 		original := bytes.Clone(body)

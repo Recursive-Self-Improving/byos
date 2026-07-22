@@ -615,8 +615,8 @@ func TestModelWorkerRunCancelsAndRestartsCleanly(t *testing.T) {
 func TestModelWorkerDevinHasNoDiscovererAndAbsentCapabilityIsNoOp(t *testing.T) {
 	// C8.3: Devin has no ModelDiscoverer registered. The worker must treat the
 	// absent capability as a clean no-op: no credential, discovery, or apply
-	// calls, no status mutation, and no error. The static three-model fallback
-	// remains independent of this worker.
+	// calls, no status mutation, and no error. The static five-name Devin
+	// fallback remains independent of this worker.
 	xaiDiscoverer := &workerDiscoverer{models: []provider.DiscoveredModel{{UpstreamName: "grok"}}}
 	xaiCredentials := &workerCredentials{token: "xai-secret"}
 	devinCredentials := &workerCredentials{token: "devin-secret"}
@@ -646,7 +646,7 @@ func TestModelWorkerDevinHasNoDiscovererAndAbsentCapabilityIsNoOp(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
+	for _, name := range []string{"glm", "swe", "glm-5-2", "swe-1-6", "swe-1-7"} {
 		resolved, err := staticCatalog.Resolve(name)
 		if err != nil {
 			t.Fatalf("static catalog resolve %q = %v", name, err)
@@ -659,7 +659,7 @@ func TestModelWorkerDevinHasNoDiscovererAndAbsentCapabilityIsNoOp(t *testing.T) 
 	// eligible: with no capability snapshot stored, AccountSupports reports
 	// the resolved Devin model routable via the real Catalog APIs.
 	catalog := NewCatalog(capabilityStoreStub{}, nil, nil)
-	devin := provider.ResolvedModel{PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"}
+	devin := provider.ResolvedModel{PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"}
 	if supported, err := catalog.AccountSupports(context.Background(), "devin", devin); err != nil || !supported {
 		t.Fatalf("AccountSupports absent snapshot = %v, %v; want true, nil", supported, err)
 	}

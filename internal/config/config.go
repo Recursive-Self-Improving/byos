@@ -163,12 +163,10 @@ func defaultModelEntries() []ModelEntry {
 		{PublicName: "grok", UpstreamName: "grok-4.5", Provider: ProviderXAI, OwnedBy: "byos", PolicyKey: "xai"},
 		{PublicName: "glm", UpstreamName: "glm-5-2", Provider: ProviderDevin, OwnedBy: "byos", PolicyKey: "devin"},
 		{PublicName: "swe", UpstreamName: "swe-1-7", Provider: ProviderDevin, OwnedBy: "byos", PolicyKey: "devin"},
-		// {PublicName: "kimi", UpstreamName: "kimi-k2-7", Provider: ProviderDevin, OwnedBy: "byos", PolicyKey: "devin"},
 		{PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: ProviderXAI, OwnedBy: "xai", PolicyKey: "xai"},
 		{PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
 		{PublicName: "swe-1-6", UpstreamName: "swe-1-6", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
 		{PublicName: "swe-1-7", UpstreamName: "swe-1-7", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
-		// {PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: ProviderDevin, OwnedBy: "devin", PolicyKey: "devin"},
 	}
 }
 
@@ -384,7 +382,7 @@ func validDNSName(host string) bool {
 func validateModelEntries(entries []ModelEntry) error {
 	want := defaultModelEntries()
 	if len(entries) != len(want) {
-		return errors.New("models.entries must contain exactly the five fixed model entries")
+		return fmt.Errorf("models.entries must contain exactly %d fixed model entries", len(want))
 	}
 	seen := make(map[string]ModelEntry, len(entries))
 	for _, entry := range entries {

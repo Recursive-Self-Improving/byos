@@ -14,7 +14,9 @@ import (
 
 	"byos/internal/api"
 	apiopenai "byos/internal/api/openai"
+	"byos/internal/config"
 	appcrypto "byos/internal/crypto"
+	"byos/internal/models"
 	oauthdevin "byos/internal/oauth/devin"
 	oauthxai "byos/internal/oauth/xai"
 	"byos/internal/provider"
@@ -182,28 +184,20 @@ func (u *c9xAIUpstream) serverURL(t *testing.T) string {
 	return server.URL
 }
 
-// c9newStaticCatalog returns the five fixed static model identities resolved by
-// the production catalog, as a provider.ModelCatalog the executor accepts.
-type c9staticCatalog struct {
-	models map[string]provider.ResolvedModel
-}
-
-func (c c9staticCatalog) Resolve(name string) (provider.ResolvedModel, error) {
-	if m, ok := c.models[name]; ok {
-		return m, nil
-	}
-	return provider.ResolvedModel{}, fmt.Errorf("%w: %s", provider.ErrUnknownModel, name)
-}
-
+// c9newStaticCatalog builds the same immutable static catalog and alias overlay
+// used by production so persistence coverage follows the configured identities.
 func c9newStaticCatalog(t *testing.T) provider.ModelCatalog {
 	t.Helper()
-	return c9staticCatalog{models: map[string]provider.ResolvedModel{
-		"grok":         {PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "byos", PolicyKey: "xai"},
-		"grok-4.5":     {PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"},
-		"kimi-k2-7":    {PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
-		"glm-5-2":      {PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
-		"swe-1-6-slow": {PublicName: "swe-1-6-slow", UpstreamName: "swe-1-6-slow", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
-	}}
+	cfg := config.Default()
+	static, err := models.NewStaticCatalog(cfg.Models.Entries)
+	if err != nil {
+		t.Fatalf("build static catalog: %v", err)
+	}
+	overlay, err := models.NewStaticCatalogOverlay(static, cfg.Models.Aliases)
+	if err != nil {
+		t.Fatalf("build static catalog overlay: %v", err)
+	}
+	return overlay
 }
 
 type c9devinPassthroughPolicy struct{}
@@ -596,8 +590,8 @@ func TestC9Persistence_ManagedResponsesContinuationPersistsPreferredAccountAcros
 	// Cross-provider negative: a continuation whose persisted preferred
 	// account is xAI A but whose requested model resolves to Devin must not
 	// cross onto xAI. This goes through the public ResponsesHandler with
-	// previous_response_id=rootID (the persisted xAI root) and model
-	// kimi-k2-7 (Devin). sessions.Reconstruct injects PreferredAccountID=A
+	// previous_response_id=rootID (the persisted xAI root) and model glm
+	// (Devin). sessions.Reconstruct injects PreferredAccountID=A
 	// from the root, but the executor's candidates() filters to Devin accounts
 	// only, so A is skipped (provider mismatch) and the Devin account is
 	// selected. The Devin generation client is called once with the Devin
@@ -608,7 +602,7 @@ func TestC9Persistence_ManagedResponsesContinuationPersistsPreferredAccountAcros
 	devinLedgerBeforeCross := third.devinLedger.callCount(devinAccount.ID)
 	devinCallsBeforeCross := len(third.devinGeneration.requests)
 
-	crossBody := fmt.Sprintf(`{"model":"kimi-k2-7","input":"cross-provider followup","previous_response_id":%q,"store":true,"stream":false}`, rootID)
+	crossBody := fmt.Sprintf(`{"model":"glm","input":"cross-provider followup","previous_response_id":%q,"store":true,"stream":false}`, rootID)
 	cross := c9postResponses(t, c9responsesHandler(third), crossBody)
 	if cross.Code != http.StatusOK {
 		t.Fatalf("cross-provider continuation status=%d body=%s", cross.Code, cross.Body.String())
@@ -624,8 +618,8 @@ func TestC9Persistence_ManagedResponsesContinuationPersistsPreferredAccountAcros
 	if crossChild.PreviousResponseID != rootID {
 		t.Fatalf("cross-provider child previous=%q want root=%q", crossChild.PreviousResponseID, rootID)
 	}
-	if crossChild.Model != "kimi-k2-7" {
-		t.Fatalf("cross-provider child model=%q want kimi-k2-7", crossChild.Model)
+	if crossChild.Model != "glm-5-2" {
+		t.Fatalf("cross-provider child model=%q want glm-5-2", crossChild.Model)
 	}
 	// Devin generation client called exactly once with the Devin sentinel.
 	if len(third.devinGeneration.requests) != devinCallsBeforeCross+1 {

@@ -20,11 +20,13 @@ func TestNewStaticCatalogFromValidatedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]provider.ResolvedModel{
-		"grok":         {PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "byos", PolicyKey: "xai"},
-		"grok-4.5":     {PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"},
-		"kimi-k2-7":    {PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
-		"glm-5-2":      {PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
-		"swe-1-6-slow": {PublicName: "swe-1-6-slow", UpstreamName: "swe-1-6-slow", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
+		"grok":     {PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "byos", PolicyKey: "xai"},
+		"glm":      {PublicName: "glm", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "byos", PolicyKey: "devin"},
+		"swe":      {PublicName: "swe", UpstreamName: "swe-1-7", Provider: provider.Devin, OwnedBy: "byos", PolicyKey: "devin"},
+		"grok-4.5": {PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"},
+		"glm-5-2":  {PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
+		"swe-1-6":  {PublicName: "swe-1-6", UpstreamName: "swe-1-6", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
+		"swe-1-7":  {PublicName: "swe-1-7", UpstreamName: "swe-1-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
 	}
 	for name, expected := range want {
 		got, err := catalog.Resolve(name)
@@ -98,8 +100,8 @@ func TestStaticCatalogOverlayResolvesXAIOnlyOneHop(t *testing.T) {
 	if grok.PublicName != "grok" || grok.OwnedBy != "byos" {
 		t.Fatalf("fixed grok identity changed: %+v", grok)
 	}
-	if len(static.Models()) != 5 {
-		t.Fatalf("static projection length = %d, want 5", len(static.Models()))
+	if len(static.Models()) != 7 {
+		t.Fatalf("static projection length = %d, want 7", len(static.Models()))
 	}
 }
 
@@ -109,8 +111,8 @@ func TestStaticCatalogOverlayRejectsOwnershipRedirects(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, aliases := range []map[string]string{
-		{"kimi-k2-7": config.DefaultModel},
-		{"fast": "kimi-k2-7"},
+		{"glm": config.DefaultModel},
+		{"fast": "glm-5-2"},
 		{"fast": "unknown"},
 		{"fast": "turbo", "turbo": config.DefaultModel},
 	} {
@@ -136,12 +138,12 @@ func TestAccountSupportsPartitionsProviderCapabilitySemantics(t *testing.T) {
 	searchFalse := false
 	store := capabilityStoreStub{values: map[string][]store.ModelCapability{
 		"xai-known":   {{Model: "grok-4.5", Supported: true, SupportsBackendSearch: &searchFalse}},
-		"devin-known": {{Model: "kimi-k2-7", Supported: true, SupportsBackendSearch: &searchFalse}},
+		"devin-known": {{Model: "glm-5-2", Supported: true, SupportsBackendSearch: &searchFalse}},
 		"other-known": {{Model: "other", Supported: true}},
 	}}
 	catalog := NewCatalog(store, nil, nil)
 	xai := provider.ResolvedModel{PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "byos", PolicyKey: "xai"}
-	devin := provider.ResolvedModel{PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"}
+	devin := provider.ResolvedModel{PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"}
 	for _, test := range []struct {
 		name, account string
 		model         provider.ResolvedModel

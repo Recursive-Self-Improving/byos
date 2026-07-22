@@ -333,8 +333,8 @@ func (c *c9countingDevinCreds) CredentialUsable(ctx context.Context, accountID s
 
 // c9newPublicRuntime assembles the real production component graph against a
 // SQLite data directory with both a routable xAI and a routable Devin account.
-// The static catalog and overlay are built from config.Default().Models so the
-// five fixed public names resolve exactly as in production. The capability
+// The static catalog and overlay are built from config.Default().Models so all
+// seven fixed public names resolve exactly as in production. The capability
 // registry uses the real xai.RequestPolicy and devin.RequestPolicy and the
 // real OAuth credential managers wrapped in observable counters; the
 // generation clients are recording provider.GenerationClient implementations
@@ -411,7 +411,7 @@ func c9newPublicRuntime(t *testing.T) *c9publicRuntime {
 }
 
 // c9protocolNames enumerates the three public protocols exercised in the full
-// 5×3×2 matrix.
+// 7×3×2 matrix.
 type c9protocolName string
 
 const (
@@ -420,7 +420,7 @@ const (
 	c9ProtocolAnthropic c9protocolName = "anthropic.messages"
 )
 
-// c9publicRequest describes one cell of the 5×3×2 matrix: a public model name,
+// c9publicRequest describes one cell of the 7×3×2 matrix: a public model name,
 // a protocol, and a stream/non-stream mode. Tool-choice variants are exercised
 // separately by the focused tool tests; they never multiply this matrix.
 type c9publicRequest struct {
@@ -438,12 +438,12 @@ const (
 	c9ToolAbsent   c9toolChoice = "absent"
 )
 
-// c9matrix returns the full 5×3×2 matrix of public requests: five fixed
+// c9matrix returns the full 7×3×2 matrix of public requests: seven fixed
 // public names, three protocols, and two stream modes. Each row uses the
 // baseline native body with no tools and no tool_choice, so the dispatch
-// proof is exactly 30 rows with no tool multiplication.
+// proof is exactly 42 rows with no tool multiplication.
 func c9matrix() []c9publicRequest {
-	names := []string{"grok", "grok-4.5", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"}
+	names := []string{"grok", "glm", "swe", "grok-4.5", "glm-5-2", "swe-1-6", "swe-1-7"}
 	protocols := []c9protocolName{c9ProtocolChat, c9ProtocolResponses, c9ProtocolAnthropic}
 	modes := []bool{false, true}
 	var out []c9publicRequest
@@ -543,7 +543,7 @@ func c9resolvedProvider(name string) provider.Kind {
 	switch name {
 	case "grok", "grok-4.5":
 		return provider.XAI
-	case "kimi-k2-7", "glm-5-2", "swe-1-6-slow":
+	case "glm", "swe", "glm-5-2", "swe-1-6", "swe-1-7":
 		return provider.Devin
 	}
 	return provider.Kind("")
@@ -555,8 +555,12 @@ func c9resolvedUpstream(name string) string {
 	switch name {
 	case "grok", "grok-4.5":
 		return "grok-4.5"
-	case "kimi-k2-7", "glm-5-2", "swe-1-6-slow":
-		return name
+	case "glm", "glm-5-2":
+		return "glm-5-2"
+	case "swe", "swe-1-7":
+		return "swe-1-7"
+	case "swe-1-6":
+		return "swe-1-6"
 	}
 	return ""
 }
@@ -1063,14 +1067,14 @@ func c9stripDataPrefix(line string) string {
 	return line
 }
 
-// TestC9PublicChainDispatchesFullFiveByThreeByTwoMatrix asserts C9.3 across the
-// full 5×3×2 matrix: for every fixed static public name, every public protocol
+// TestC9PublicChainDispatchesFullSevenByThreeByTwoMatrix asserts C9.3 across the
+// full 7×3×2 matrix: for every fixed static public name, every public protocol
 // (OpenAI Chat, OpenAI Responses, Anthropic Messages), and both stream and
 // non-stream modes, the real public handler dispatches through the real
 // translator → static resolve → runtime lookup → policy.Prepare → upstream
 // overwrite → provider filter → credential isolation → recording generation
 // client → response translation path. Each row uses the baseline native body
-// with no tools and no tool_choice, so the dispatch proof is exactly 30 rows
+// with no tools and no tool_choice, so the dispatch proof is exactly 42 rows
 // with no tool multiplication. Each row asserts exactly one generation dispatch
 // on the served recording client (Execute for non-stream, Stream for stream),
 // zero dispatches on the cross-provider recording client, zero cross-provider
@@ -1080,7 +1084,7 @@ func c9stripDataPrefix(line string) string {
 // the resolved upstream model. Wire serialization is NOT asserted here; it is
 // proven at the private provider-package boundary in internal/xai and
 // internal/devin tests.
-func TestC9PublicChainDispatchesFullFiveByThreeByTwoMatrix(t *testing.T) {
+func TestC9PublicChainDispatchesFullSevenByThreeByTwoMatrix(t *testing.T) {
 	rt := c9newPublicRuntime(t)
 	chat, responses, messages := rt.c9buildHandlers(t)
 	for _, req := range c9matrix() {
@@ -1095,7 +1099,7 @@ func TestC9PublicChainDispatchesFullFiveByThreeByTwoMatrix(t *testing.T) {
 
 // TestC9PublicChainToolChoiceMatrix exercises the none/auto/selected
 // tool-choice variants separately from the dispatch matrix, for xAI (grok) and
-// Devin (kimi-k2-7) across all three public protocols. Each cell uses the
+// Devin (glm) across all three public protocols. Each cell uses the
 // protocol-native tool and tool_choice shapes and asserts the policy shape on
 // the canonical request the recording client received: xAI injects exactly one
 // x_search and rewrites string "none" to "auto"; Devin stays free of x_search
@@ -1104,11 +1108,11 @@ func TestC9PublicChainDispatchesFullFiveByThreeByTwoMatrix(t *testing.T) {
 // selected→ToolName="lookup") is proven in internal/devin
 // chat_builder_test.go TestBuildChatRequestToolChoicesAcrossTranslatorShapes
 // and is not re-asserted here. These rows are non-stream and do not multiply
-// the 5×3×2 dispatch matrix.
+// the 7×3×2 dispatch matrix.
 func TestC9PublicChainToolChoiceMatrix(t *testing.T) {
 	rt := c9newPublicRuntime(t)
 	chat, responses, messages := rt.c9buildHandlers(t)
-	models := []string{"grok", "kimi-k2-7"}
+	models := []string{"grok", "glm"}
 	protocols := []c9protocolName{c9ProtocolChat, c9ProtocolResponses, c9ProtocolAnthropic}
 	choices := []c9toolChoice{c9ToolNone, c9ToolAuto, c9ToolSelected}
 	for _, model := range models {

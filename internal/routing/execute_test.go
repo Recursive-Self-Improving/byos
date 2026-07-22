@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"byos/internal/config"
 	appcrypto "byos/internal/crypto"
 	"byos/internal/provider"
 	"byos/internal/store"
@@ -601,16 +602,27 @@ func (c *recordingCredentials) CredentialUsable(_ context.Context, id string) (b
 	return c.values[id] != "", nil
 }
 
-// staticFiveModels returns the five fixed static model identities resolved by
-// the production catalog, keyed by public name.
-func staticFiveModels() map[string]provider.ResolvedModel {
-	return map[string]provider.ResolvedModel{
-		"grok":         {PublicName: "grok", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "byos", PolicyKey: "xai"},
-		"grok-4.5":     {PublicName: "grok-4.5", UpstreamName: "grok-4.5", Provider: provider.XAI, OwnedBy: "xai", PolicyKey: "xai"},
-		"kimi-k2-7":    {PublicName: "kimi-k2-7", UpstreamName: "kimi-k2-7", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
-		"glm-5-2":      {PublicName: "glm-5-2", UpstreamName: "glm-5-2", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
-		"swe-1-6-slow": {PublicName: "swe-1-6-slow", UpstreamName: "swe-1-6-slow", Provider: provider.Devin, OwnedBy: "devin", PolicyKey: "devin"},
+// staticConfiguredModels returns the fixed model identities from the default
+// production configuration, keyed by public name.
+func staticConfiguredModels() map[string]provider.ResolvedModel {
+	entries := config.Default().Models.Entries
+	configured := make(map[string]provider.ResolvedModel, len(entries))
+	for _, entry := range entries {
+		configured[entry.PublicName] = provider.ResolvedModel{
+			PublicName: entry.PublicName, UpstreamName: entry.UpstreamName,
+			Provider: provider.Kind(entry.Provider), OwnedBy: entry.OwnedBy, PolicyKey: entry.PolicyKey,
+		}
 	}
+	return configured
+}
+
+func staticConfiguredModelNames() []string {
+	entries := config.Default().Models.Entries
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.PublicName
+	}
+	return names
 }
 
 type multiProviderFixture struct {
@@ -655,7 +667,7 @@ func newMultiProviderFixture(t *testing.T) *multiProviderFixture {
 	devinCreds := &recordingCredentials{values: map[string]string{devinAccount.ID: "devin-token"}}
 	xaiClient := &fakeGeneration{ledger: &ledger}
 	devinClient := &fakeGeneration{ledger: &ledger}
-	catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+	catalog := fakeCatalog{ledger: &ledger, models: staticConfiguredModels()}
 	registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
 		"xai/xai":     {Policy: ledgerPolicy{ledger: &ledger, policy: xai.RequestPolicy{}}, Generation: xaiClient, Credentials: xaiCreds},
 		"devin/devin": {Policy: passthroughPolicy{}, Generation: devinClient, Credentials: devinCreds},
@@ -678,17 +690,18 @@ func protocolBodies(model string) [][]byte {
 	}
 }
 
-// TestExecuteDispatchesAllFiveStaticNamesToExactProviderWithNoCrossProviderCalls
-// asserts C9.3: for every fixed static model name and every protocol body shape,
-// non-stream dispatch reaches exactly the resolved provider's generation client
-// and credentials with the correct upstream name, and never touches the other
-// provider's client or credential manager.
-func TestExecuteDispatchesAllFiveStaticNamesToExactProviderWithNoCrossProviderCalls(t *testing.T) {
+// TestExecuteDispatchesAllConfiguredStaticNamesToExactProviderWithNoCrossProviderCalls
+// asserts C9.3: for every configured static model name and every protocol body
+// shape, non-stream dispatch reaches exactly the resolved provider's generation
+// client and credentials with the correct upstream name, and never touches the
+// other provider's client or credential manager.
+func TestExecuteDispatchesAllConfiguredStaticNamesToExactProviderWithNoCrossProviderCalls(t *testing.T) {
 	f := newMultiProviderFixture(t)
 	defer f.close()
 	ctx := context.Background()
-	for _, name := range []string{"grok", "grok-4.5", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"} {
-		resolved := staticFiveModels()[name]
+	configured := staticConfiguredModels()
+	for _, name := range staticConfiguredModelNames() {
+		resolved := configured[name]
 		for bodyIndex, body := range protocolBodies(name) {
 			f.xaiClient.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
 			f.devinClient.steps = []executeStep{{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}}}
@@ -754,7 +767,7 @@ func TestExecuteManagedAffinitySkipsWrongProviderWithoutCrossProviderCredential(
 		wantProvider provider.Kind
 	}{
 		{name: "xAI model with Devin preferred", model: "grok-4.5", preferredXAI: false, wantProvider: provider.XAI},
-		{name: "Devin model with xAI preferred", model: "kimi-k2-7", preferredXAI: true, wantProvider: provider.Devin},
+		{name: "Devin model with xAI preferred", model: "glm", preferredXAI: true, wantProvider: provider.Devin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMultiProviderFixture(t)
@@ -830,7 +843,7 @@ func TestExecuteDevinUnauthorizedRecoveryPersistsReloginAndFailsOver(t *testing.
 			usage := []usageRecord{}
 			creds := &recordingCredentials{values: map[string]string{first.ID: "devin-one", second.ID: "devin-two"}, recoveryErr: &provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: provider.ErrorClassification{Class: provider.ClassUnauthorized, RetryNext: true, DisableAccount: true, ReloginRequired: true, CooldownScope: provider.CooldownAccount, PublicStatus: http.StatusUnauthorized, PublicCode: "provider_authentication_error", PublicMessage: "account requires login"}}}
 			client := &fakeGeneration{ledger: &ledger}
-			catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+			catalog := fakeCatalog{ledger: &ledger, models: staticConfiguredModels()}
 			registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
 				"devin/devin": {Policy: passthroughPolicy{}, Generation: client, Credentials: creds},
 			}}
@@ -841,7 +854,7 @@ func TestExecuteDevinUnauthorizedRecoveryPersistsReloginAndFailsOver(t *testing.
 				{err: &provider.UpstreamError{Provider: provider.Devin, Status: status, Classification: provider.ErrorClassification{Class: provider.ClassUnauthorized, RefreshSame: true, RetryNext: true, CooldownScope: provider.CooldownAccount, PublicStatus: status, PublicCode: "provider_authentication_error"}}},
 				{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}},
 			}
-			result, err := executor.Execute(ctx, Request{Model: "kimi-k2-7", Body: []byte(`{"model":"kimi-k2-7"}`), PreferredAccountID: first.ID})
+			result, err := executor.Execute(ctx, Request{Model: "glm", Body: []byte(`{"model":"glm"}`), PreferredAccountID: first.ID})
 			if err != nil {
 				t.Fatalf("err=%v", err)
 			}
@@ -972,7 +985,7 @@ func TestExecuteDevinRateLimitCooldownFailsOverAndClassifiesRateLimit(t *testing
 	usage := []usageRecord{}
 	creds := &recordingCredentials{values: map[string]string{first.ID: "devin-one", second.ID: "devin-two"}}
 	client := &fakeGeneration{ledger: &ledger}
-	catalog := fakeCatalog{ledger: &ledger, models: staticFiveModels()}
+	catalog := fakeCatalog{ledger: &ledger, models: staticConfiguredModels()}
 	registry := fakeRegistry{ledger: &ledger, caps: map[string]provider.Capabilities{
 		"devin/devin": {Policy: passthroughPolicy{}, Generation: client, Credentials: creds},
 	}}
@@ -983,7 +996,7 @@ func TestExecuteDevinRateLimitCooldownFailsOverAndClassifiesRateLimit(t *testing
 		{err: &provider.UpstreamError{Provider: provider.Devin, Status: http.StatusTooManyRequests, Classification: provider.ErrorClassification{Class: provider.ClassRateLimit, RetryNext: true, CooldownScope: provider.CooldownModel, Cooldown: time.Minute, PublicStatus: http.StatusTooManyRequests, PublicCode: "rate_limit_exceeded"}}},
 		{events: []provider.Event{{Data: []byte(`{"type":"response.completed"}`)}}},
 	}
-	result, err := executor.Execute(ctx, Request{Model: "swe-1-6-slow", Body: []byte(`{"model":"swe-1-6-slow"}`), PreferredAccountID: first.ID})
+	result, err := executor.Execute(ctx, Request{Model: "swe-1-6", Body: []byte(`{"model":"swe-1-6"}`), PreferredAccountID: first.ID})
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
@@ -1005,11 +1018,11 @@ func TestExecuteDevinRecordsTerminalUsageExactlyOnce(t *testing.T) {
 		{Event: "response.output_text.delta", Data: []byte(`{"type":"response.output_text.delta"}`)},
 		{Event: "response.completed", Data: []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":19,"output_tokens":29}}}`)},
 	}}}
-	result, err := f.executor.Execute(context.Background(), Request{Model: "kimi-k2-7", Body: []byte(`{"model":"kimi-k2-7"}`)})
+	result, err := f.executor.Execute(context.Background(), Request{Model: "glm", Body: []byte(`{"model":"glm"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Model != "kimi-k2-7" {
+	if result.Model != "glm-5-2" {
 		t.Fatalf("model=%q", result.Model)
 	}
 	if len(*f.usage) != 1 {
@@ -1028,7 +1041,7 @@ func TestExecuteRejectsDevinModelWhenGenerationTrioMissing(t *testing.T) {
 	f := newMultiProviderFixture(t)
 	defer f.close()
 	ctx := context.Background()
-	original := []byte(`{"model":"kimi-k2-7"}`)
+	original := []byte(`{"model":"glm"}`)
 	before := len(f.devinCreds.credentialIDs)
 	// Strip the Devin capability registration before any Execute so the Devin
 	// static model has no registered generation trio: the model must be
@@ -1037,7 +1050,7 @@ func TestExecuteRejectsDevinModelWhenGenerationTrioMissing(t *testing.T) {
 	f.executor.registry = fakeRegistry{ledger: f.ledger, caps: map[string]provider.Capabilities{
 		"xai/xai": {Policy: ledgerPolicy{ledger: f.ledger, policy: xai.RequestPolicy{}}, Generation: f.xaiClient, Credentials: f.xaiCreds},
 	}}
-	_, err := f.executor.Execute(ctx, Request{Model: "kimi-k2-7", Body: original})
+	_, err := f.executor.Execute(ctx, Request{Model: "glm", Body: original})
 	if !errors.Is(err, ErrModelUnavailable) {
 		t.Fatalf("err=%v want ErrModelUnavailable", err)
 	}

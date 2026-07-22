@@ -512,7 +512,7 @@ func newSmokeRuntime(t *testing.T, dataDir string) *smokeRuntime {
 	cfg.Server.Listen = "127.0.0.1:0"
 	cfg.Devin.OAuth.CallbackOrigin = "http://127.0.0.1:59653"
 	cfg.Devin.OAuth.CallbackPath = "/callback"
-	cfg.Models.Allowlist = []string{"grok-4.5", "kimi-k2-7", "glm-5-2", "swe-1-6-slow"}
+	cfg.Models.Allowlist = []string{"grok-4.5", "glm-5-2", "swe-1-6", "swe-1-7"}
 	cfg.Models.Aliases = map[string]string{"grok": "grok-4.5"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate config: %v", err)
@@ -1265,10 +1265,10 @@ func TestC12SmokeHarness(t *testing.T) {
 	// === Phase 2: Provider × protocol × stream matrix with exact ledger ===
 	t.Run("generation_matrix", func(t *testing.T) {
 		sr.ledger.reset()
-		// Every public model the catalog exposes: the grok alias, its canonical
-		// grok-4.5 target, and all three Devin models (kimi-k2-7, glm-5-2,
-		// swe-1-6-slow). Each is dispatched across all three protocols and both
-		// stream modes, producing an exact ledger entry per case.
+		// Every public model the catalog exposes: the three concise aliases and
+		// their four canonical targets. Each is dispatched across all three
+		// protocols and both stream modes, producing an exact ledger entry per
+		// case.
 		models := []struct {
 			public    string
 			upstream  string
@@ -1278,9 +1278,11 @@ func TestC12SmokeHarness(t *testing.T) {
 		}{
 			{"grok-4.5", "grok-4.5", provider.XAI, "xai", true},
 			{"grok", "grok-4.5", provider.XAI, "xai", true},
-			{"kimi-k2-7", "kimi-k2-7", provider.Devin, "devin", false},
+			{"glm", "glm-5-2", provider.Devin, "devin", false},
+			{"swe", "swe-1-7", provider.Devin, "devin", false},
 			{"glm-5-2", "glm-5-2", provider.Devin, "devin", false},
-			{"swe-1-6-slow", "swe-1-6-slow", provider.Devin, "devin", false},
+			{"swe-1-6", "swe-1-6", provider.Devin, "devin", false},
+			{"swe-1-7", "swe-1-7", provider.Devin, "devin", false},
 		}
 		protocols := []struct {
 			name string
@@ -1351,7 +1353,7 @@ func TestC12SmokeHarness(t *testing.T) {
 				t.Fatalf("Devin call has wrong policy key: %+v", e)
 			}
 		}
-		t.Logf("ledger: %d exact entries across 5 models × 3 protocols × 2 stream modes", len(got))
+		t.Logf("ledger: %d exact entries across 7 models × 3 protocols × 2 stream modes", len(got))
 	})
 
 	// === Phase 3: Model/readiness/admin/web/CLI projections ===
@@ -1365,7 +1367,7 @@ func TestC12SmokeHarness(t *testing.T) {
 		resp = sr.doRequest(t, http.MethodGet, "/v1/models", "")
 		assertStatus(t, resp, http.StatusOK, "models")
 		modelsBody := readBody(t, resp)
-		for _, marker := range []string{"grok", "kimi", "glm-5-2", "swe-1-6-slow"} {
+		for _, marker := range []string{"grok", "grok-4.5", "glm", "glm-5-2", "swe", "swe-1-6", "swe-1-7"} {
 			if !strings.Contains(string(modelsBody), marker) {
 				t.Fatalf("models response missing %q: %s", marker, modelsBody)
 			}
@@ -1525,7 +1527,7 @@ func TestC12SmokeHarness(t *testing.T) {
 		assertStatus(t, resp, http.StatusOK, "post-restart xAI chat")
 		_ = resp.Body.Close()
 
-		resp = sr2.doRequest(t, http.MethodPost, "/v1/chat/completions", `{"model":"kimi-k2-7","messages":[{"role":"user","content":"continue"}]}`)
+		resp = sr2.doRequest(t, http.MethodPost, "/v1/chat/completions", `{"model":"glm","messages":[{"role":"user","content":"continue"}]}`)
 		assertStatus(t, resp, http.StatusOK, "post-restart Devin chat")
 		_ = resp.Body.Close()
 
