@@ -80,11 +80,22 @@ func TestModelsPageShowsAliasBesideCanonicalModel(t *testing.T) {
 	}
 }
 
-func TestDashboardUsesProductionReadiness(t *testing.T) {
+func TestDashboardDistinguishesConnectedAccountsFromDefaultModelReadiness(t *testing.T) {
 	fixture := newWebFixture(t, func(options *Options) { options.Services.Readiness = fakeReadinessService{ready: false} })
+	fixture.accounts.summaries = append(fixture.accounts.summaries, AccountSummary{Provider: ProviderDevin, ID: "devin_test", Label: "Devin account", Enabled: true, Status: "ready", StatusLabel: "Ready"})
 	browser, _ := loginBrowser(t, fixture)
 	response, body := browser.request(t, http.MethodGet, "/admin/", nil)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Account setup required") || strings.Contains(body, "Ready for requests") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Default model unavailable") || !strings.Contains(body, "Other provider models may still be available") || !strings.Contains(body, "<dt>Ready accounts</dt><dd>2</dd>") || strings.Contains(body, "Account setup required") || strings.Contains(body, "Connect account") {
+		t.Fatalf("dashboard=%d %s", response.StatusCode, body)
+	}
+}
+
+func TestDashboardRequestsSetupWhenNoAccountIsReady(t *testing.T) {
+	fixture := newWebFixture(t, func(options *Options) { options.Services.Readiness = fakeReadinessService{ready: false} })
+	fixture.accounts.summaries = nil
+	browser, _ := loginBrowser(t, fixture)
+	response, body := browser.request(t, http.MethodGet, "/admin/", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "Account setup required") || !strings.Contains(body, "Connect account") || strings.Contains(body, "Default model unavailable") {
 		t.Fatalf("dashboard=%d %s", response.StatusCode, body)
 	}
 }

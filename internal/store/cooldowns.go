@@ -20,7 +20,7 @@ func (r *CooldownRepository) Put(ctx context.Context, value Cooldown) error {
 	return err
 }
 func (r *CooldownRepository) Get(ctx context.Context, accountID, model string, now time.Time) (Cooldown, error) {
-	if _, err := r.db.ExecContext(ctx, `UPDATE account_model_states SET cooldown_until=NULL,backoff_level=0 WHERE account_id=? AND model=? AND cooldown_until IS NOT NULL AND cooldown_until<=?`, accountID, model, now.Unix()); err != nil {
+	if _, err := r.db.ExecContext(ctx, `UPDATE account_model_states SET cooldown_until=NULL,backoff_level=CASE WHEN last_error_class='rate_limit' THEN backoff_level ELSE 0 END WHERE account_id=? AND model=? AND cooldown_until IS NOT NULL AND cooldown_until<=?`, accountID, model, now.Unix()); err != nil {
 		return Cooldown{}, err
 	}
 	var v Cooldown
@@ -45,8 +45,14 @@ func (r *CooldownRepository) AdvanceRateLimit(ctx context.Context, accountID, mo
 		INSERT INTO account_model_states(account_id,model,cooldown_until,backoff_level,last_error_class,last_error_at)
 		VALUES(?,?,?,1,?,?)
 		ON CONFLICT(account_id,model) DO UPDATE SET
-			backoff_level=CASE WHEN account_model_states.cooldown_until IS NULL OR account_model_states.cooldown_until<=? THEN 1 ELSE MIN(account_model_states.backoff_level+1,6) END,
-			cooldown_until=?+CASE WHEN account_model_states.cooldown_until IS NULL OR account_model_states.cooldown_until<=? THEN 60 WHEN account_model_states.backoff_level<=1 THEN 120 WHEN account_model_states.backoff_level=2 THEN 240 WHEN account_model_states.backoff_level=3 THEN 480 WHEN account_model_states.backoff_level=4 THEN 960 ELSE 1800 END,
+			backoff_level=CASE
+				WHEN account_model_states.cooldown_until IS NOT NULL AND account_model_states.cooldown_until>? THEN account_model_states.backoff_level
+				ELSE MIN(account_model_states.backoff_level+1,6)
+			END,
+			cooldown_until=CASE
+				WHEN account_model_states.cooldown_until IS NOT NULL AND account_model_states.cooldown_until>? THEN account_model_states.cooldown_until
+				ELSE ?+CASE WHEN account_model_states.backoff_level<=0 THEN 60 WHEN account_model_states.backoff_level=1 THEN 120 WHEN account_model_states.backoff_level=2 THEN 240 WHEN account_model_states.backoff_level=3 THEN 480 WHEN account_model_states.backoff_level=4 THEN 960 ELSE 1800 END
+			END,
 			last_error_class=excluded.last_error_class,last_error_at=excluded.last_error_at
 		RETURNING account_id,model,cooldown_until,backoff_level,COALESCE(last_error_class,''),last_error_at`,
 		accountID, model, now.Add(time.Minute).Unix(), errorClass, now.Unix(), now.Unix(), now.Unix(), now.Unix(),
@@ -60,7 +66,7 @@ func (r *CooldownRepository) AdvanceRateLimit(ctx context.Context, accountID, mo
 }
 
 func (r *CooldownRepository) PromoteExpired(ctx context.Context, now time.Time) (int64, error) {
-	result, err := r.db.ExecContext(ctx, `UPDATE account_model_states SET cooldown_until=NULL,backoff_level=0 WHERE rowid IN (SELECT rowid FROM account_model_states WHERE cooldown_until IS NOT NULL AND cooldown_until<=? LIMIT ?)`, now.Unix(), cleanupBatchSize)
+	result, err := r.db.ExecContext(ctx, `UPDATE account_model_states SET cooldown_until=NULL,backoff_level=CASE WHEN last_error_class='rate_limit' THEN backoff_level ELSE 0 END WHERE rowid IN (SELECT rowid FROM account_model_states WHERE cooldown_until IS NOT NULL AND cooldown_until<=? LIMIT ?)`, now.Unix(), cleanupBatchSize)
 	if err != nil {
 		return 0, err
 	}

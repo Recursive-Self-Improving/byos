@@ -120,8 +120,13 @@ func TestCapabilityAndCooldownSurviveReopen(t *testing.T) {
 	if err != nil || len(values) != 1 || values[0].SupportsBackendSearch == nil || !*values[0].SupportsBackendSearch {
 		t.Fatalf("capabilities = %+v, %v", values, err)
 	}
-	state, err := NewCooldownRepository(second.DB).Get(ctx, account.ID, "grok-4.5", time.Now().UTC())
-	if err != nil || state.Until != nil || state.BackoffLevel != 0 {
+	restoredCooldowns := NewCooldownRepository(second.DB)
+	promoted, err := restoredCooldowns.PromoteExpired(ctx, time.Now().UTC())
+	if err != nil || promoted != 1 {
+		t.Fatalf("promoted cooldowns = %d, %v", promoted, err)
+	}
+	state, err := restoredCooldowns.Get(ctx, account.ID, "grok-4.5", time.Now().UTC())
+	if err != nil || state.Until != nil || state.BackoffLevel != 3 {
 		t.Fatalf("cooldown = %+v, %v", state, err)
 	}
 }
